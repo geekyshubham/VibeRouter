@@ -1727,36 +1727,66 @@ enum NativeUsageFetcher {
         let error: String?
     }
 
+    /// Antigravity IDE + Cockpit Tools hit **daily**-cloudcode by default.
+    /// Prod `cloudcode-pa` often returns stale full remaining (e.g. 1.0) while
+    /// daily shows the real 5h/weekly burn — that was the "limits never drop" bug.
+    private static let cloudCodeBaseURLs = [
+        "https://daily-cloudcode-pa.googleapis.com",
+        "https://cloudcode-pa.googleapis.com",
+    ]
+
+    /// Match Cockpit / IDE UA shape: `antigravity/<ver> darwin/arm64`.
+    private static var cloudCodeUserAgent: String {
+        let ver = Bundle(path: "/Applications/Antigravity IDE.app")
+            .flatMap { $0.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
+            ?? Bundle(path: "/Applications/Antigravity.app")
+            .flatMap { $0.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
+            ?? "1.20.5"
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "amd64"
+        #endif
+        return "antigravity/\(ver) darwin/\(arch)"
+    }
+
     private static func postCloudCodeJSON(
         path: String,
         accessToken: String,
         body: Data
     ) async -> CloudCodeHTTPResult {
-        guard let url = URL(string: "https://cloudcode-pa.googleapis.com/\(path)") else {
-            return CloudCodeHTTPResult(status: nil, json: nil, error: "Invalid usage URL")
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("antigravity", forHTTPHeaderField: "User-Agent")
-        request.setValue("gl-node/22.21.1", forHTTPHeaderField: "X-Goog-Api-Client")
-        request.httpBody = body
+        let ua = cloudCodeUserAgent
+        var last: CloudCodeHTTPResult = CloudCodeHTTPResult(status: nil, json: nil, error: "No Cloud Code host tried")
+        for base in cloudCodeBaseURLs {
+            guard let url = URL(string: "\(base)/\(path)") else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(ua, forHTTPHeaderField: "User-Agent")
+            request.setValue("gl-node/22.21.1", forHTTPHeaderField: "X-Goog-Api-Client")
+            request.httpBody = body
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else {
-                return CloudCodeHTTPResult(status: nil, json: nil, error: "Invalid response")
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    last = CloudCodeHTTPResult(status: nil, json: nil, error: "Invalid response")
+                    continue
+                }
+                guard (200...299).contains(http.statusCode) else {
+                    last = CloudCodeHTTPResult(status: http.statusCode, json: nil, error: nil)
+                    // 401/403 are auth problems — don't bother with the fallback host.
+                    if http.statusCode == 401 || http.statusCode == 403 { return last }
+                    continue
+                }
+                let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+                return CloudCodeHTTPResult(status: http.statusCode, json: json, error: nil)
+            } catch {
+                last = CloudCodeHTTPResult(status: nil, json: nil, error: error.localizedDescription)
             }
-            guard (200...299).contains(http.statusCode) else {
-                return CloudCodeHTTPResult(status: http.statusCode, json: nil, error: nil)
-            }
-            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            return CloudCodeHTTPResult(status: http.statusCode, json: json, error: nil)
-        } catch {
-            return CloudCodeHTTPResult(status: nil, json: nil, error: error.localizedDescription)
         }
+        return last
     }
 
     /// Maps `retrieveUserQuotaSummary` groups into sub-accounts.
