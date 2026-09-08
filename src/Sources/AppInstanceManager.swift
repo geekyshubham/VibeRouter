@@ -91,6 +91,44 @@ enum AppInstanceManager {
         save(list)
     }
 
+    /// Copy an instance (new id + fresh data dir) keeping provider + bound account.
+    static func duplicate(_ instance: ManagedAppInstance, name: String? = nil) -> ManagedAppInstance {
+        let copy = ManagedAppInstance.make(
+            name: name ?? "\(instance.name) copy",
+            provider: instance.serviceType ?? .cursor
+        )
+        var out = copy
+        out.boundAccountFile = instance.boundAccountFile
+        out.extraArgs = instance.extraArgs
+        upsert(out)
+        return out
+    }
+
+    static func revealInFinder(_ instance: ManagedAppInstance) {
+        NSWorkspace.shared.open(URL(fileURLWithPath: instance.userDataDir))
+    }
+
+    /// True when a process was started with this instance's data dir.
+    /// Best-effort via pgrep (matches the `--user-data-dir <dir>` arg or env).
+    static func isRunning(_ instance: ManagedAppInstance) -> Bool {
+        guard !instance.userDataDir.isEmpty else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+        process.arguments = ["-f", instance.userDataDir]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+            guard process.terminationStatus == 0 else { return false }
+            let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            return !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        } catch {
+            return false
+        }
+    }
+
     /// Inject the bound account (if any) and start a new isolated process.
     static func launch(_ instance: ManagedAppInstance) async -> AppInstanceLaunchResult {
         guard let type = instance.serviceType else {
@@ -152,7 +190,7 @@ enum AppInstanceManager {
         case .gemini:
             try injectGemini(payload, into: dataDir)
         case .antigravity:
-            try injectCursorLikeOAuth(payload, into: dataDir, keys: CursorAuthKeys.antigravityFallback)
+            try injectAntigravity(payload, into: dataDir)
         case .copilot:
             try injectCopilot(payload, into: dataDir)
         case .kiro:
@@ -171,7 +209,53 @@ enum AppInstanceManager {
             "cursor.email",
         ]
         static let kiro = ["kiro.accessToken", "kiro.refreshToken", "kiro.email"]
-        static let antigravityFallback = ["cursorAuth/accessToken", "cursorAuth/refreshToken", "cursorAuth/cachedEmail"]
+    }
+
+    /// Isolated Antigravity profile: write the real IDE oauthToken blob
+    /// (`antigravityUnifiedStateSync.oauthToken`) into the instance's own
+    /// `state.vscdb`, same wire format Cockpit/IDE use. Falls back to plain
+    /// keys only if the blob build fails.
+    private static func injectAntigravity(_ payload: [String: Any], into dataDir: URL) throws {
+        let access = stringValue(payload, keys: ["access_token"]) ?? ""
+        guard !access.isEmpty else { throw InjectionError.missingToken }
+        let refresh = stringValue(payload, keys: ["refresh_token"])
+        let expirySeconds: Int = {
+            if let expired = stringValue(payload, keys: ["expired"]),
+               let date = ISO8601DateFormatter().date(from: expired)
+            {
+                return Int(date.timeIntervalSince1970)
+            }
+            if let expiresIn = payload["expires_in"] as? Int, expiresIn > 0 {
+                return Int(Date().addingTimeInterval(TimeInterval(expiresIn)).timeIntervalSince1970)
+            }
+            return Int(Date().addingTimeInterval(3600).timeIntervalSince1970)
+        }()
+        let db = dataDir.appendingPathComponent("User/globalStorage/state.vscdb")
+        do {
+            let blob = try NativeSessionManager.buildAntigravityOAuthTokenValue(
+                accessToken: access,
+                refreshToken: refresh,
+                expirySeconds: expirySeconds,
+                existingValue: VscdbStore.readString(
+                    dbURL: db,
+                    key: "antigravityUnifiedStateSync.oauthToken"
+                )
+            )
+            try VscdbStore.writeString(dbURL: db, key: "antigravityUnifiedStateSync.oauthToken", value: blob)
+        } catch {
+            // Best-effort fallback so a stale helper never blocks instance launch.
+            try VscdbStore.writeString(dbURL: db, key: "antigravity.accessToken", value: access)
+            if let refresh, !refresh.isEmpty {
+                try VscdbStore.writeString(dbURL: db, key: "antigravity.refreshToken", value: refresh)
+            }
+            if let email = stringValue(payload, keys: ["email"]), !email.isEmpty {
+                try VscdbStore.writeString(dbURL: db, key: "antigravity.email", value: email)
+            }
+        }
+        if let email = stringValue(payload, keys: ["email"]), !email.isEmpty {
+            // Companion pointer some tooling reads for display.
+            try? VscdbStore.writeString(dbURL: db, key: "antigravity.cachedEmail", value: email)
+        }
     }
 
     private static func injectCursor(_ payload: [String: Any], into dataDir: URL) throws {
@@ -312,6 +396,13 @@ enum AppInstanceManager {
         }
     }
 
+    /// True when the backing app/CLI exists, so Start can work.
+    /// Used by the UI to disable Start with an explanatory badge instead of
+    /// failing at launch time.
+    static func isAppInstalled(for type: ServiceType) -> Bool {
+        executable(for: type) != nil
+    }
+
     private struct ExecutableSpec {
         let executable: URL
         let arguments: (URL) -> [String]
@@ -329,6 +420,7 @@ enum AppInstanceManager {
                 ?? macApp("Code", userDataFlag: "--user-data-dir")
         case .kiro:
             return macApp("Kiro", userDataFlag: "--user-data-dir")
+                ?? macApp("Kiro CLI", userDataFlag: "--user-data-dir")
         case .codex:
             return macApp("Codex", userDataFlag: nil) ?? macApp("ChatGPT", userDataFlag: nil)
         case .claude:
@@ -344,31 +436,50 @@ enum AppInstanceManager {
     }
 
     private static func macApp(_ name: String, userDataFlag: String?) -> ExecutableSpec? {
-        let bundle = URL(fileURLWithPath: "/Applications/\(name).app")
-        let exeName = name == "Visual Studio Code" ? "Electron" : name
-        let exe = bundle.appendingPathComponent("Contents/MacOS/\(exeName)")
-        if FileManager.default.isExecutableFile(atPath: exe.path) {
-            return ExecutableSpec(executable: exe) { dataDir in
-                if let userDataFlag {
-                    return [userDataFlag, dataDir.path]
-                }
-                return []
+        // Candidate bundle locations: /Applications first, then LaunchServices.
+        var bundleURLs: [URL] = []
+        let direct = URL(fileURLWithPath: "/Applications/\(name).app")
+        if FileManager.default.fileExists(atPath: direct.path) {
+            bundleURLs.append(direct)
+        }
+        let bundleID = bundleIdentifier(forAppName: name)
+        if !bundleID.isEmpty,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID),
+           !bundleURLs.contains(url)
+        {
+            bundleURLs.append(url)
+        }
+        for bundle in bundleURLs {
+            if let spec = executableSpec(in: bundle, userDataFlag: userDataFlag) {
+                return spec
             }
         }
-        // VS Code binary is often named "Code"
-        let alt = bundle.appendingPathComponent("Contents/MacOS/Code")
-        if FileManager.default.isExecutableFile(atPath: alt.path) {
-            return ExecutableSpec(executable: alt) { dataDir in
-                if let userDataFlag {
-                    return [userDataFlag, dataDir.path]
-                }
-                return []
-            }
+        return nil
+    }
+
+    /// Resolve the real executable inside an app bundle via Info.plist
+    /// `CFBundleExecutable` (Electron apps like Antigravity IDE ship `Electron`,
+    /// not the app name). Falls back to common exe names.
+    private static func executableSpec(in bundle: URL, userDataFlag: String?) -> ExecutableSpec? {
+        var candidates: [String] = []
+        let plist = bundle.appendingPathComponent("Contents/Info.plist")
+        if let data = try? Data(contentsOf: plist),
+           let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
+           let exe = info["CFBundleExecutable"] as? String,
+           !exe.isEmpty
+        {
+            candidates.append(exe)
         }
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier(forAppName: name)) {
-            let resolved = url.appendingPathComponent("Contents/MacOS").appendingPathComponent(url.deletingPathExtension().lastPathComponent)
-            if FileManager.default.isExecutableFile(atPath: resolved.path) {
-                return ExecutableSpec(executable: resolved) { dataDir in
+        // Common fallbacks for Electron / VS Code forks.
+        candidates.append(contentsOf: [
+            bundle.deletingPathExtension().lastPathComponent,
+            "Electron",
+            "Code",
+        ])
+        for exeName in candidates {
+            let exe = bundle.appendingPathComponent("Contents/MacOS/\(exeName)")
+            if FileManager.default.isExecutableFile(atPath: exe.path) {
+                return ExecutableSpec(executable: exe) { dataDir in
                     if let userDataFlag {
                         return [userDataFlag, dataDir.path]
                     }
@@ -386,8 +497,10 @@ enum AppInstanceManager {
         case "Claude": return "com.anthropic.claudefordesktop"
         case "Codex": return "com.openai.codex"
         case "ChatGPT": return "com.openai.chat"
-        case "Antigravity IDE": return "com.google.antigravity-ide"
+        case "Antigravity IDE", "Antigravity": return "com.google.antigravity-ide"
         case "Kiro": return "dev.kiro.desktop"
+        case "Kiro CLI": return "com.amazon.codewhisperer"
+        case "Gemini": return "com.google.GeminiMacOS"
         default: return ""
         }
     }

@@ -96,6 +96,21 @@ final class AppSettings: ObservableObject {
         didSet { persist(autoWakeGraceMinutes.clamped(to: 0...60), forKey: Keys.autoWakeGraceMinutes) }
     }
 
+    // MARK: - Antigravity auto-failover
+
+    /// Automatically switch the native Antigravity IDE session to the next healthy
+    /// account when the current one is exhausted (>= threshold or quota error).
+    /// Proxy-level failover (fill-first + 429 retry) is always on in the bundled
+    /// config; this controls the native IDE pointer (`current_account.json`).
+    @Published var antigravityAutoSwitchEnabled: Bool {
+        didSet { persist(antigravityAutoSwitchEnabled, forKey: Keys.antigravityAutoSwitchEnabled) }
+    }
+
+    /// Peak used% at or above which an Antigravity account counts as exhausted.
+    @Published var antigravityExhaustionThreshold: Double {
+        didSet { persist(antigravityExhaustionThreshold.clamped(to: 50...100), forKey: Keys.antigravityExhaustionThreshold) }
+    }
+
     // MARK: Derived
 
     var usageRefreshInterval: TimeInterval { usageRefreshMinutes.clamped(to: 1...30) * 60 }
@@ -122,6 +137,8 @@ final class AppSettings: ObservableObject {
         confirmBeforeSwitch = defaults.bool(forKey: Keys.confirmBeforeSwitch, default: true)
         autoWakeEnabled = defaults.bool(forKey: Keys.autoWakeEnabled, default: false)
         autoWakeGraceMinutes = defaults.number(forKey: Keys.autoWakeGraceMinutes, default: 3)
+        antigravityAutoSwitchEnabled = defaults.bool(forKey: Keys.antigravityAutoSwitchEnabled, default: true)
+        antigravityExhaustionThreshold = defaults.number(forKey: Keys.antigravityExhaustionThreshold, default: 95)
 
         if let stored = defaults.array(forKey: Keys.autoWakeProviderIDs) as? [String] {
             autoWakeProviderIDs = Set(stored)
@@ -152,6 +169,8 @@ final class AppSettings: ObservableObject {
         static let autoWakeEnabled = "ultra.autoWakeEnabled"
         static let autoWakeProviderIDs = "ultra.autoWakeProviderIDs"
         static let autoWakeGraceMinutes = "ultra.autoWakeGraceMinutes"
+        static let antigravityAutoSwitchEnabled = "ultra.antigravityAutoSwitchEnabled"
+        static let antigravityExhaustionThreshold = "ultra.antigravityExhaustionThreshold"
     }
 }
 

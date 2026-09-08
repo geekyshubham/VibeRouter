@@ -37,9 +37,21 @@ request-retry: 3
 request-timeout: "10m"
 
 # Quota management
+# switch-project / switch-preview-model: try another project/model on 429.
+# antigravity-credits: when all free-tier Antigravity auths are exhausted, retry
+# Claude models with an auth that still has Google One AI credits (last resort).
 quota-exceeded:
   switch-project: true
   switch-preview-model: true
+  antigravity-credits: true
+
+# Credential selection when several accounts match a request.
+# round-robin (default) spreads load; fill-first uses the first healthy account
+# until it is exhausted, then moves to the next — easier to reason about with
+# 10 Antigravity logins. Automatic failover to the next healthy auth on
+# 429/quota errors is always enabled regardless of strategy.
+routing:
+  strategy: "fill-first"
 
 # OAuth providers for local subscriptions
 # Claude, Codex (GPT), Gemini tokens in ~/.cli-proxy-api/ will be used

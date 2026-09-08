@@ -27,9 +27,19 @@ enum NativeUsageFetcher {
         case .copilot:
             return await fetchCopilotUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .gemini:
-            return await fetchGeminiUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+            return await fetchGeminiUsage(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload,
+                authFile: authFile
+            )
         case .antigravity:
-            return await fetchAntigravityUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+            return await fetchAntigravityUsage(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload,
+                authFile: authFile
+            )
         case .grok:
             return await fetchGrokUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .kiro:
@@ -1498,9 +1508,19 @@ enum NativeUsageFetcher {
     private static func fetchGeminiUsage(
         authAccountID: String,
         providerID: String,
-        payload: [String: Any]
+        payload: [String: Any],
+        authFile: URL
     ) async -> ProviderUsageSnapshot {
-        await fetchCloudCodeUsage(
+        var payload = payload
+        // Proactive refresh: Google access tokens are ~1h. Without this the quota
+        // call 401s and the UI keeps showing the last cached value (e.g. stuck 5%).
+        if TokenRefreshService.shouldRefresh(payload: payload) {
+            _ = await TokenRefreshService.refreshAccountFile(authFile)
+            if let latest = readAuthPayload(at: authFile) {
+                payload = TokenRefreshService.flattenedAuth(latest)
+            }
+        }
+        var snapshot = await fetchCloudCodeUsage(
             authAccountID: authAccountID,
             providerID: providerID,
             accessToken: extractGeminiAccessToken(from: payload),
@@ -1509,6 +1529,26 @@ enum NativeUsageFetcher {
             source: "Gemini OAuth",
             authPayload: payload
         )
+        // One retry with a forced refresh when the token was rejected mid-flight.
+        if (snapshot.errorMessage ?? "").localizedCaseInsensitiveContains("refreshing")
+            || (snapshot.errorMessage ?? "").localizedCaseInsensitiveContains("expired")
+        {
+            if await TokenRefreshService.refreshAccountFile(authFile, force: true),
+               let latest = readAuthPayload(at: authFile)
+            {
+                let flat = TokenRefreshService.flattenedAuth(latest)
+                snapshot = await fetchCloudCodeUsage(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accessToken: extractGeminiAccessToken(from: flat),
+                    projectID: stringValue(flat, keys: ["project_id"]),
+                    email: stringValue(flat, keys: ["email"]) ?? stringValue(payload, keys: ["email"]),
+                    source: "Gemini OAuth",
+                    authPayload: flat
+                )
+            }
+        }
+        return snapshot
     }
 
     private static func extractGeminiAccessToken(from payload: [String: Any]) -> String? {
@@ -1526,9 +1566,17 @@ enum NativeUsageFetcher {
     private static func fetchAntigravityUsage(
         authAccountID: String,
         providerID: String,
-        payload: [String: Any]
+        payload: [String: Any],
+        authFile: URL
     ) async -> ProviderUsageSnapshot {
-        await fetchCloudCodeUsage(
+        var payload = payload
+        if TokenRefreshService.shouldRefresh(payload: payload) {
+            _ = await TokenRefreshService.refreshAccountFile(authFile)
+            if let latest = readAuthPayload(at: authFile) {
+                payload = TokenRefreshService.flattenedAuth(latest)
+            }
+        }
+        var snapshot = await fetchCloudCodeUsage(
             authAccountID: authAccountID,
             providerID: providerID,
             accessToken: stringValue(payload, keys: ["access_token"]),
@@ -1537,6 +1585,25 @@ enum NativeUsageFetcher {
             source: "Antigravity OAuth",
             authPayload: payload
         )
+        if (snapshot.errorMessage ?? "").localizedCaseInsensitiveContains("refreshing")
+            || (snapshot.errorMessage ?? "").localizedCaseInsensitiveContains("expired")
+        {
+            if await TokenRefreshService.refreshAccountFile(authFile, force: true),
+               let latest = readAuthPayload(at: authFile)
+            {
+                let flat = TokenRefreshService.flattenedAuth(latest)
+                snapshot = await fetchCloudCodeUsage(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    accessToken: stringValue(flat, keys: ["access_token"]),
+                    projectID: stringValue(flat, keys: ["project_id"]),
+                    email: stringValue(flat, keys: ["email"]) ?? stringValue(payload, keys: ["email"]),
+                    source: "Antigravity OAuth",
+                    authPayload: flat
+                )
+            }
+        }
+        return snapshot
     }
 
     private static func fetchCloudCodeUsage(
@@ -1592,6 +1659,13 @@ enum NativeUsageFetcher {
                 for group in groups {
                     flatWindows.append(contentsOf: group.windows)
                 }
+                NSLog(
+                    "[CloudCode] %@ (%@) → %d windows (%@)",
+                    email ?? authAccountID,
+                    providerID,
+                    flatWindows.count,
+                    flatWindows.map { "\($0.label ?? "?") \(Int($0.usedPercent))%" }.joined(separator: ", ")
+                )
                 return ProviderUsageSnapshot(
                     id: authAccountID,
                     providerID: providerID,
@@ -1604,6 +1678,13 @@ enum NativeUsageFetcher {
                     updatedAt: Date(),
                     errorMessage: nil,
                     isRefreshing: false
+                )
+            } else {
+                NSLog(
+                    "[CloudCode] %@ (%@) → summary returned no pool windows (groups=%@)",
+                    email ?? authAccountID,
+                    providerID,
+                    String(describing: (summaryBody["groups"] as? [[String: Any]])?.count)
                 )
             }
         }
@@ -1681,6 +1762,9 @@ enum NativeUsageFetcher {
     /// Maps `retrieveUserQuotaSummary` groups into sub-accounts.
     /// Cloud Code `remainingFraction` is **remaining** 0…1 (Cockpit stores remaining%).
     /// We convert to **used%** = (1 − remaining) × 100 to align with Codex `used_percent`.
+    /// Hardened: also accepts 0…100 percent, numeric strings, and missing `window`
+    /// (weekly-only tiers omit the 5h bucket entirely — that is a valid tier shape,
+    /// not an error).
     ///
     /// Expected shape (with project_id):
     /// Gemini Models → gemini-weekly / gemini-5h; Claude and GPT → 3p-weekly / 3p-5h.
@@ -1718,6 +1802,30 @@ enum NativeUsageFetcher {
         }
     }
 
+    /// Normalizes Cloud Code `remainingFraction` to **used%**.
+    /// Accepts 0…1 fractions, 0…100 percents, and numeric strings.
+    /// Missing value → 0% used (treat as full remaining), matching prior `?? 1` behavior.
+    static func cloudCodeUsedPercent(remainingFraction raw: Double?) -> Double {
+        guard let raw else { return 0 }
+        // Heuristic: values > 1.5 cannot be a 0…1 fraction → treat as remaining %.
+        if raw > 1.5 {
+            return clampPercent(100 - raw)
+        }
+        return clampPercent((1 - raw) * 100)
+    }
+
+    /// API displayNames are "Weekly Limit Remaining" etc. We store used% (Codex-style),
+    /// so strip trailing "Remaining" — otherwise "…Remaining 5%" reads as 5% left.
+    static func cloudCodeBucketTitle(_ displayName: String) -> String {
+        var name = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let range = name.range(of: " Remaining", options: [.caseInsensitive, .anchored, .backwards]) {
+            name.removeSubrange(range)
+        } else if name.lowercased() == "remaining" {
+            name = "Limit"
+        }
+        return name.isEmpty ? "Limit" : name
+    }
+
     private static func cloudCodeShortGroupName(_ groupTitle: String) -> String {
         let lower = groupTitle.lowercased()
         if lower.contains("claude") || lower.contains("gpt") || lower.contains("3p") {
@@ -1733,10 +1841,16 @@ enum NativeUsageFetcher {
         let resetTime = stringValue(bucket, keys: ["resetTime"])
         if let resetTime, resetTime.hasPrefix("1970-") { return nil }
 
-        let remaining = doubleValue(bucket, keys: ["remainingFraction"]) ?? 1
-        let usedPercent = clampPercent((1 - remaining) * 100)
+        let remaining = doubleValue(bucket, keys: ["remainingFraction"])
+        // Prefer explicit exhaustion flag when the API sends it (summary rarely does).
+        let usedPercent: Double
+        if bucket["isExhausted"] as? Bool == true {
+            usedPercent = 100
+        } else {
+            usedPercent = cloudCodeUsedPercent(remainingFraction: remaining)
+        }
 
-        let displayName = stringValue(bucket, keys: ["displayName"]) ?? "Limit"
+        let displayName = cloudCodeBucketTitle(stringValue(bucket, keys: ["displayName"]) ?? "Limit")
         let bucketId = (stringValue(bucket, keys: ["bucketId", "id"]) ?? "").lowercased()
         let windowField = (stringValue(bucket, keys: ["window"]) ?? "").lowercased()
         let blob = "\(bucketId) \(windowField) \(displayName.lowercased())"
@@ -2990,8 +3104,14 @@ enum NativeUsageFetcher {
         let resetTime = stringValue(bucket, keys: ["resetTime"])
         if let resetTime, resetTime.hasPrefix("1970-") { return nil }
 
-        let remaining = doubleValue(bucket, keys: ["remainingFraction"]) ?? 1
-        let usedPercent = clampPercent((1 - remaining) * 100)
+        let usedPercent: Double
+        if bucket["isExhausted"] as? Bool == true {
+            usedPercent = 100
+        } else {
+            usedPercent = cloudCodeUsedPercent(
+                remainingFraction: doubleValue(bucket, keys: ["remainingFraction"])
+            )
+        }
         let modelID = stringValue(bucket, keys: ["modelId", "model_id", "name", "bucketId"])
         let title = label.isEmpty ? (modelID ?? "Model") : label
         let resetsAt = parseISO8601(resetTime)
@@ -3008,8 +3128,14 @@ enum NativeUsageFetcher {
         if let resetTime = stringValue(quotaInfo, keys: ["resetTime"]), resetTime.hasPrefix("1970-") {
             return nil
         }
-        let remaining = doubleValue(quotaInfo, keys: ["remainingFraction"]) ?? 1
-        let usedPercent = clampPercent((1 - remaining) * 100)
+        let usedPercent: Double
+        if quotaInfo["isExhausted"] as? Bool == true {
+            usedPercent = 100
+        } else {
+            usedPercent = cloudCodeUsedPercent(
+                remainingFraction: doubleValue(quotaInfo, keys: ["remainingFraction"])
+            )
+        }
         let resetsAt = parseISO8601(stringValue(quotaInfo, keys: ["resetTime"]))
         return RateWindow(
             usedPercent: usedPercent,

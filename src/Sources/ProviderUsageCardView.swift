@@ -68,6 +68,9 @@ struct ProviderUsageCardView: View {
                         .foregroundStyle(.secondary)
                 } else {
                     accountsSection
+                    if serviceType == .antigravity, accounts.count > 1 {
+                        failoverSection
+                    }
                     if hiddenCount > 0 {
                         Button {
                             withAnimation(DS.Motion.expand) { showAllAccounts = true }
@@ -188,6 +191,13 @@ struct ProviderUsageCardView: View {
         }
     }
 
+    /// Antigravity/Gemini Cloud Code UIs (Cockpit) speak in **remaining%**.
+    /// Showing bare used% made full accounts look like "0%" and a 5%-used
+    /// weekly pool look exhausted next to Cockpit's "95% left".
+    private var showsRemainingPrimary: Bool {
+        serviceType == .antigravity || serviceType == .gemini
+    }
+
     private var subtitleText: String {
         if accounts.isEmpty { return "Not connected" }
         let active = activeAccounts.count
@@ -199,7 +209,11 @@ struct ProviderUsageCardView: View {
             parts.append("\(active) active · \(accounts.count) total")
         }
         if pressure > 0 {
-            parts.append("peak \(Int(pressure.rounded()))% used")
+            if showsRemainingPrimary {
+                parts.append("peak \(Int((100 - pressure).rounded()))% left")
+            } else {
+                parts.append("peak \(Int(pressure.rounded()))% used")
+            }
         }
         return parts.joined(separator: " · ")
     }
@@ -301,6 +315,61 @@ struct ProviderUsageCardView: View {
     // MARK: - Cost
 
     @ViewBuilder
+    private var failoverSection: some View {
+        let line = AntigravityAutoRouter.healthLine(
+            accounts: accounts,
+            usageForAccount: usageForAccount
+        )
+        let exhausted = AntigravityAutoRouter.exhaustedAccounts(
+            accounts: accounts,
+            usageForAccount: usageForAccount
+        )
+        VStack(alignment: .leading, spacing: 4) {
+            Divider().opacity(0.2)
+            HStack(spacing: 6) {
+                Image(systemName: exhausted.isEmpty ? "arrow.triangle.2.circlepath.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(exhausted.isEmpty ? tint : .orange)
+                Text(line)
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
+            }
+            .help("Fill-first: proxy tries accounts in order and fails over on 429/quota. Native IDE auto-switch follows the same order when enabled in Settings.")
+            if !exhausted.isEmpty, let next = AntigravityAutoRouter.nextHealthy(accounts: accounts, usageForAccount: usageForAccount) {
+                FailoverSwitchButton(
+                    next: next,
+                    label: accountLabel(for: next),
+                    tint: tint,
+                    nativeSession: nativeSession,
+                    onSwitched: { onSwitchAccount?(next) }
+                )
+            }
+        }
+        .padding(.top, 2)
+        .task(id: failoverTaskKey) {
+            // Opportunistic native auto-switch when the current IDE account is exhausted.
+            _ = await AntigravityAutoRouter.ensureHealthyNativeSession(
+                accounts: accounts,
+                usageForAccount: usageForAccount,
+                nativeSession: nativeSession
+            )
+        }
+    }
+
+    private var failoverTaskKey: String {
+        // Re-run when any account's peak bucket changes (rounded) or errors appear.
+        accounts.map { account in
+            let usage = usageForAccount(account)
+            let peak = usage.map { snap in
+                (snap.windows + snap.subAccounts.flatMap(\.windows)).map(\.usedPercent).max() ?? -1
+            } ?? -2
+            return "\(account.id):\(Int(peak.rounded())):\(usage?.errorMessage ?? "")"
+        }.joined(separator: "|")
+    }
+
+    @ViewBuilder
     private var costSection: some View {
         if let cost, cost.sessionTokens > 0 || cost.last30DaysTokens > 0 {
             VStack(alignment: .leading, spacing: 4) {
@@ -377,7 +446,16 @@ struct ProviderUsageCardView: View {
         let used = peakUsed(account)
         if used <= 0 {
             if usageForAccount(account)?.isRefreshing == true { return "…" }
+            // Distinguish healthy-empty (has windows at 0%) from no-data.
+            if let usage = usageForAccount(account),
+               !(usage.windows.isEmpty && usage.subAccounts.isEmpty)
+            {
+                return showsRemainingPrimary ? "100% left" : "0%"
+            }
             return nil
+        }
+        if showsRemainingPrimary {
+            return "\(Int((100 - used).rounded()))% left"
         }
         return "\(Int(used.rounded()))%"
     }
@@ -540,11 +618,13 @@ private struct AccountUsageBlock: View {
         } else if usage?.isRefreshing == true || isWaking {
             ProgressView()
                 .controlSize(.mini)
-        } else if let used = peakUsed, used > 0 {
-            Text("\(Int(used.rounded()))%")
+        } else if let used = peakUsed {
+            Text(peakBadgeLabel(used: used))
                 .font(.caption2.monospacedDigit().weight(.bold))
                 .foregroundStyle(MenuBarDesign.usageTint(remainingPercent: 100 - used))
-                .help("Peak window usage")
+                .help(serviceType == .antigravity || serviceType == .gemini
+                    ? "Lowest remaining window (Cockpit-style)"
+                    : "Peak window usage")
         }
     }
 
@@ -564,6 +644,16 @@ private struct AccountUsageBlock: View {
         let windows = usage.windows + usage.subAccounts.flatMap(\.windows)
         guard !windows.isEmpty else { return nil }
         return windows.map(\.usedPercent).max()
+    }
+
+    /// Cloud Code (Antigravity/Gemini): Cockpit-style remaining%.
+    /// Codex/Claude keep used% so a stuck stale "5%" is obviously used.
+    private func peakBadgeLabel(used: Double) -> String {
+        if serviceType == .antigravity || serviceType == .gemini {
+            let left = max(0, 100 - used)
+            return left >= 99.5 ? "100% left" : "\(Int(left.rounded()))% left"
+        }
+        return "\(Int(used.rounded()))%"
     }
 
     private var nextResetText: String? {
@@ -993,7 +1083,7 @@ private struct AccountUsageBlock: View {
                                         usedPercent: window.usedPercent,
                                         resetText: resetText(for: window),
                                         tint: tint,
-                                        metricText: window.primaryMetricText
+                                        showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
                                     )
                                 }
                             } else if let error = sub.errorMessage {
@@ -1026,7 +1116,7 @@ private struct AccountUsageBlock: View {
                             usedPercent: window.usedPercent,
                             resetText: resetText(for: window),
                             tint: tint,
-                            metricText: window.primaryMetricText
+                            showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
                         )
                     }
                     if let error = usage.errorMessage, !error.isEmpty {
@@ -1110,6 +1200,76 @@ private struct AccountUsageBlock: View {
             return "SuperGrok one-time usage resets — clear your full weekly pool once per reset. Use the button below to apply one."
         default:
             return "Manual rate-limit resets from \(serviceType.displayName). Use the button below to apply one."
+        }
+    }
+}
+
+// MARK: - Antigravity failover switch
+
+private struct FailoverSwitchButton: View {
+    let next: AuthAccount
+    let label: String
+    let tint: Color
+    var nativeSession: NativeSessionManager? = nil
+    var onSwitched: (() -> Void)? = nil
+
+    @State private var isSwitching = false
+    @State private var message: String?
+    @State private var succeeded: Bool?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Button {
+                Task { @MainActor in await performSwitch() }
+            } label: {
+                HStack(spacing: 4) {
+                    if isSwitching {
+                        ProgressView().controlSize(.mini)
+                    } else {
+                        Image(systemName: "arrow.left.arrow.right.circle.fill")
+                            .font(.system(size: 10, weight: .semibold))
+                    }
+                    Text(isSwitching ? "Switching…" : "Use next healthy (\(label))")
+                        .font(.caption2.weight(.semibold))
+                        .lineLimit(1)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 4)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .tint(tint)
+            .disabled(isSwitching || nativeSession == nil)
+            .help("Switch the native Antigravity session to the next account with quota left.")
+            if let message {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(succeeded == true ? MenuBarDesign.success : .orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+            }
+        }
+    }
+
+    @MainActor
+    private func performSwitch() async {
+        guard let ns = nativeSession else { return }
+        isSwitching = true
+        message = nil
+        succeeded = nil
+        let result = await ns.switchTo(
+            next,
+            restartApp: AppSettings.shared.restartAppOnSwitch
+        )
+        isSwitching = false
+        switch result {
+        case .switched(let msg):
+            succeeded = true
+            message = msg
+            onSwitched?()
+        case .failure(let msg):
+            succeeded = false
+            message = msg
         }
     }
 }

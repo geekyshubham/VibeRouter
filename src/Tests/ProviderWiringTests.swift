@@ -48,6 +48,28 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertEqual(ServiceType.kilo.connectionAction, .authCommand(.kiloLogin))
     }
 
+    func testCloudCodeUsedPercentFromRemainingFraction() {
+        // Live Antigravity summary: remainingFraction 0.948… → ~5% used (not 95%).
+        XCTAssertEqual(
+            NativeUsageFetcher.cloudCodeUsedPercent(remainingFraction: 0.94835293),
+            5.164707,
+            accuracy: 0.01
+        )
+        XCTAssertEqual(NativeUsageFetcher.cloudCodeUsedPercent(remainingFraction: 1), 0, accuracy: 0.01)
+        XCTAssertEqual(NativeUsageFetcher.cloudCodeUsedPercent(remainingFraction: 0), 100, accuracy: 0.01)
+        XCTAssertEqual(NativeUsageFetcher.cloudCodeUsedPercent(remainingFraction: nil), 0, accuracy: 0.01)
+        // Remaining reported as 0…100 percent.
+        XCTAssertEqual(NativeUsageFetcher.cloudCodeUsedPercent(remainingFraction: 95), 5, accuracy: 0.01)
+        XCTAssertEqual(
+            NativeUsageFetcher.cloudCodeBucketTitle("Weekly Limit Remaining"),
+            "Weekly Limit"
+        )
+        XCTAssertEqual(
+            NativeUsageFetcher.cloudCodeBucketTitle("Five Hour Limit Remaining"),
+            "Five Hour Limit"
+        )
+    }
+
     func testCloudCodeQuotaSummaryMapsClaudeAndGeminiGroups() {
         let summary: [String: Any] = [
             "groups": [

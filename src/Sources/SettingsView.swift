@@ -205,9 +205,12 @@ struct ServiceRow<ExtraContent: View>: View {
                             .foregroundColor(MenuBarDesign.success)
 
                         if enabledCount > 1 {
-                            Text("• Round-robin w/ auto-failover")
+                            Text(serviceType == .antigravity ? "• Fill-first w/ auto-failover" : "• Round-robin w/ auto-failover")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
+                                .help(serviceType == .antigravity
+                                    ? "Proxy uses the first healthy Antigravity account until it is exhausted, then fails over to the next. Native IDE auto-switch follows the same order."
+                                    : "Requests spread across accounts with automatic failover on quota errors.")
                         }
 
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
@@ -656,7 +659,7 @@ struct SettingsView: View {
                 case .providers:
                     providersForm
                 case .instances:
-                    AppInstancesView(authManager: authManager)
+                    AppInstancesView(authManager: authManager, usageStore: usageStore)
                         .padding(8)
                 }
             } // ScrollView
@@ -1338,6 +1341,19 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 Toggle("Ask before switching accounts", isOn: $settings.confirmBeforeSwitch)
                 Text("Switch buttons appear per account in the menu bar panel (hidden for the account already active on this Mac).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Auto-switch Antigravity when exhausted", isOn: $settings.antigravityAutoSwitchEnabled)
+                if settings.antigravityAutoSwitchEnabled {
+                    Stepper(value: $settings.antigravityExhaustionThreshold, in: 50...100, step: 1) {
+                        HStack {
+                            Text("Exhausted at")
+                            Spacer()
+                            Text("\(Int(settings.antigravityExhaustionThreshold))% used").foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Text("Fill-first: proxy uses the first healthy Antigravity account until it hits the threshold/429, then fails over. Native IDE follows the same order so reopening Antigravity keeps working.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
