@@ -54,7 +54,7 @@ enum ConfiguredAccountDiscovery {
         case .kimi: return discoverKimi()
         case .qwen: return discoverQwen()
         case .cursor: return discoverCursor()
-        case .codebuddy, .gitlab, .kilo:
+        case .codebuddy, .codebuddyCN, .gitlab, .kilo, .windsurf, .qoder, .trae, .zed:
             // OAuth / paste-JSON onboarding (no stable local import paths yet).
             return []
         case .opencodeGo:

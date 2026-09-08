@@ -34,6 +34,8 @@ extension ServiceType {
             return .authCommand(.cursorLogin)
         case .codebuddy:
             return .authCommand(.codebuddyLogin)
+        case .codebuddyCN, .windsurf, .qoder, .trae, .zed:
+            return .managedInSettings
         case .gitlab:
             return .authCommand(.gitlabLogin)
         case .kilo:

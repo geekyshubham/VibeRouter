@@ -536,8 +536,13 @@ extension ServiceType {
         case .zai: return "zai"
         case .cursor: return "cursor"
         case .codebuddy: return "codebuddy"
+        case .codebuddyCN: return "codebuddy-cn"
         case .gitlab: return "gitlab"
         case .kilo: return "kilo"
+        case .windsurf: return "windsurf"
+        case .qoder: return "qoder"
+        case .trae: return "trae"
+        case .zed: return "zed"
         case .opencodeGo: return ProviderCatalog.openCodeGoProviderName
         case .qwen: return nil
         }

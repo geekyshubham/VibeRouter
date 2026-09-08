@@ -120,6 +120,11 @@ enum ManualTokenImporter {
         case .kimi: return try normalizeGenericOAuth(unwrapped, type: .kimi, labelKeys: ["email", "username"])
         case .qwen: return try normalizeGenericOAuth(unwrapped, type: .qwen, labelKeys: ["email", "username"])
         case .codebuddy: return try normalizeGenericOAuth(unwrapped, type: .codebuddy, labelKeys: ["email", "username", "login"])
+        case .codebuddyCN: return try normalizeGenericOAuth(unwrapped, type: .codebuddyCN, labelKeys: ["email", "username", "login"])
+        case .windsurf: return try normalizeGenericOAuth(unwrapped, type: .windsurf, labelKeys: ["email", "username"])
+        case .qoder: return try normalizeGenericOAuth(unwrapped, type: .qoder, labelKeys: ["email", "username"])
+        case .trae: return try normalizeGenericOAuth(unwrapped, type: .trae, labelKeys: ["email", "username"])
+        case .zed: return try normalizeGenericOAuth(unwrapped, type: .zed, labelKeys: ["email", "username"])
         case .gitlab: return try normalizeGenericOAuth(unwrapped, type: .gitlab, labelKeys: ["email", "username", "login"])
         case .kilo: return try normalizeGenericOAuth(unwrapped, type: .kilo, labelKeys: ["email", "username"])
         case .zai:

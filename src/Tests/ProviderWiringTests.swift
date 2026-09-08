@@ -46,6 +46,33 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertEqual(ServiceType.codebuddy.connectionAction, .authCommand(.codebuddyLogin))
         XCTAssertEqual(ServiceType.gitlab.connectionAction, .authCommand(.gitlabLogin))
         XCTAssertEqual(ServiceType.kilo.connectionAction, .authCommand(.kiloLogin))
+        XCTAssertEqual(ServiceType.windsurf.connectionAction, .managedInSettings)
+        XCTAssertEqual(ServiceType.qoder.connectionAction, .managedInSettings)
+        XCTAssertEqual(ServiceType.trae.connectionAction, .managedInSettings)
+        XCTAssertEqual(ServiceType.zed.connectionAction, .managedInSettings)
+        XCTAssertEqual(ServiceType.codebuddyCN.connectionAction, .managedInSettings)
+    }
+
+    func testCloudCodePlanPrefersPaidGoogleAIProOverFreeCurrentTier() {
+        let pro: [String: Any] = [
+            "currentTier": ["id": "free-tier", "name": "Antigravity"],
+            "paidTier": [
+                "id": "g1-pro-tier",
+                "name": "Google AI Pro",
+                "availableCredits": [["creditType": "GOOGLE_ONE_AI"]],
+            ],
+        ]
+        let plan = NativeUsageFetcher.cloudCodePlan(from: pro)
+        XCTAssertEqual(plan.planType, "g1-pro-tier")
+        XCTAssertEqual(plan.planLabel, "Google AI Pro · One AI credits")
+
+        let starter: [String: Any] = [
+            "currentTier": ["id": "free-tier", "name": "Antigravity"],
+            "paidTier": ["id": "free-tier", "name": "Antigravity Starter Quota"],
+        ]
+        let free = NativeUsageFetcher.cloudCodePlan(from: starter)
+        XCTAssertEqual(free.planType, "free-tier")
+        XCTAssertEqual(free.planLabel, "Starter")
     }
 
     func testCloudCodeUsedPercentFromRemainingFraction() {

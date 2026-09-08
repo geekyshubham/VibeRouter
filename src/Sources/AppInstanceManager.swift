@@ -37,6 +37,7 @@ enum AppInstanceLaunchResult: Equatable {
 enum AppInstanceManager {
     static let launchableProviders: [ServiceType] = [
         .cursor, .codex, .claude, .antigravity, .copilot, .kiro, .gemini,
+        .codebuddy, .codebuddyCN, .windsurf, .qoder, .trae, .zed,
     ]
 
     private static let fileName = "app-instances.json"
@@ -195,6 +196,8 @@ enum AppInstanceManager {
             try injectCopilot(payload, into: dataDir)
         case .kiro:
             try injectCursorLikeOAuth(payload, into: dataDir, keys: CursorAuthKeys.kiro)
+        case .codebuddy, .codebuddyCN, .windsurf, .qoder, .trae:
+            try injectCursorLikeOAuth(payload, into: dataDir, keys: CursorAuthKeys.generic(type.rawValue))
         default:
             throw InjectionError.unsupported(type.displayName)
         }
@@ -209,6 +212,9 @@ enum AppInstanceManager {
             "cursor.email",
         ]
         static let kiro = ["kiro.accessToken", "kiro.refreshToken", "kiro.email"]
+        static func generic(_ prefix: String) -> [String] {
+            ["\(prefix).accessToken", "\(prefix).refreshToken", "\(prefix).email"]
+        }
     }
 
     /// Isolated Antigravity profile: write the real IDE oauthToken blob
@@ -429,7 +435,21 @@ enum AppInstanceManager {
             if let url = which("gemini") {
                 return ExecutableSpec(executable: url) { _ in [] }
             }
-            return nil
+            return macApp("Gemini", userDataFlag: nil)
+        case .codebuddy:
+            return macApp("CodeBuddy", userDataFlag: "--user-data-dir")
+        case .codebuddyCN:
+            return macApp("CodeBuddy CN", userDataFlag: "--user-data-dir")
+        case .windsurf:
+            return macApp("Windsurf", userDataFlag: "--user-data-dir")
+        case .qoder:
+            return macApp("Qoder", userDataFlag: "--user-data-dir")
+        case .trae:
+            return macApp("Trae", userDataFlag: "--user-data-dir")
+                ?? macApp("TRAE SOLO", userDataFlag: "--user-data-dir")
+                ?? macApp("Trae CN", userDataFlag: "--user-data-dir")
+        case .zed:
+            return macApp("Zed", userDataFlag: nil)
         default:
             return nil
         }
@@ -501,6 +521,14 @@ enum AppInstanceManager {
         case "Kiro": return "dev.kiro.desktop"
         case "Kiro CLI": return "com.amazon.codewhisperer"
         case "Gemini": return "com.google.GeminiMacOS"
+        case "CodeBuddy": return "com.tencent.codebuddy"
+        case "CodeBuddy CN": return "com.tencent.codebuddy.cn"
+        case "Windsurf": return "com.exafunction.windsurf"
+        case "Qoder": return "com.qoder.app"
+        case "Trae": return "com.trae.app"
+        case "TRAE SOLO": return "com.trae.solo"
+        case "Trae CN": return "com.trae.cn"
+        case "Zed": return "dev.zed.Zed"
         default: return ""
         }
     }

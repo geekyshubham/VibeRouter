@@ -61,7 +61,7 @@ enum NativeUsageFetcher {
                 payload: payload,
                 authFile: authFile
             )
-        case .qwen, .codebuddy, .gitlab, .kilo:
+        case .qwen, .codebuddy, .codebuddyCN, .gitlab, .kilo, .windsurf, .qoder, .trae, .zed:
             return .empty(
                 authAccountID: authAccountID,
                 providerID: providerID,
@@ -1627,7 +1627,8 @@ enum NativeUsageFetcher {
         }
 
         // Cockpit-style: summary groups (Gemini vs Claude/Opus) are the accurate shared pools.
-        // Per-model buckets are a fallback / detail layer.
+        // Per-model buckets are a fallback / detail layer. loadCodeAssist supplies the
+        // Google AI Pro / Starter / credits badge Cockpit shows per account.
         async let summaryJSON = postCloudCodeJSON(
             path: "v1internal:retrieveUserQuotaSummary",
             accessToken: accessToken,
@@ -1638,9 +1639,16 @@ enum NativeUsageFetcher {
             accessToken: accessToken,
             body: bodyData
         )
+        async let assistJSON = postCloudCodeJSON(
+            path: "v1internal:loadCodeAssist",
+            accessToken: accessToken,
+            body: cloudCodeAssistBody(projectID: projectID, providerID: providerID)
+        )
 
         let summary = await summaryJSON
         let detail = await detailJSON
+        let assist = await assistJSON
+        let plan = assist.json.map(cloudCodePlan(from:))
 
         if summary.status == 401 || detail.status == 401 {
             return .empty(
@@ -1673,8 +1681,8 @@ enum NativeUsageFetcher {
                     windows: flatWindows,
                     subAccounts: groups,
                     accountEmail: email,
-                    planType: nil,
-                    planLabel: nil,
+                    planType: plan?.planType,
+                    planLabel: plan?.planLabel,
                     updatedAt: Date(),
                     errorMessage: nil,
                     isRefreshing: false
@@ -1698,6 +1706,8 @@ enum NativeUsageFetcher {
                 windows: windows,
                 subAccounts: [],
                 accountEmail: email,
+                planType: plan?.planType,
+                planLabel: plan?.planLabel,
                 updatedAt: Date(),
                 errorMessage: windows.isEmpty ? "No quota data available" : nil,
                 isRefreshing: false
@@ -1734,6 +1744,71 @@ enum NativeUsageFetcher {
         "https://daily-cloudcode-pa.googleapis.com",
         "https://cloudcode-pa.googleapis.com",
     ]
+
+    /// `loadCodeAssist` payload Cockpit/IDE send — needed for paidTier / currentTier.
+    private static func cloudCodeAssistBody(projectID: String?, providerID: String) -> Data {
+        let antigravity = providerID == "antigravity"
+        var metadata: [String: Any] = [
+            "ideName": antigravity ? "antigravity" : "gemini-cli",
+            "ideType": antigravity ? "ANTIGRAVITY" : "IDE_UNSPECIFIED",
+            "platform": "DARWIN_ARM64",
+            "pluginType": "GEMINI",
+            "updateChannel": "stable",
+        ]
+        #if arch(x86_64)
+        metadata["platform"] = "DARWIN_AMD64"
+        #endif
+        var payload: [String: Any] = [
+            "metadata": metadata,
+            "mode": "FULL_ELIGIBILITY_CHECK",
+        ]
+        if let projectID, !projectID.isEmpty {
+            payload["cloudaicompanionProject"] = projectID
+        }
+        return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data("{}".utf8)
+    }
+
+    /// Cockpit: `paidTier.id ?? currentTier.id`, display the human `name`.
+    /// Pro seats report `currentTier=free-tier` plus `paidTier=g1-pro-tier` / "Google AI Pro".
+    static func cloudCodePlan(from json: [String: Any]) -> (planType: String?, planLabel: String?) {
+        let paid = json["paidTier"] as? [String: Any] ?? [:]
+        let current = json["currentTier"] as? [String: Any] ?? [:]
+        let paidID = stringValue(paid, keys: ["id"])
+        let paidName = stringValue(paid, keys: ["name", "displayName"])
+        let currentID = stringValue(current, keys: ["id"])
+        let currentName = stringValue(current, keys: ["name", "displayName"])
+        let paidIsUpgrade = (paidID ?? "").lowercased() != "free-tier"
+            && !(paidID ?? "").isEmpty
+            && paidID != currentID
+        let type = (paidIsUpgrade ? paidID : nil) ?? currentID ?? paidID
+        let name = (paidIsUpgrade ? paidName : nil) ?? paidName ?? currentName
+        var label = prettyCloudCodeTier(id: type, name: name)
+        let credits = (paid["availableCredits"] as? [[String: Any]])
+            ?? (current["availableCredits"] as? [[String: Any]])
+            ?? []
+        let hasOneAI = credits.contains { row in
+            (stringValue(row, keys: ["creditType"]) ?? "").uppercased().contains("GOOGLE_ONE")
+        }
+        if hasOneAI, !label.lowercased().contains("credit") {
+            label += " · One AI credits"
+        }
+        return (type, label.isEmpty ? nil : label)
+    }
+
+    static func prettyCloudCodeTier(id: String?, name: String?) -> String {
+        if let name, !name.isEmpty {
+            let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.localizedCaseInsensitiveContains("Starter Quota") { return "Starter" }
+            return trimmed
+        }
+        guard let id, !id.isEmpty else { return "" }
+        let lower = id.lowercased()
+        if lower.contains("ultra") { return "Ultra" }
+        if lower.contains("pro") { return "Google AI Pro" }
+        if lower.contains("standard") { return "Standard" }
+        if lower.contains("free") { return "Free" }
+        return id
+    }
 
     /// Match Cockpit / IDE UA shape: `antigravity/<ver> darwin/arm64`.
     private static var cloudCodeUserAgent: String {

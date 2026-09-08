@@ -28,9 +28,13 @@ enum MenuBarDesign {
         case .qwen: return Color(red: 0.45, green: 0.25, blue: 0.95)
         case .zai: return Color(red: 0.18, green: 0.72, blue: 0.62)
         case .cursor: return Color(red: 0.95, green: 0.75, blue: 0.20)
-        case .codebuddy: return Color(red: 0.10, green: 0.55, blue: 0.95)
+        case .codebuddy, .codebuddyCN: return Color(red: 0.10, green: 0.55, blue: 0.95)
         case .gitlab: return Color(red: 0.88, green: 0.30, blue: 0.22)
         case .kilo: return Color(red: 0.35, green: 0.75, blue: 0.45)
+        case .windsurf: return Color(red: 0.00, green: 0.72, blue: 0.85)
+        case .qoder: return Color(red: 0.45, green: 0.40, blue: 0.95)
+        case .trae: return Color(red: 0.20, green: 0.55, blue: 0.95)
+        case .zed: return Color(red: 0.70, green: 0.55, blue: 0.35)
         case .opencodeGo: return Color(red: 0.20, green: 0.72, blue: 0.80)
         }
     }

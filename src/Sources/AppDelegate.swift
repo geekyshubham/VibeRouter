@@ -61,6 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         usageStore.configure { [weak self] in
             self?.authManager.serviceAccounts.mapValues { $0.accounts } ?? [:]
         }
+        usageStore.nativeSession = nativeSession
         authManager.checkAuthStatus()
         usageStore.clearCachedUsage()
         // Load cached model prices immediately and refresh the live feed (models.dev) in the

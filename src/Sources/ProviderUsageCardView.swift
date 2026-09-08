@@ -487,7 +487,7 @@ struct ProviderUsageCardView: View {
         case .kiro: "icon-kiro.png"
         case .kimi: "icon-kimi.png"
         case .grok: "icon-grok.png"
-        case .cursor, .codebuddy, .gitlab, .kilo, .opencodeGo: nil
+        case .cursor, .codebuddy, .codebuddyCN, .gitlab, .kilo, .opencodeGo, .windsurf, .qoder, .trae, .zed: nil
         }
         guard let name else { return nil }
         return IconCatalog.shared.image(named: name, resizedTo: NSSize(width: 18, height: 18), template: true)
@@ -499,9 +499,13 @@ struct ProviderUsageCardView: View {
         case .kimi: return "moon.stars.fill"
         case .kiro: return "bolt.horizontal.circle.fill"
         case .cursor: return "cursorarrow.click.2"
-        case .codebuddy: return "person.2.wave.2.fill"
+        case .codebuddy, .codebuddyCN: return "person.2.wave.2.fill"
         case .gitlab: return "chevron.left.forwardslash.chevron.right"
         case .kilo: return "scalemass.fill"
+        case .windsurf: return "wind"
+        case .qoder: return "cube.transparent"
+        case .trae: return "t.circle.fill"
+        case .zed: return "z.square.fill"
         default: return nil
         }
     }

@@ -24,6 +24,8 @@ final class UsageStore: ObservableObject {
     private var statusTimer: Timer?
     private var accountsProvider: () -> [ServiceType: [AuthAccount]] = { [:] }
     private var refreshGeneration: UInt64 = 0
+    /// Native IDE switcher — used to auto-failover Antigravity after a quota refresh.
+    weak var nativeSession: NativeSessionManager?
 
     func configure(accountsProvider: @escaping () -> [ServiceType: [AuthAccount]]) {
         self.accountsProvider = accountsProvider
@@ -347,6 +349,7 @@ final class UsageStore: ObservableObject {
                 self.pendingAccountIDs = []
                 self.lastRefreshAt = Date()
             }
+            await self.runAntigravityFailover()
         }
 
         // Waiters still block until the sweep completes, but the UI updates earlier
@@ -356,6 +359,19 @@ final class UsageStore: ObservableObject {
 
     func snapshot(for account: AuthAccount) -> ProviderUsageSnapshot? {
         usageByAccountID[account.id]
+    }
+
+    /// Cockpit-style: after each quota sweep, if the native Antigravity session
+    /// is on an exhausted account, switch it to the next healthy one.
+    @MainActor
+    private func runAntigravityFailover() async {
+        let accounts = accountsProvider()[.antigravity] ?? []
+        guard accounts.count > 1 else { return }
+        _ = await AntigravityAutoRouter.ensureHealthyNativeSession(
+            accounts: accounts,
+            usageForAccount: { snapshot(for: $0) },
+            nativeSession: nativeSession
+        )
     }
 
     func cost(for serviceType: ServiceType) -> ProviderCostSnapshot? {

@@ -14,8 +14,14 @@ enum ServiceType: String, CaseIterable {
     /// CLIProxy OAuth providers also managed by Cockpit Tools
     case cursor
     case codebuddy
+    case codebuddyCN = "codebuddy-cn"
     case gitlab
     case kilo
+    /// Cockpit Tools desktop coverage — isolated instances + switch, quota when APIs exist.
+    case windsurf
+    case qoder
+    case trae
+    case zed
     /// OpenCode Zen "Go" subscription. Stored as an `openai-compat` auth file
     /// (`provider: opencode-go`), not an OAuth seat, but it has real quota
     /// windows so it gets a usage card like any other provider.
@@ -35,8 +41,13 @@ enum ServiceType: String, CaseIterable {
         case .zai: return "Z.AI GLM"
         case .cursor: return "Cursor"
         case .codebuddy: return "CodeBuddy"
+        case .codebuddyCN: return "CodeBuddy CN"
         case .gitlab: return "GitLab Duo"
         case .kilo: return "Kilo AI"
+        case .windsurf: return "Windsurf"
+        case .qoder: return "Qoder"
+        case .trae: return "Trae"
+        case .zed: return "Zed"
         case .opencodeGo: return ProviderCatalog.openCodeGoDisplayName
         }
     }
@@ -595,6 +606,13 @@ class AuthManager: ObservableObject {
                 case "ultra": return "Cursor Ultra"
                 default: return "Cursor \(plan.capitalized)"
                 }
+            }
+            return nil
+        case .antigravity, .gemini:
+            if let plan = json["plan_label"] as? String ?? json["plan_type"] as? String,
+               !plan.isEmpty
+            {
+                return NativeUsageFetcher.prettyCloudCodeTier(id: json["plan_type"] as? String, name: plan)
             }
             return nil
         default:
