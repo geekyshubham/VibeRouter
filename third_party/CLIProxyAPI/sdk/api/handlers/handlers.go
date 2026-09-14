@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -588,6 +589,11 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 	}
 	opts.Metadata = reqMeta
 	resp, err := h.AuthManager.Execute(ctx, providers, req, opts)
+	if err != nil && h.shouldAttemptModelFailover(err, providers) {
+		if fallbackResp, _, fallbackErr := h.executeModelFailover(ctx, normalizedModel, req, opts, false); fallbackErr == nil {
+			return fallbackResp.Payload, nil, nil
+		}
+	}
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		status := http.StatusInternalServerError
@@ -699,6 +705,12 @@ func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handl
 	}
 	opts.Metadata = reqMeta
 	streamResult, err := h.AuthManager.ExecuteStream(ctx, providers, req, opts)
+	if err != nil && h.shouldAttemptModelFailover(err, providers) {
+		if _, fallbackResult, fallbackErr := h.executeModelFailover(ctx, normalizedModel, req, opts, true); fallbackErr == nil {
+			streamResult = fallbackResult
+			err = nil
+		}
+	}
 	if err != nil {
 		err = enrichAuthSelectionError(err, providers, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
@@ -921,6 +933,14 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 
+	// Models disabled in the control panel are never served.
+	if modelpolicy.IsDisabled(baseModel) {
+		return nil, "", &interfaces.ErrorMessage{
+			StatusCode: http.StatusForbidden,
+			Error:      fmt.Errorf("model %s is disabled in the management console", baseModel),
+		}
+	}
+
 	if strings.EqualFold(routeModelBaseName(baseModel), "gpt-image-2") && !allowImageModel {
 		return nil, "", &interfaces.ErrorMessage{
 			StatusCode: http.StatusServiceUnavailable,
@@ -1105,3 +1125,74 @@ func (h *BaseAPIHandler) LoggingAPIResponseError(ctx context.Context, err *inter
 // APIHandlerCancelFunc is a function type for canceling an API handler's context.
 // It can optionally accept parameters, which are used for logging the response.
 type APIHandlerCancelFunc func(params ...interface{})
+
+// maxModelFailoverCandidates bounds the exhaustion fallback walk so a long
+// priority list cannot turn one failed request into an unbounded retry storm.
+const maxModelFailoverCandidates = 8
+
+// shouldAttemptModelFailover reports whether the routing policy allows (and
+// the error warrants) walking the user's model priority list — i.e. the
+// requested model is out of available credentials everywhere (quota exhausted,
+// all accounts cooling down) and "failover to next model" is enabled.
+func (h *BaseAPIHandler) shouldAttemptModelFailover(err error, providers []string) bool {
+	if err == nil {
+		return false
+	}
+	if !modelpolicy.Get().ModelFailover {
+		return false
+	}
+	if len(providers) > 0 {
+		home := false
+		for _, provider := range providers {
+			if strings.EqualFold(provider, "home") {
+				home = true
+				break
+			}
+		}
+		if home {
+			return false
+		}
+	}
+	var authErr *coreauth.Error
+	if errors.As(err, &authErr) && authErr != nil {
+		switch authErr.Code {
+		case "auth_unavailable", "auth_not_found", "provider_not_found":
+			return true
+		}
+	}
+	return false
+}
+
+// executeModelFailover retries the request against the next preferred models
+// from the user's priority list until one has an available credential. It
+// returns the winning response (non-stream) or stream result, or the original
+// error when no candidate can serve the request.
+func (h *BaseAPIHandler) executeModelFailover(
+	ctx context.Context,
+	requestedModel string,
+	req coreexecutor.Request,
+	opts coreexecutor.Options,
+	stream bool,
+) (coreexecutor.Response, *coreexecutor.StreamResult, error) {
+	baseModel := strings.TrimSpace(thinking.ParseSuffix(requestedModel).ModelName)
+	for _, candidate := range modelpolicy.FallbackCandidates(baseModel, maxModelFailoverCandidates) {
+		candidateProviders := util.GetProviderName(strings.TrimSpace(thinking.ParseSuffix(candidate).ModelName))
+		if len(candidateProviders) == 0 {
+			continue
+		}
+		candidateReq := req
+		candidateReq.Model = candidate
+		if stream {
+			result, err := h.AuthManager.ExecuteStream(ctx, candidateProviders, candidateReq, opts)
+			if err == nil {
+				return coreexecutor.Response{}, result, nil
+			}
+			continue
+		}
+		resp, err := h.AuthManager.Execute(ctx, candidateProviders, candidateReq, opts)
+		if err == nil {
+			return resp, nil, nil
+		}
+	}
+	return coreexecutor.Response{}, nil, fmt.Errorf("no fallback model available")
+}

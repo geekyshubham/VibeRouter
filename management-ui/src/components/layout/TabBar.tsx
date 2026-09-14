@@ -15,6 +15,7 @@ interface Tab {
 const TABS: Tab[] = [
   { to: '/overview', label: 'Overview', Glyph: Icon.Gauge },
   { to: '/accounts', label: 'Accounts', Glyph: Icon.Users },
+  { to: '/models', label: 'Models', Glyph: Icon.Activity },
   { to: '/keys', label: 'Keys', Glyph: Icon.Key },
   { to: '/logs', label: 'Logs', Glyph: Icon.List },
   { to: '/config', label: 'Config', Glyph: Icon.Settings },

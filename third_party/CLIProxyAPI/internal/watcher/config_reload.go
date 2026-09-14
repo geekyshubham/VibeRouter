@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelpolicy"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
 	"gopkg.in/yaml.v3"
@@ -103,6 +105,11 @@ func (w *Watcher) reloadConfig() bool {
 	w.oldConfigYaml, _ = yaml.Marshal(newConfig)
 	w.config = newConfig
 	w.clientsMutex.Unlock()
+
+	// Keep the model routing policy (priority / disabled / failover) in step
+	// with the reloaded config and drop cached model listings.
+	modelpolicy.Sync(newConfig.Routing.ModelPriority, newConfig.Routing.DisabledModels, newConfig.Routing.ModelFailover)
+	registry.GetGlobalRegistry().InvalidateAvailableModelsCache()
 
 	var affectedOAuthProviders []string
 	if oldConfig != nil {

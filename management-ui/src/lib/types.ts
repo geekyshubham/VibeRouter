@@ -134,3 +134,23 @@ export interface LogLine {
   message?: string;
   [key: string]: unknown;
 }
+
+/** One model in the routing catalog (GET /routing/models → models[]). */
+export interface ModelCatalogEntry {
+  id: string;
+  display_name?: string;
+  owned_by?: string;
+  providers: string[] | null;
+  available: number;
+  disabled: boolean;
+  priority: number;
+  prioritized: boolean;
+}
+
+/** GET /routing/models → catalog + routing policy in one payload. */
+export interface ModelRoutingResponse {
+  models: ModelCatalogEntry[] | null;
+  'model-priority': string[] | null;
+  'disabled-models': string[] | null;
+  'model-failover': boolean;
+}

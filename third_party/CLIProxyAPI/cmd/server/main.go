@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelpolicy"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
@@ -459,6 +460,7 @@ func main() {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+	modelpolicy.Sync(cfg.Routing.ModelPriority, cfg.Routing.DisabledModels, cfg.Routing.ModelFailover)
 
 	// In cloud deploy mode, check if we have a valid configuration
 	var configFileExists bool

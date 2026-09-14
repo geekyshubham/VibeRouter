@@ -9,7 +9,10 @@ struct ConfigProviderAuthRecord: Equatable {
 enum ConfigComposer {
     static let uiMetadataKeys: Set<String> = ["display-name", "help-text", "icon-system"]
     static let runtimeEditableTopLevelKeys: Set<String> = ["api-keys"]
-    
+    /// Subtrees the management console edits at runtime; they are deep-merged
+    /// over the composed root on every regeneration so console changes survive.
+    static let runtimeMergedSubtrees: Set<String> = ["routing"]
+
     static func composeAdditiveBaseConfig(bundledRoot: [String: Any], userRoot: [String: Any]?) -> [String: Any] {
         guard let userRoot else {
             return bundledRoot
@@ -30,6 +33,14 @@ enum ConfigComposer {
             if let runtimeValue = runtimeRoot[key] {
                 mergedRoot[key] = runtimeValue
             }
+        }
+        // Management-console edits (model priority, disabled models, failover)
+        // live under `routing:` in the runtime merged config. Deep-merge that
+        // subtree so they survive regeneration from the bundled base config.
+        for key in runtimeMergedSubtrees {
+            guard let runtimeValue = runtimeRoot[key] as? [String: Any] else { continue }
+            let base = mergedRoot[key] as? [String: Any] ?? [:]
+            mergedRoot[key] = mergeDictionary(base, overlaidWith: runtimeValue)
         }
         return mergedRoot
     }

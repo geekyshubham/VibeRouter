@@ -261,6 +261,22 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
+
+	// ModelPriority is the user-ordered list of model IDs managed from the
+	// control panel. It governs /v1/models listing order, "auto" model
+	// resolution, and — when ModelFailover is enabled — the order models are
+	// fallen back to when the requested one is exhausted.
+	ModelPriority []string `yaml:"model-priority,omitempty" json:"model-priority,omitempty"`
+
+	// DisabledModels are excluded from serving entirely: hidden from /v1/models
+	// and rejected with a clear error when a client requests them.
+	DisabledModels []string `yaml:"disabled-models,omitempty" json:"disabled-models,omitempty"`
+
+	// ModelFailover enables falling back to the next model in ModelPriority when
+	// the requested model has no available credential (quota exhausted on every
+	// provider serving it). Default is false — requests fail with the upstream
+	// exhaustion error instead of silently switching models.
+	ModelFailover bool `yaml:"model-failover,omitempty" json:"model-failover,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -1135,6 +1151,15 @@ func SaveConfigPreserveComments(configFile string, cfg *Config) error {
 	mergeMappingPreserve(original.Content[0], generated.Content[0])
 	normalizeCollectionNodeStyles(original.Content[0])
 
+	// The routing policy lists/flag use omitempty, so an emptied model-priority,
+	// cleared disabled-models, or model-failover:false disappears from the
+	// generated tree and the comment-preserving merge would keep the previous
+	// values on disk (which then hot-reload back over the live config). Sync
+	// those keys to exactly what the sanitized config carries.
+	for _, key := range []string{"model-priority", "disabled-models", "model-failover"} {
+		syncNodeToGenerated(original.Content[0], generated.Content[0], key, "routing")
+	}
+
 	// Write back.
 	f, err := os.Create(configFile)
 	if err != nil {
@@ -1696,6 +1721,58 @@ func removeMapKey(mapNode *yaml.Node, key string) {
 			return
 		}
 	}
+}
+
+// syncNodeToGenerated forces dstRoot/<path…>/<key> to match srcRoot/<path…>/<key>
+// exactly: replaced when present in the generated tree, removed when the
+// generated tree omits it (omitempty zero value). Used for keys whose zero
+// value must win over stale on-disk content during comment-preserving saves.
+func syncNodeToGenerated(dstRoot, srcRoot *yaml.Node, key string, path ...string) {
+	if dstRoot == nil || srcRoot == nil || key == "" {
+		return
+	}
+	if dstRoot.Kind != yaml.MappingNode || srcRoot.Kind != yaml.MappingNode {
+		return
+	}
+	dstSection := dstRoot
+	srcSection := srcRoot
+	for _, hop := range path {
+		dstIdx := findMapKeyIndex(dstSection, hop)
+		srcIdx := findMapKeyIndex(srcSection, hop)
+		if dstIdx < 0 {
+			// Nothing on disk to fix under this hop.
+			return
+		}
+		dstSection = dstSection.Content[dstIdx+1]
+		if srcIdx < 0 || srcIdx+1 >= len(srcSection.Content) {
+			// Generated dropped the whole section — remove the stale key.
+			if hop == path[len(path)-1] {
+				removeMapKey(dstSection, key)
+			}
+			return
+		}
+		srcSection = srcSection.Content[srcIdx+1]
+	}
+	if dstSection == nil || dstSection.Kind != yaml.MappingNode {
+		return
+	}
+	srcIdx := findMapKeyIndex(srcSection, key)
+	dstIdx := findMapKeyIndex(dstSection, key)
+	if srcIdx < 0 {
+		// Zero value omitted by omitempty — drop the stale on-disk entry.
+		removeMapKey(dstSection, key)
+		return
+	}
+	if srcIdx+1 >= len(srcSection.Content) {
+		return
+	}
+	if dstIdx < 0 {
+		dstSection.Content = append(dstSection.Content,
+			deepCopyNode(srcSection.Content[srcIdx]),
+			deepCopyNode(srcSection.Content[srcIdx+1]))
+		return
+	}
+	dstSection.Content[dstIdx+1] = deepCopyNode(srcSection.Content[srcIdx+1])
 }
 
 func pruneMappingToGeneratedKeys(dstRoot, srcRoot *yaml.Node, key string) {

@@ -941,8 +941,7 @@ class ServerManager: ObservableObject {
         )
         
         let mergedConfigPath = authDir.appendingPathComponent(CustomProviderConstants.mergedConfigFilename)
-        if mergedRoot["api-keys"] == nil,
-           case .success(let existingRuntimeRoot) = loadYAMLDictionary(atPath: mergedConfigPath.path) {
+        if case .success(let existingRuntimeRoot) = loadYAMLDictionary(atPath: mergedConfigPath.path) {
             mergedRoot = ConfigComposer.preservingRuntimeEditableTopLevelKeys(
                 in: mergedRoot,
                 from: existingRuntimeRoot

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	misc "github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/modelpolicy"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -791,6 +792,13 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 	var expiresAt time.Time
 
 	for _, registration := range r.models {
+		if registration == nil || registration.Info == nil {
+			continue
+		}
+		// Models disabled in the control panel never appear in listings.
+		if modelpolicy.IsDisabled(registration.Info.ID) {
+			continue
+		}
 		availableClients := registration.Count
 
 		expiredClients := 0
@@ -832,7 +840,27 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		}
 	}
 
+	sortModelMapsByPolicy(models)
 	return models, expiresAt
+}
+
+// sortModelMapsByPolicy orders model listings by the user's priority list
+// (management UI order). Listed models come first in list order; unlisted
+// models keep their relative (registry) order after them.
+func sortModelMapsByPolicy(models []map[string]any) {
+	if len(models) < 2 {
+		return
+	}
+	position := func(model map[string]any) int {
+		id, _ := model["id"].(string)
+		if pos, ok := modelpolicy.PriorityPosition(id); ok {
+			return pos
+		}
+		return len(models) + 1
+	}
+	if !sort.SliceIsSorted(models, func(i, j int) bool { return position(models[i]) < position(models[j]) }) {
+		sort.SliceStable(models, func(i, j int) bool { return position(models[i]) < position(models[j]) })
+	}
 }
 
 func cloneModelMaps(models []map[string]any) []map[string]any {
@@ -938,6 +966,10 @@ func (r *ModelRegistry) GetAvailableModelsByProvider(provider string) []*ModelIn
 
 	for modelID, entry := range providerModels {
 		if entry == nil || entry.count <= 0 {
+			continue
+		}
+		// Models disabled in the control panel never appear in listings.
+		if modelpolicy.IsDisabled(modelID) {
 			continue
 		}
 		registration, ok := r.models[modelID]
@@ -1317,4 +1349,71 @@ func (r *ModelRegistry) GetModelsForClient(clientID string) []*ModelInfo {
 		}
 	}
 	return result
+}
+
+// ModelCatalogEntry describes one registered model for the control panel,
+// including models whose credentials are currently exhausted (they can still
+// be prioritized or disabled by the user).
+type ModelCatalogEntry struct {
+	ID          string   `json:"id"`
+	DisplayName string   `json:"display_name,omitempty"`
+	OwnedBy     string   `json:"owned_by,omitempty"`
+	Providers   []string `json:"providers"`
+	Available   int      `json:"available"`
+	Disabled    bool     `json:"disabled"`
+	Priority    int      `json:"priority"`
+	Prioritized bool     `json:"prioritized"`
+}
+
+// ModelCatalog returns every registered model with its serving providers,
+// availability, and the user's routing policy applied. Results are ordered by
+// the user's priority list first, then by model ID.
+func (r *ModelRegistry) ModelCatalog() []ModelCatalogEntry {
+	r.mutex.RLock()
+	defer r.mutex.RUnlock()
+
+	entries := make([]ModelCatalogEntry, 0, len(r.models))
+	for modelID, registration := range r.models {
+		if registration == nil || registration.Info == nil {
+			continue
+		}
+		providers := make([]string, 0, len(registration.Providers))
+		for name, count := range registration.Providers {
+			if count > 0 {
+				providers = append(providers, name)
+			}
+		}
+		sort.Strings(providers)
+		position, prioritized := modelpolicy.PriorityPosition(modelID)
+		entries = append(entries, ModelCatalogEntry{
+			ID:          modelID,
+			DisplayName: registration.Info.DisplayName,
+			OwnedBy:     registration.Info.OwnedBy,
+			Providers:   providers,
+			Available:   r.GetModelCount(modelID),
+			Disabled:    modelpolicy.IsDisabled(modelID),
+			Priority:    position,
+			Prioritized: prioritized,
+		})
+	}
+
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].Prioritized != entries[j].Prioritized {
+			return entries[i].Prioritized
+		}
+		if entries[i].Prioritized && entries[j].Prioritized && entries[i].Priority != entries[j].Priority {
+			return entries[i].Priority < entries[j].Priority
+		}
+		return entries[i].ID < entries[j].ID
+	})
+	return entries
+}
+
+// InvalidateAvailableModelsCache drops the cached /v1/models snapshots so the
+// next listing reflects the current routing policy. Call after the policy
+// changes (management mutations, config hot-reload).
+func (r *ModelRegistry) InvalidateAvailableModelsCache() {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.availableModelsCache = make(map[string]availableModelsCacheEntry)
 }

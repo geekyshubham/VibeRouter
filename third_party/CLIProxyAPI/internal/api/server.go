@@ -704,6 +704,19 @@ func (s *Server) registerManagementRoutes() {
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
+
+		// Model routing policy (control panel: choose + order served models).
+		mgmt.GET("/routing/models", s.mgmt.GetModelRouting)
+		mgmt.GET("/routing/model-priority", s.mgmt.GetModelPriority)
+		mgmt.PUT("/routing/model-priority", s.mgmt.PutModelPriority)
+		mgmt.PATCH("/routing/model-priority", s.mgmt.PutModelPriority)
+		mgmt.GET("/routing/disabled-models", s.mgmt.GetDisabledModels)
+		mgmt.PUT("/routing/disabled-models", s.mgmt.PutDisabledModels)
+		mgmt.PATCH("/routing/disabled-models", s.mgmt.PutDisabledModels)
+		mgmt.GET("/routing/model-failover", s.mgmt.GetModelFailover)
+		mgmt.PUT("/routing/model-failover", s.mgmt.PutModelFailover)
+		mgmt.PATCH("/routing/model-failover", s.mgmt.PutModelFailover)
+
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
 		mgmt.DELETE("/auth-files", s.mgmt.DeleteAuthFile)
