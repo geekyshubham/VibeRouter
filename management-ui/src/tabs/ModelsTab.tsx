@@ -13,6 +13,7 @@ import apiClient, { asArray, pluckArray } from '../lib/apiClient';
 import type { ModelCatalogEntry, ModelRoutingResponse } from '../lib/types';
 import { providerMeta } from '../lib/providers';
 import Icon from '../lib/icons';
+import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import EmptyState from '../components/EmptyState';
 import LoadingBlock from '../components/LoadingBlock';
@@ -31,28 +32,35 @@ export default function ModelsTab() {
   const { toast } = useToast();
   const q = useManagementQuery<ModelRoutingResponse>('/routing/models');
   const [busy, setBusy] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
 
   const catalog = pluckArray<ModelCatalogEntry>(q.data, 'models');
   const priority = pluckArray<string>(q.data, 'model-priority');
   const failover = Boolean(q.data?.['model-failover']);
 
+  const needle = filter.trim().toLowerCase();
+  const matches = (id: string) => !needle || id.toLowerCase().includes(needle);
+
   const byID = new Map(catalog.map((m) => [m.id, m]));
   const known = new Set(catalog.map((m) => m.id));
 
   // Prioritized models in list order (stale IDs kept visible so the operator
-  // can prune them), then every unprioritized catalog model alphabetically.
-  const prioritized: RoutedModel[] = priority.map((id) => {
-    const entry = byID.get(id);
-    return {
-      id,
-      providers: asArray<string>(entry?.providers),
-      available: entry?.available ?? 0,
-      disabled: entry?.disabled ?? false,
-      prioritized: true,
-    };
-  });
+  // can prune them), then every unprioritized catalog model alphabetically —
+  // both filtered by the search box.
+  const prioritized: RoutedModel[] = priority
+    .filter(matches)
+    .map((id) => {
+      const entry = byID.get(id);
+      return {
+        id,
+        providers: asArray<string>(entry?.providers),
+        available: entry?.available ?? 0,
+        disabled: entry?.disabled ?? false,
+        prioritized: true,
+      };
+    });
   const rest: RoutedModel[] = catalog
-    .filter((m) => !m.prioritized)
+    .filter((m) => !m.prioritized && matches(m.id))
     .map((m) => ({
       id: m.id,
       providers: asArray<string>(m.providers),
@@ -216,12 +224,23 @@ export default function ModelsTab() {
 
   return (
     <section className="view">
+      <PageHeader
+        title="Models"
+        sub="Choose which models VibeRouter serves and in what order."
+        trail={
+          <label className="search">
+            <Icon.Search />
+            <input
+              className="inp"
+              placeholder="Filter models…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              aria-label="Filter models"
+            />
+          </label>
+        }
+      />
       <div className="glass-panel card">
-        <SectionHeader
-          Glyph={Icon.Activity}
-          title="Model routing"
-          sub="Choose which models VibeRouter serves and in what order"
-        />
         <div className="cfg-row">
           <div className="cfg-label">
             <div className="ct">Failover to next model when exhausted</div>
@@ -248,16 +267,6 @@ export default function ModelsTab() {
           Glyph={Icon.List}
           title="Priority order"
           sub="First match is used first; on exhaustion the next one takes over (with failover on)"
-          trail={
-            <button
-              className="btn btn-soft btn-sm"
-              disabled={q.isFetching}
-              onClick={() => void reload()}
-            >
-              <Icon.Refresh />
-              <span>Refresh</span>
-            </button>
-          }
         />
         {q.isLoading ? (
           <LoadingBlock rows={4} />

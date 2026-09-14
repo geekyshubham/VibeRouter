@@ -1,21 +1,22 @@
 /* ============================================================================
-   AccountsTab — lists OAuth token files under ~/.cli-proxy-api. Operator can
-   toggle a file disabled (PATCH /auth-files/status) or delete it
-   (DELETE /auth-files?name=). The files list is normalized via pluckArray so a
-   null response renders the empty state instead of crashing.
+   AccountsTab — lists OAuth token files under ~/.cli-proxy-api with live
+   health, request-activity sparklines (recent_requests), and a search filter.
+   Operator can toggle a file disabled (PATCH /auth-files/status), delete it
+   (DELETE /auth-files?name=), or copy its path.
    ========================================================================== */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useManagementQuery } from '../lib/useManagementQuery';
 import apiClient, { pluckArray } from '../lib/apiClient';
 import type { AuthFile } from '../lib/types';
 import { timeAgo } from '../lib/format';
-import { providerMeta } from '../lib/providers';
+import { providerMeta, providerTint } from '../lib/providers';
 import Icon from '../lib/icons';
+import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import EmptyState from '../components/EmptyState';
 import LoadingBlock from '../components/LoadingBlock';
-import ProviderLogo from '../components/ProviderLogo';
+import Sparkline from '../components/Sparkline';
 import { useToast } from '../context/ToastContext';
 
 export default function AccountsTab() {
@@ -23,8 +24,20 @@ export default function AccountsTab() {
   const { toast } = useToast();
   const q = useManagementQuery<{ files: AuthFile[] | null }>('/auth-files');
   const [busy, setBusy] = useState<string | null>(null);
+  const [filter, setFilter] = useState('');
 
   const files = pluckArray<AuthFile>(q.data, 'files').filter((f) => f && f.name);
+  const filtered = useMemo(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) return files;
+    return files.filter((f) =>
+      `${f.label ?? ''} ${f.name} ${f.provider ?? ''}`.toLowerCase().includes(needle),
+    );
+  }, [files, filter]);
+
+  const healthyCount = files.filter(
+    (f) => !f.disabled && !f.unavailable && f.status?.toLowerCase() !== 'error',
+  ).length;
 
   async function refresh() {
     await qc.invalidateQueries({ queryKey: ['mgmt', '/auth-files'] });
@@ -60,52 +73,85 @@ export default function AccountsTab() {
     }
   }
 
+  async function copyPath(file: AuthFile) {
+    try {
+      await navigator.clipboard.writeText(file.path || file.name);
+      toast('Path copied', 'ok');
+    } catch {
+      toast('Copy failed', 'bad');
+    }
+  }
+
   return (
     <section className="view">
-      <div className="glass-panel card">
-        <SectionHeader
-          Glyph={Icon.Users}
-          title="OAuth accounts"
-          sub="OAuth token files under ~/.cli-proxy-api"
-          trail={
+      <PageHeader
+        title="Accounts"
+        sub="OAuth credentials the proxy rotates through — health, activity, and availability."
+        trail={
+          <>
+            <label className="search">
+              <Icon.Search />
+              <input
+                className="inp"
+                placeholder="Filter accounts…"
+                value={filter}
+                onChange={(e) => setFilter(e.target.value)}
+                aria-label="Filter accounts"
+              />
+            </label>
             <button className="btn btn-soft btn-sm" onClick={refresh} disabled={q.isFetching}>
               <Icon.Refresh />
               <span>Refresh</span>
             </button>
-          }
+          </>
+        }
+      />
+
+      <div className="glass-panel card">
+        <SectionHeader
+          Glyph={Icon.Users}
+          title={`${filtered.length} account${filtered.length === 1 ? '' : 's'}`}
+          sub={`${healthyCount} healthy · ${files.length - healthyCount} off or degraded`}
         />
 
         {q.isLoading ? (
           <LoadingBlock rows={4} />
-        ) : files.length === 0 ? (
-          <EmptyState Glyph={Icon.Users} title="No accounts yet">
-            Sign in to a provider from the VibeRouter menu bar. OAuth token files will appear here.
+        ) : filtered.length === 0 ? (
+          <EmptyState Glyph={Icon.Users} title={files.length === 0 ? 'No accounts yet' : 'No matches'}>
+            {files.length === 0
+              ? 'Sign in to a provider from the VibeRouter menu bar. OAuth token files will appear here.'
+              : `Nothing matches “${filter}”.`}
           </EmptyState>
         ) : (
           <div className="stack">
-            {files.map((file) => {
+            {filtered.map((file) => {
               const meta = providerMeta(file.provider || file.type || file.name);
               const healthy = !file.unavailable && file.status?.toLowerCase() !== 'error';
               return (
-                <div className="prov glass" key={file.name}>
-                  <ProviderLogo provider={file.provider || file.type || file.name} />
+                <div className="prov" key={file.name}>
+                  <span
+                    className="plogo"
+                    aria-hidden
+                    style={{
+                      width: 30,
+                      height: 30,
+                      background: `color-mix(in srgb, ${providerTint(file.provider || file.type)} 16%, transparent)`,
+                      color: providerTint(file.provider || file.type),
+                    }}
+                  >
+                    {meta.short}
+                  </span>
                   <div className="info">
                     <div className="n">{file.label || meta.label}</div>
                     <div className="m">{file.name}</div>
                   </div>
+                  <Sparkline values={file.recent_requests} />
+                  <span className={`pill ${file.disabled ? 'mut' : healthy ? 'ok' : 'warn'}`}>
+                    <span className={`dot ${file.disabled ? '' : healthy ? 'ok' : 'warn'}`} />
+                    {file.disabled ? 'Disabled' : healthy ? 'Active' : file.status || 'Degraded'}
+                  </span>
+                  <span className="small">{timeAgo(file.updated_at || file.modtime)}</span>
                   <div className="row">
-                    {file.disabled ? (
-                      <span className="pill mut">
-                        <Icon.X />
-                        Disabled
-                      </span>
-                    ) : (
-                      <span className={`pill ${healthy ? 'ok' : 'warn'}`}>
-                        <span className={`dot ${healthy ? 'ok' : 'warn'}`} />
-                        {healthy ? 'Active' : file.status || 'Degraded'}
-                      </span>
-                    )}
-                    <span className="small">{timeAgo(file.updated_at || file.modtime)}</span>
                     <button
                       className={`sw ${file.disabled ? '' : 'on'}`}
                       role="switch"
@@ -114,6 +160,13 @@ export default function AccountsTab() {
                       disabled={busy === file.name}
                       onClick={() => toggleDisabled(file)}
                     />
+                    <button
+                      className="btn-icon"
+                      title="Copy credential path"
+                      onClick={() => copyPath(file)}
+                    >
+                      <Icon.Copy />
+                    </button>
                     <button
                       className="btn-icon btn-danger"
                       title="Delete account"

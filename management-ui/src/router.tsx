@@ -5,6 +5,7 @@
 import { createHashRouter, Navigate } from 'react-router-dom';
 import Shell from './components/layout/Shell';
 import OverviewTab from './tabs/OverviewTab';
+import PlaygroundTab from './tabs/PlaygroundTab';
 import AccountsTab from './tabs/AccountsTab';
 import ModelsTab from './tabs/ModelsTab';
 import KeysTab from './tabs/KeysTab';
@@ -18,6 +19,7 @@ export const router = createHashRouter([
     children: [
       { index: true, element: <Navigate to="/overview" replace /> },
       { path: 'overview', element: <OverviewTab /> },
+      { path: 'playground', element: <PlaygroundTab /> },
       { path: 'accounts', element: <AccountsTab /> },
       { path: 'models', element: <ModelsTab /> },
       { path: 'keys', element: <KeysTab /> },

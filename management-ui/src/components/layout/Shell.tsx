@@ -1,10 +1,10 @@
 /* ============================================================================
-   Shell — the authenticated layout frame. Sticky TopBar + TabBar, an offline
-   banner when the backend drops, and the routed tab in an animated panel.
+   Shell — the authenticated layout frame: sidebar rail + scrolling content
+   column. UsageDayProvider spans the frame so any page can read or change the
+   reported-on day.
    ========================================================================== */
 import { Outlet } from 'react-router-dom';
-import TopBar from './TopBar';
-import TabBar from './TabBar';
+import Sidebar from './Sidebar';
 import OfflineBanner from './OfflineBanner';
 import { useOnline } from '../../context/OnlineContext';
 import { UsageDayProvider } from '../../context/UsageDayContext';
@@ -12,16 +12,15 @@ import { UsageDayProvider } from '../../context/UsageDayContext';
 export default function Shell() {
   const { online } = useOnline();
   return (
-    // UsageDayProvider spans both the TopBar (which holds the date picker) and the
-    // routed tab (which renders that day's breakdown), so the two stay in sync.
     <UsageDayProvider>
-      <div className="shell">
-        <TopBar />
-        <TabBar />
-        {!online && <OfflineBanner />}
-        <main className="tabpanel" role="tabpanel">
-          <Outlet />
-        </main>
+      <div className="app">
+        <Sidebar />
+        <div className="content">
+          {!online && <OfflineBanner />}
+          <main className="tabpanel" role="tabpanel">
+            <Outlet />
+          </main>
+        </div>
       </div>
     </UsageDayProvider>
   );

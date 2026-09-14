@@ -11,6 +11,7 @@ import { useManagementQuery } from '../lib/useManagementQuery';
 import apiClient, { pluckArray } from '../lib/apiClient';
 import { maskKey } from '../lib/format';
 import Icon from '../lib/icons';
+import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import EmptyState from '../components/EmptyState';
 import LoadingBlock from '../components/LoadingBlock';
@@ -106,6 +107,10 @@ export default function KeysTab() {
 
   return (
     <section className="view">
+      <PageHeader
+        title="Keys"
+        sub="Who can call the proxy, and what it uses upstream."
+      />
       <div className="glass-panel card">
         <SectionHeader
           Glyph={Icon.Key}

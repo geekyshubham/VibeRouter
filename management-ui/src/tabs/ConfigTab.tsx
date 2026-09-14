@@ -10,6 +10,7 @@ import { useManagementQuery } from '../lib/useManagementQuery';
 import apiClient, { asArray, pluckArray } from '../lib/apiClient';
 import type { BackendConfig, CompatProvider } from '../lib/types';
 import Icon from '../lib/icons';
+import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import EmptyState from '../components/EmptyState';
 import LoadingBlock from '../components/LoadingBlock';
@@ -67,6 +68,10 @@ export default function ConfigTab() {
 
   return (
     <section className="view">
+      <PageHeader
+        title="Config"
+        sub="Runtime flags, upstream proxy, and OpenAI-compatible providers."
+      />
       <div className="glass-panel card">
         <SectionHeader Glyph={Icon.Settings} title="Backend settings" sub="Runtime configuration flags" />
 
@@ -105,7 +110,7 @@ export default function ConfigTab() {
         <SectionHeader
           Glyph={Icon.Server}
           title="Compatible providers"
-          sub="OpenAI-compatible upstreams"
+          sub="OpenAI-compatible upstreams configured in config.yaml"
           trail={
             <button
               className="btn btn-soft btn-sm"

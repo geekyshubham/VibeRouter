@@ -14,6 +14,7 @@ import App from './App';
 import { OnlineProvider } from './context/OnlineContext';
 import { ToastProvider } from './context/ToastContext';
 import { AuthProvider } from './context/AuthContext';
+import { ThemeProvider } from './lib/theme';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -30,14 +31,16 @@ if (!rootEl) throw new Error('#root mount point not found');
 
 createRoot(rootEl).render(
   <StrictMode>
-    <QueryClientProvider client={queryClient}>
-      <OnlineProvider>
-        <ToastProvider>
-          <AuthProvider>
-            <App />
-          </AuthProvider>
-        </ToastProvider>
-      </OnlineProvider>
-    </QueryClientProvider>
+    <ThemeProvider>
+      <QueryClientProvider client={queryClient}>
+        <OnlineProvider>
+          <ToastProvider>
+            <AuthProvider>
+              <App />
+            </AuthProvider>
+          </ToastProvider>
+        </OnlineProvider>
+      </QueryClientProvider>
+    </ThemeProvider>
   </StrictMode>,
 );
