@@ -56,14 +56,25 @@ enum QuotaWakeService {
     }
 
     static func wake(account: AuthAccount, proxyPort: Int = 8317) async -> WakeResult {
-        // Always refresh first so direct-auth fallbacks use a live access token.
+        // Always refresh first so native wakes use a live access token.
         _ = await TokenRefreshService.refreshAccountFile(account.filePath)
 
-        guard NativeUsageFetcher.readAuthPayload(at: account.filePath) != nil else {
+        guard let rawPayload = NativeUsageFetcher.readAuthPayload(at: account.filePath) else {
             return .failure(message: "Could not read credentials for \(account.baseDisplayName)")
         }
+        let payload = TokenRefreshService.flattenedAuth(rawPayload)
 
-        // 1) Prefer local proxy with *real* model IDs discovered from /v1/models.
+        // 1) Per-account native wake FIRST. The proxy routes with fill-first, so a
+        //    proxy wake engages whichever credential it picks — not necessarily the
+        //    account whose card was clicked. Native calls target this account's own
+        //    token + account id, which is the only way to wake *this* seat's window.
+        let nativeResult = await nativeWake(account: account, payload: payload)
+        if case .success(let msg) = nativeResult {
+            return .success(message: msg)
+        }
+
+        // 2) Proxy wake fallback (covers providers without a native path, and
+        //    accounts whose token refresh failed but the proxy can still route).
         let models = await resolveWakeModels(for: account.type, proxyPort: proxyPort)
         let proxyResult = await wakeViaLocalProxy(
             models: models,
@@ -72,66 +83,107 @@ enum QuotaWakeService {
         )
         if case .success(let msg) = proxyResult {
             return .success(
-                message: "Woke \(account.type.displayName) 5h window for \(account.baseDisplayName). \(msg)"
+                message: "Woke \(account.type.displayName) window for \(account.baseDisplayName). \(msg)"
             )
         }
 
-        // 2) Provider-native fallbacks when proxy routing fails.
-        switch account.type {
-        case .codex:
-            if let payload = NativeUsageFetcher.readAuthPayload(at: account.filePath),
-               let accessToken = stringValue(payload, keys: ["access_token"])
-            {
-                let accountID = stringValue(payload, keys: ["account_id"])
-                    ?? chatgptAccountIDFromJWT(accessToken)
-                for model in ["gpt-5.4-mini", "gpt-5.5", "gpt-5.4", "codex-mini-latest"] {
-                    if await postCodexResponse(accessToken: accessToken, accountID: accountID, model: model) {
-                        return .success(
-                            message: "Woke Codex 5h window for \(account.baseDisplayName) via OpenAI (\(model))"
-                        )
-                    }
-                }
-            }
-        case .claude:
-            if let payload = NativeUsageFetcher.readAuthPayload(at: account.filePath),
-               let accessToken = stringValue(payload, keys: ["access_token"]),
-               await postClaudeMessage(accessToken: accessToken)
-            {
-                return .success(message: "Woke Claude 5h window for \(account.baseDisplayName) via Anthropic")
-            }
-        default:
-            break
+        var details = [
+            proxyDetail(nativeResult ?? .failure(message: "")),
+            proxyDetail(proxyResult),
+        ].filter { !$0.isEmpty }
+        if details.isEmpty {
+            details.append("No wake path available")
         }
-
         return .failure(
-            message: "Could not wake \(account.type.displayName) for \(account.baseDisplayName). \(proxyDetail(proxyResult)) Ensure the proxy is running and this account is enabled."
+            message: "Could not wake \(account.type.displayName) for \(account.baseDisplayName). \(details.joined(separator: " · ")) Ensure the proxy is running and this account is enabled."
         )
     }
+
+    // MARK: - Native per-account wake
+
+    /// Outcome of a direct provider wake attempt.
+    fileprivate enum NativeWakeOutcome {
+        case engaged(detail: String)
+        case failed(detail: String)
+    }
+
+    /// Sends a tiny request *directly to the provider* using this account's own
+    /// credentials, so the rolling window starts for exactly this account.
+    private static func nativeWake(account: AuthAccount, payload: [String: Any]) async -> WakeResult? {
+        switch account.type {
+        case .codex:
+            guard let accessToken = stringValue(payload, keys: ["access_token"]) else { return nil }
+            let accountID = stringValue(payload, keys: ["account_id"])
+                ?? chatgptAccountIDFromJWT(accessToken)
+            for model in codexWakeModels {
+                let outcome = await postCodexResponse(accessToken: accessToken, accountID: accountID, model: model)
+                if case .engaged(let detail) = outcome {
+                    return .success(message: "Woke Codex window for \(account.baseDisplayName) via OpenAI (\(model))\(detail.isEmpty ? "" : " — \(detail)")")
+                }
+            }
+            return .failure(message: "OpenAI rejected the wake request (all models failed)")
+        case .claude:
+            guard let accessToken = stringValue(payload, keys: ["access_token"]),
+                  await postClaudeMessage(accessToken: accessToken)
+            else {
+                return .failure(message: "Anthropic rejected the wake request")
+            }
+            return .success(message: "Woke Claude 5h window for \(account.baseDisplayName) via Anthropic")
+        case .antigravity, .gemini:
+            guard let accessToken = stringValue(payload, keys: ["access_token"]) else { return nil }
+            let projectID = stringValue(payload, keys: ["project_id"])
+            for model in cloudCodeWakeModels {
+                let outcome = await postCloudCodeGenerate(accessToken: accessToken, projectID: projectID, model: model)
+                if case .engaged(let detail) = outcome {
+                    return .success(message: "Woke \(account.type.displayName) window for \(account.baseDisplayName) via Cloud Code (\(model))\(detail.isEmpty ? "" : " — \(detail)")")
+                }
+            }
+            return .failure(message: "Cloud Code rejected the wake request (all models failed)")
+        default:
+            return nil // no native path — caller falls back to the proxy
+        }
+    }
+
+    /// Codex model IDs the ChatGPT backend currently accepts for OAuth accounts.
+    /// (Registry slugs like gpt-5.4-mini are rejected with HTTP 400 "model is not
+    /// supported when using Codex with a ChatGPT account" — keep this list in sync
+    /// with what /v1/models reports as `owned_by: openai`.)
+    private static let codexWakeModels = ["gpt-5.5", "gpt-5.6-luna", "codex-auto-review"]
+
+    /// Cheap Cloud Code models for Antigravity/Gemini wakes.
+    private static let cloudCodeWakeModels = ["gemini-3-flash", "gemini-3.1-flash-lite"]
 
     // MARK: - Model discovery
 
     /// Resolves wake models from the proxy's live `/v1/models` catalog. IDs are
-    /// plain (`gpt-5.4-mini`); there is no `[Provider] model` namespace.
+    /// plain (`gpt-5.5`); there is no `[Provider] model` namespace.
+    ///
+    /// Matching prefers the catalog's `owned_by` field (e.g. Codex models are
+    /// `gpt-5.5`/`codex-auto-review` under `owned_by: openai`) because ID prefixes
+    /// alone miss provider-owned models: `gpt-5.5` contains no "codex", and
+    /// Antigravity-served IDs look like `gemini-3-flash`, not "antigravity".
     private static func resolveWakeModels(for type: ServiceType, proxyPort: Int) async -> [String] {
         let ports = uniquePorts(proxyPort)
-        var discovered: [String] = []
+        var entries: [(id: String, owner: String)] = []
         for port in ports {
-            if let ids = await fetchModelIDs(port: port), !ids.isEmpty {
-                discovered = ids
+            if let list = await fetchModelEntries(port: port), !list.isEmpty {
+                entries = list
                 break
             }
         }
 
+        let owners = Set(ownedByValues(for: type))
         let prefixes = providerPrefixes(for: type)
-        let matching = discovered.filter { id in
-            let lower = id.lowercased()
+        let matching = entries.filter { entry in
+            if owners.contains(entry.owner) { return true }
+            let lower = entry.id.lowercased()
             return prefixes.contains { prefix in
                 lower.hasPrefix(prefix) || lower.contains(prefix)
             }
         }
 
         // Prefer cheap / mini / flash first for a true "dummy" wake.
-        let sorted = matching.sorted { lhs, rhs in
+        let sorted = matching.map(\.id).sorted { lhs, rhs in
             wakePriority(lhs) < wakePriority(rhs)
         }
 
@@ -144,7 +196,7 @@ enum QuotaWakeService {
         // never stand in for a provider the proxy cannot serve — that would report
         // a successful wake after pinging somebody else's quota.
         guard hasServableModels(type) else { return models }
-        for fallback in ["gpt-5.4-mini", "claude-sonnet-4-20250514", "gemini-3-flash"]
+        for fallback in ["gpt-5.5", "claude-sonnet-4-20250514", "gemini-3-flash"]
             where !models.contains(fallback)
         {
             models.append(fallback)
@@ -152,11 +204,28 @@ enum QuotaWakeService {
         return models
     }
 
+    /// `/v1/models` `owned_by` values that actually serve this provider's quota.
+    private static func ownedByValues(for type: ServiceType) -> [String] {
+        switch type {
+        case .codex: return ["openai"]
+        case .claude: return ["anthropic"]
+        case .antigravity: return ["antigravity"]
+        case .gemini: return ["antigravity", "gemini"]
+        case .copilot: return ["github-copilot", "copilot"]
+        case .kiro: return ["kiro"]
+        case .zai: return ["zai", "zhipu"]
+        case .grok: return ["xai"]
+        case .kimi: return ["kimi", "moonshot"]
+        default: return [type.rawValue]
+        }
+    }
+
     private static func providerPrefixes(for type: ServiceType) -> [String] {
         switch type {
         case .codex: return ["[codex]", "codex"]
         case .claude: return ["[claude]", "claude"]
-        case .antigravity: return ["[antigravity]", "antigravity"]
+        // Antigravity-served model IDs look like `gemini-3-flash` / `claude-sonnet-4-6`.
+        case .antigravity: return ["[antigravity]", "antigravity", "gemini"]
         case .gemini: return ["[gemini]", "gemini"]
         case .copilot: return ["[github-copilot]", "github-copilot", "copilot"]
         case .kiro: return ["[kiro]", "kiro"]
@@ -170,10 +239,12 @@ enum QuotaWakeService {
     private static func preferredFallbackModels(for type: ServiceType) -> [String] {
         switch type {
         case .codex:
+            // ChatGPT OAuth rejects registry-era slugs (gpt-5.4 / gpt-5.4-mini /
+            // codex-mini-latest) with HTTP 400 — only current backend models work.
             return [
-                "gpt-5.4-mini",
-                "gpt-5.4",
                 "gpt-5.5",
+                "gpt-5.6-luna",
+                "codex-auto-review",
             ]
         case .claude:
             return [
@@ -183,9 +254,9 @@ enum QuotaWakeService {
             ]
         case .antigravity:
             return [
-                "gemini-3.5-flash-extra-low",
-                "gemini-3.5-flash-low",
                 "gemini-3-flash",
+                "gemini-3.1-flash-lite",
+                "gemini-3.5-flash-lite",
             ]
         case .gemini:
             return [
@@ -225,7 +296,7 @@ enum QuotaWakeService {
         return 10
     }
 
-    private static func fetchModelIDs(port: Int) async -> [String]? {
+    private static func fetchModelEntries(port: Int) async -> [(id: String, owner: String)]? {
         guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else { return nil }
         var request = URLRequest(url: url)
         request.timeoutInterval = 8
@@ -236,7 +307,9 @@ enum QuotaWakeService {
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let list = json["data"] as? [[String: Any]]
             else { return nil }
-            return list.compactMap { $0["id"] as? String }
+            return list.map { entry in
+                (stringValue(entry, keys: ["id"]) ?? "", stringValue(entry, keys: ["owned_by"]) ?? "")
+            }
         } catch {
             return nil
         }
@@ -314,16 +387,27 @@ enum QuotaWakeService {
         }
     }
 
-    // MARK: - Direct provider fallbacks
+    // MARK: - Direct provider wakes
 
-    private static func postCodexResponse(accessToken: String, accountID: String?, model: String) async -> Bool {
-        guard let url = URL(string: "https://chatgpt.com/backend-api/codex/responses") else { return false }
+    /// Codex wake against the ChatGPT backend. Mirrors what the bundled proxy's
+    /// executor sends: `stream` MUST be true and `input` MUST be a list — the
+    /// backend answers HTTP 400 "Input must be a list" / "Stream must be set to
+    /// true" otherwise. HTTP 429 (usage_limit_reached) still means the request
+    /// landed on this account and engaged the window, so it counts as success.
+    private static func postCodexResponse(
+        accessToken: String,
+        accountID: String?,
+        model: String
+    ) async -> NativeWakeOutcome {
+        guard let url = URL(string: "https://chatgpt.com/backend-api/codex/responses") else {
+            return .failed(detail: "Invalid Codex URL")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 45
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
         request.setValue("codex_cli_rs", forHTTPHeaderField: "User-Agent")
         request.setValue("codex_cli_rs", forHTTPHeaderField: "originator")
         if let accountID, !accountID.isEmpty {
@@ -332,18 +416,61 @@ enum QuotaWakeService {
         }
         let body: [String: Any] = [
             "model": model,
-            "input": "Reply with the single word OK.",
+            "instructions": "",
+            "input": [
+                [
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": "Reply with the single word OK."]
+                    ],
+                ]
+            ],
             "store": false,
-            "stream": false,
+            "stream": true,
         ]
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse else { return false }
-            return (200...299).contains(http.statusCode) || http.statusCode == 429
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failed(detail: "Invalid Codex response")
+            }
+            if (200...299).contains(http.statusCode) {
+                return .engaged(detail: "")
+            }
+            if http.statusCode == 429 {
+                return .engaged(detail: codexRateLimitDetail(data))
+            }
+            let snippet = String(data: data.prefix(160), encoding: .utf8)?
+                .replacingOccurrences(of: "\n", with: " ") ?? ""
+            return .failed(detail: "OpenAI HTTP \(http.statusCode) for \(model): \(snippet)")
         } catch {
-            return false
+            return .failed(detail: error.localizedDescription)
         }
+    }
+
+    /// Extracts a short human hint from a Codex 429 body (`resets_at`).
+    private static func codexRateLimitDetail(_ data: Data) -> String {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return "usage limit reached"
+        }
+        let resetSeconds: Int?
+        if let value = json["resets_in_seconds"] as? NSNumber {
+            resetSeconds = value.intValue
+        } else if let value = json["resets_in_seconds"] as? Int {
+            resetSeconds = value
+        } else {
+            resetSeconds = nil
+        }
+        if let resetSeconds, resetSeconds > 0 {
+            let minutes = (resetSeconds + 59) / 60
+            if minutes >= 60 {
+                let hours = (minutes + 30) / 60
+                return "window engaged but usage limit reached — resets in ~\(hours)h"
+            }
+            return "window engaged but usage limit reached — resets in ~\(max(1, minutes))m"
+        }
+        return "window engaged but usage limit reached"
     }
 
     private static func postClaudeMessage(accessToken: String) async -> Bool {
@@ -371,6 +498,71 @@ enum QuotaWakeService {
         } catch {
             return false
         }
+    }
+
+    /// Antigravity/Gemini wake against the Cloud Code backend using this
+    /// account's own OAuth token — same `v1internal:generateContent` shape the
+    /// bundled proxy and the Antigravity IDE send (daily host first, prod
+    /// fallback). HTTP 429 still engages the account's window.
+    private static func postCloudCodeGenerate(
+        accessToken: String,
+        projectID: String?,
+        model: String
+    ) async -> NativeWakeOutcome {
+        let hosts = [
+            "https://daily-cloudcode-pa.googleapis.com",
+            "https://cloudcode-pa.googleapis.com",
+        ]
+        var body: [String: Any] = [
+            "model": model,
+            "request": [
+                "contents": [
+                    [
+                        "role": "user",
+                        "parts": [["text": "Reply with the single word OK."]],
+                    ]
+                ],
+            ],
+        ]
+        if let projectID, !projectID.isEmpty {
+            body["project"] = projectID
+        }
+        guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
+            return .failed(detail: "Could not build Cloud Code request")
+        }
+
+        var lastDetail = "No Cloud Code host tried"
+        for host in hosts {
+            guard let url = URL(string: "\(host)/v1internal:generateContent") else { continue }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.timeoutInterval = 30
+            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue(NativeUsageFetcher.cloudCodeUserAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("gl-node/22.21.1", forHTTPHeaderField: "X-Goog-Api-Client")
+            request.httpBody = bodyData
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    lastDetail = "Invalid Cloud Code response"
+                    continue
+                }
+                if (200...299).contains(http.statusCode) || http.statusCode == 429 {
+                    return .engaged(detail: "")
+                }
+                if http.statusCode == 401 || http.statusCode == 403 {
+                    // Auth problem — the fallback host will reject the same token.
+                    return .failed(detail: "Cloud Code session rejected (HTTP \(http.statusCode))")
+                }
+                let snippet = String(data: data.prefix(160), encoding: .utf8)?
+                    .replacingOccurrences(of: "\n", with: " ") ?? ""
+                lastDetail = "Cloud Code HTTP \(http.statusCode) for \(model): \(snippet)"
+            } catch {
+                lastDetail = error.localizedDescription
+            }
+        }
+        return .failed(detail: lastDetail)
     }
 
     private static func chatgptAccountIDFromJWT(_ token: String?) -> String? {

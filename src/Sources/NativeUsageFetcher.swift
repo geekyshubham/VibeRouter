@@ -1811,7 +1811,7 @@ enum NativeUsageFetcher {
     }
 
     /// Match Cockpit / IDE UA shape: `antigravity/<ver> darwin/arm64`.
-    private static var cloudCodeUserAgent: String {
+    static var cloudCodeUserAgent: String {
         let ver = Bundle(path: "/Applications/Antigravity IDE.app")
             .flatMap { $0.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
             ?? Bundle(path: "/Applications/Antigravity.app")
