@@ -36,6 +36,7 @@
 | **Sessions** | Proactive token refresh · auto “wake 5h window” |
 | **Status** | Provider status pages + incidents |
 | **Menu bar** | Overview · Status · Analytics · optional peak-quota badge |
+| **CLI + TUI** | Stable JSON automation contract, terminal dashboard, account actions, server control, and shell completions |
 
 Also: one-click server start/stop, multi-account round-robin, provider enable/disable, Vercel AI Gateway option, self-contained `.app` bundle.
 
@@ -94,6 +95,21 @@ See [INSTALLATION.md](INSTALLATION.md).
 4. Point coding tools (Factory, Amp, etc.) at the local proxy  
 
 Guides: [Factory CLI](FACTORY_SETUP.md) · [Amp CLI](AMPCODE_SETUP.md)
+
+### Command line
+
+Install the optional shell command from an installed app:
+
+```bash
+/Applications/VibeRouter.app/Contents/MacOS/CLIProxyMenuBar cli install-cli
+export PATH="$HOME/.local/bin:$PATH"
+viberouter status
+```
+
+Running `viberouter` with no arguments opens the terminal dashboard. Automation should
+use `--json`; start with `viberouter capabilities --json` for the versioned command
+contract. See the [CLI and TUI guide](docs/CLI.md) for account switching, OAuth/import,
+server control, exit behavior, and completions.
 
 ---
 

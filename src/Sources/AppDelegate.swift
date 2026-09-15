@@ -18,7 +18,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var wakeScheduler: QuotaWakeScheduler!
     private var settingsCancellables = Set<AnyCancellable>()
     private var popoverController: MenuBarPopoverController!
-    private let notificationCenter = UNUserNotificationCenter.current()
+    private lazy var notificationCenter: UNUserNotificationCenter? = Bundle.main.bundleIdentifier != nil ? UNUserNotificationCenter.current() : nil
     private var notificationPermissionGranted = false
     private let updaterController: SPUStandardUpdaterController
     private var authFileMonitor: DispatchSourceFileSystemObject?
@@ -101,6 +101,45 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             name: .authDirectoryChanged,
             object: nil
         )
+        registerCLICommands()
+    }
+
+    /// Allow the separately invoked `viberouter` command to control the already-running
+    /// menu-bar process without opening a second app instance or exposing a network port.
+    private func registerCLICommands() {
+        let center = DistributedNotificationCenter.default()
+        center.addObserver(self, selector: #selector(handleCLIServerStart), name: VibeRouterDistributedCommand.serverStart, object: nil)
+        center.addObserver(self, selector: #selector(handleCLIServerStop), name: VibeRouterDistributedCommand.serverStop, object: nil)
+        center.addObserver(self, selector: #selector(handleCLIServerRestart), name: VibeRouterDistributedCommand.serverRestart, object: nil)
+        center.addObserver(self, selector: #selector(handleCLIProviderState(_:)), name: VibeRouterDistributedCommand.providerState, object: nil)
+        center.addObserver(self, selector: #selector(handleCLISettingsChanged), name: VibeRouterDistributedCommand.settingsChanged, object: nil)
+    }
+
+    @objc private func handleCLIServerStart() {
+        if !serverManager.isRunning { startServer() }
+    }
+
+    @objc private func handleCLIServerStop() {
+        stopServer()
+    }
+
+    @objc private func handleCLIServerRestart() {
+        thinkingProxy.stop()
+        serverManager.stop { [weak self] in self?.startServer() }
+    }
+
+    @objc private func handleCLIProviderState(_ note: Notification) {
+        guard let provider = note.userInfo?["provider"] as? String,
+              let enabled = note.userInfo?["enabled"] as? Bool
+        else { return }
+        serverManager.setProviderEnabled(provider, enabled: enabled)
+    }
+
+    @objc private func handleCLISettingsChanged() {
+        // Settings were persisted by the CLI. UserDefaults notifications do not cross
+        // process boundaries, so rebuild the schedules/config that depend on them.
+        usageStore.applyRefreshSettings()
+        serverManager.handleObservedConfigInputsChanged()
     }
     
     private func setupSessionAndScheduler() {
@@ -220,8 +259,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
     
     private func configureNotifications() {
-        notificationCenter.delegate = self
-        notificationCenter.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
+        notificationCenter?.delegate = self
+        notificationCenter?.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, error in
             if let error = error {
                 NSLog("[Notifications] Authorization failed: %@", error.localizedDescription)
             }
@@ -467,7 +506,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             trigger: nil
         )
         
-        notificationCenter.add(request) { error in
+        notificationCenter?.add(request) { error in
             if let error = error {
                 NSLog("[Notifications] Failed to deliver notification '%@': %@", title, error.localizedDescription)
             }

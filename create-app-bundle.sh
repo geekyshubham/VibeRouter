@@ -17,7 +17,7 @@ SRC_DIR="$PROJECT_DIR/src"
 # NOTE: this contains a SPACE — every path built from it must stay quoted, here and
 # in scripts/build-release-artifacts.sh and .github/workflows/release.yml.
 APP_NAME="VibeRouter"
-BUNDLE_ID="com.cliproxyapi.menubar"
+BUNDLE_ID="com.viberouter.app"
 BUILD_DIR="$SRC_DIR/.build/release"
 APP_DIR="$PROJECT_DIR/$APP_NAME.app"
 
@@ -44,6 +44,9 @@ mkdir -p "$APP_DIR/Contents/Frameworks"
 echo -e "${BLUE}Copying executable...${NC}"
 cp "$BUILD_DIR/CLIProxyMenuBar" "$APP_DIR/Contents/MacOS/"
 chmod +x "$APP_DIR/Contents/MacOS/CLIProxyMenuBar"
+# A bundle-local command name is convenient for direct invocation and ensures the
+# executable enters CLI mode without requiring the explicit `cli` compatibility arg.
+ln -s "CLIProxyMenuBar" "$APP_DIR/Contents/MacOS/viberouter"
 
 # Add rpath for Frameworks directory (needed for Sparkle)
 install_name_tool -add_rpath "@loader_path/../Frameworks" "$APP_DIR/Contents/MacOS/CLIProxyMenuBar" 2>/dev/null || true

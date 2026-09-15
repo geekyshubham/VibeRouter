@@ -1,4 +1,6 @@
-.PHONY: build app install clean run help
+.PHONY: build app install install-cli clean run help
+
+CLI_INSTALL_DIR ?= $(HOME)/.local/bin
 
 help: ## Show this help message
 	@echo "VibeRouter - macOS Menu Bar App"
@@ -27,7 +29,15 @@ install: app ## Build and install to /Applications
 	@rm -rf "/Applications/VibeProxy Ultra.app" "/Applications/VibeProxy.app"
 	@cp -R "VibeRouter.app" /Applications/
 	@xattr -cr "/Applications/VibeRouter.app" || true
+	@mkdir -p "$(CLI_INSTALL_DIR)"
+	@ln -sfn "/Applications/VibeRouter.app/Contents/MacOS/viberouter" "$(CLI_INSTALL_DIR)/viberouter"
 	@echo "✅ Installed to /Applications/VibeRouter.app"
+	@echo "✅ CLI installed to $(CLI_INSTALL_DIR)/viberouter"
+
+install-cli: app ## Install the viberouter command to ~/.local/bin (override CLI_INSTALL_DIR)
+	@mkdir -p "$(CLI_INSTALL_DIR)"
+	@ln -sfn "$(CURDIR)/VibeRouter.app/Contents/MacOS/viberouter" "$(CLI_INSTALL_DIR)/viberouter"
+	@echo "✅ CLI installed to $(CLI_INSTALL_DIR)/viberouter"
 
 run: app ## Build and run the app
 	@echo "🚀 Launching app..."

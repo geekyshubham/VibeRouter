@@ -74,6 +74,9 @@ enum TokenRefreshService {
                 // Posting a leftover RT is `refresh_token_reused` and kills the family.
                 _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
                 payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
+            } else if kind == "claude" {
+                _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file)
+                payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
             }
             payload = flattenedAuth(payload)
             if force || shouldRefresh(payload: payload) {
@@ -113,6 +116,10 @@ enum TokenRefreshService {
                         skipping: [first.file.path]
                     )
                 }
+            } else if first.type == "claude" {
+                _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: first.file)
+                livePayload = NativeUsageFetcher.readAuthPayload(at: first.file).map(flattenedAuth)
+                    ?? livePayload
             }
             if !force && !shouldRefresh(payload: livePayload) {
                 if first.type == "codex" { _ = pushCodexTokensToCLIIfFresher(livePayload) }
@@ -161,6 +168,13 @@ enum TokenRefreshService {
             payload = flattenedAuth(payload)
             if !force && !shouldRefresh(payload: payload) {
                 _ = pushCodexTokensToCLIIfFresher(payload)
+                return true
+            }
+        } else if kind == "claude" {
+            _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file)
+            payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
+            payload = flattenedAuth(payload)
+            if !force && !shouldRefresh(payload: payload) {
                 return true
             }
         }
@@ -468,13 +482,16 @@ enum TokenRefreshService {
     private static func syncClaudeCredentials(oldRefresh: String, updated: [String: Any]) {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
-        guard let data = try? Data(contentsOf: url),
-              var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return }
+        var root: [String: Any] = (try? Data(contentsOf: url)).flatMap {
+            try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+        } ?? [:]
+
+        if root.isEmpty, let kcData = readClaudeKeychainData(),
+           let kcJSON = try? JSONSerialization.jsonObject(with: kcData) as? [String: Any] {
+            root = kcJSON
+        }
+
         var oauth = (root["claudeAiOauth"] as? [String: Any]) ?? [:]
-        let stored = stringValue(oauth, keys: ["refreshToken", "refresh_token"])
-            ?? stringValue(root, keys: ["refresh_token"])
-        guard stored == oldRefresh else { return }
         if let access = stringValue(updated, keys: ["access_token"]) {
             oauth["accessToken"] = access
             root["access_token"] = access
@@ -483,12 +500,31 @@ enum TokenRefreshService {
             oauth["refreshToken"] = refresh
             root["refresh_token"] = refresh
         }
-        root["claudeAiOauth"] = oauth
-        guard writeAuthFile(root, to: url) else { return }
-        if let json = String(data: (try? JSONSerialization.data(withJSONObject: root)) ?? Data(), encoding: .utf8) {
-            writeClaudeKeychain(json)
+        if let exp = parseDate(updated["expired"] as? String) ?? parseDate(updated["expires_at"] as? String) {
+            oauth["expiresAt"] = exp.timeIntervalSince1970 * 1000
         }
-        NSLog("[TokenRefresh] Synced rotated refresh token to ~/.claude/.credentials.json")
+        root["claudeAiOauth"] = oauth
+
+        _ = writeAuthFile(root, to: url)
+        if let data = try? JSONSerialization.data(withJSONObject: root),
+           let json = String(data: data, encoding: .utf8) {
+            writeClaudeKeychain(json)
+            NSLog("[TokenRefresh] Synced rotated tokens to Claude Code-credentials keychain")
+        }
+    }
+
+    private static func readClaudeKeychainData() -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else { return nil }
+        let output = pipe.fileHandleForReading.readDataToEndOfFile()
+        return output.isEmpty ? nil : output
     }
 
     private static func writeClaudeKeychain(_ json: String) {
@@ -663,22 +699,42 @@ enum TokenRefreshService {
     }
 
     private static func refreshAnthropic(_ payload: [String: Any]) async -> [String: Any]? {
+        // If Keychain/CLI has newer unexpired tokens, adopt those first
+        if let local = NativeUsageFetcher.readClaudeAppPayload(),
+           NativeUsageFetcher.shouldAdoptClaudeCLITokens(local: local, file: payload)
+        {
+            return copyTokenFields(from: local, onto: payload)
+        }
+
         guard let refresh = refreshToken(from: payload) else { return nil }
-        let endpoints = [
-            "https://console.anthropic.com/v1/oauth/token",
-            "https://platform.claude.com/v1/oauth/token",
-        ]
-        let body = formBody([
+        let endpoint = "https://platform.claude.com/v1/oauth/token"
+        let body: [String: Any] = [
             "grant_type": "refresh_token",
             "refresh_token": refresh,
             "client_id": anthropicClientID,
-        ])
-        for endpoint in endpoints {
-            if let json = await postForm(url: endpoint, body: body) {
-                return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
-            }
+            "scope": "user:file_upload user:inference user:mcp_servers user:profile user:sessions:claude_code",
+        ]
+        guard let postURL = URL(string: endpoint),
+              let bodyData = try? JSONSerialization.data(withJSONObject: body)
+        else { return nil }
+
+        var request = URLRequest(url: postURL)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.httpBody = bodyData
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("claude-code/2.1.271", forHTTPHeaderField: "User-Agent")
+
+        do {
+            let (responseData, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
+                  let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+            else { return nil }
+            return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+        } catch {
+            return nil
         }
-        return nil
     }
 
     private static func refreshGoogle(_ payload: [String: Any]) async -> [String: Any]? {

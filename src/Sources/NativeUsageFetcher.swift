@@ -23,7 +23,12 @@ enum NativeUsageFetcher {
                 authFile: authFile
             )
         case .claude:
-            return await fetchClaudeUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+            return await fetchClaudeUsage(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload,
+                authFile: authFile
+            )
         case .copilot:
             return await fetchCopilotUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .gemini:
@@ -1147,6 +1152,65 @@ enum NativeUsageFetcher {
     private static func fetchClaudeUsage(
         authAccountID: String,
         providerID: String,
+        payload: [String: Any],
+        authFile: URL
+    ) async -> ProviderUsageSnapshot {
+        _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
+        var payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+
+        if TokenRefreshService.shouldRefresh(payload: payload) {
+            _ = await TokenRefreshService.refreshAccountFile(authFile)
+            _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
+            payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+        }
+
+        let snapshot = await fetchClaudeUsageOnce(
+            authAccountID: authAccountID,
+            providerID: providerID,
+            payload: payload
+        )
+
+        if !snapshot.windows.isEmpty && snapshot.errorMessage == nil {
+            return snapshot
+        }
+
+        let authRejected = (snapshot.errorMessage ?? "")
+            .localizedCaseInsensitiveContains("expired")
+            || (snapshot.errorMessage ?? "")
+                .localizedCaseInsensitiveContains("refreshing")
+            || (snapshot.errorMessage ?? "")
+                .localizedCaseInsensitiveContains("session")
+
+        if authRejected {
+            let updatedFromCLI = overlayClaudeCLICredentialsIfFresher(onto: authFile)
+            if updatedFromCLI {
+                payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+                let retried = await fetchClaudeUsageOnce(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    payload: payload
+                )
+                if !retried.windows.isEmpty && retried.errorMessage == nil {
+                    return retried
+                }
+            }
+
+            _ = await TokenRefreshService.refreshAccountFile(authFile, force: true)
+            _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
+            payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+            return await fetchClaudeUsageOnce(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                payload: payload
+            )
+        }
+
+        return snapshot
+    }
+
+    private static func fetchClaudeUsageOnce(
+        authAccountID: String,
+        providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else {
@@ -1164,7 +1228,7 @@ enum NativeUsageFetcher {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("claude-code/2.1.0", forHTTPHeaderField: "User-Agent")
+        request.setValue("claude-code/2.1.271", forHTTPHeaderField: "User-Agent")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -2839,8 +2903,15 @@ enum NativeUsageFetcher {
                 }
             }
         case .claude:
-            if merged["access_token"] == nil, let local = readClaudeAppPayload() {
-                merged.merge(local) { _, new in new }
+            if let local = readClaudeAppPayload() {
+                for (key, value) in local where merged[key] == nil {
+                    merged[key] = value
+                }
+                if shouldAdoptClaudeCLITokens(local: local, file: merged) {
+                    for key in ["access_token", "refresh_token", "expired", "expires_at", "email"] {
+                        if let value = local[key] { merged[key] = value }
+                    }
+                }
             }
         case .grok:
             // Only fill missing fields from ~/.grok — never replace this account's token/email
@@ -2975,6 +3046,90 @@ enum NativeUsageFetcher {
         return true
     }
 
+    /// Copy a fresher Claude CLI session from Keychain or ~/.claude/.credentials.json onto the cli-proxy file.
+    @discardableResult
+    static func overlayClaudeCLICredentialsIfFresher(
+        onto authFile: URL,
+        localClaude: [String: Any]? = nil,
+        now: Date = Date()
+    ) -> Bool {
+        guard var payload = readAuthPayload(at: authFile) else { return false }
+        let local = localClaude ?? readClaudeAppPayload()
+        guard let local, shouldAdoptClaudeCLITokens(local: local, file: payload, now: now) else {
+            return false
+        }
+
+        payload = TokenRefreshService.flattenedAuth(payload)
+        if let access = stringValue(local, keys: ["access_token"]) {
+            payload["access_token"] = access
+        }
+        if let refresh = stringValue(local, keys: ["refresh_token"]) {
+            payload["refresh_token"] = refresh
+        }
+        if let email = stringValue(local, keys: ["email"]), !email.isEmpty {
+            if payload["email"] == nil || (payload["email"] as? String)?.isEmpty == true {
+                payload["email"] = email
+            }
+        }
+        if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
+            payload["expired"] = exp
+            payload["expires_at"] = exp
+        }
+        payload["last_refresh"] = ISO8601DateFormatter().string(from: now)
+        return writeAuthPayload(payload, to: authFile)
+    }
+
+    /// True when `local` belongs to the same Claude account (or account matches) and has a newer/valid access token than `file`.
+    static func shouldAdoptClaudeCLITokens(
+        local: [String: Any],
+        file: [String: Any],
+        now: Date = Date()
+    ) -> Bool {
+        let localFlat = TokenRefreshService.flattenedAuth(local)
+        let fileFlat = TokenRefreshService.flattenedAuth(file)
+        guard let localToken = stringValue(localFlat, keys: ["access_token"]), !localToken.isEmpty else {
+            return false
+        }
+        let fileToken = stringValue(fileFlat, keys: ["access_token"])
+        if fileToken == localToken,
+           stringValue(localFlat, keys: ["refresh_token"]) == stringValue(fileFlat, keys: ["refresh_token"])
+        {
+            return false
+        }
+
+        if let fileEmail = stringValue(fileFlat, keys: ["email"]),
+           let localEmail = stringValue(localFlat, keys: ["email"]),
+           !fileEmail.isEmpty, !localEmail.isEmpty,
+           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
+        {
+            return false
+        }
+
+        let localExp = parseISO8601(localFlat["expired"] as? String)
+            ?? parseISO8601(localFlat["expires_at"] as? String)
+            ?? .distantFuture
+        let fileExp = parseISO8601(fileFlat["expired"] as? String)
+            ?? parseISO8601(fileFlat["expires_at"] as? String)
+            ?? .distantPast
+
+        // If file token is already expired and local token is not expired: adopt local.
+        if fileExp <= now && localExp > now {
+            return true
+        }
+
+        // If local expiry is newer than file expiry: adopt local.
+        if localExp > fileExp {
+            return true
+        }
+
+        // If file token is missing or empty, adopt local.
+        if fileToken == nil || fileToken?.isEmpty == true {
+            return true
+        }
+
+        return false
+    }
+
     private static func flattenCodexCLIRoot(_ root: [String: Any]?) -> [String: Any]? {
         guard let root else { return nil }
         let tokens = (root["tokens"] as? [String: Any]) ?? [:]
@@ -3056,47 +3211,81 @@ enum NativeUsageFetcher {
         return payload
     }
 
-    private static func readClaudeAppPayload() -> [String: Any]? {
-        let credentialsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
+    static func readClaudeAppPayload() -> [String: Any]? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let credentialsURL = home.appendingPathComponent(".claude/.credentials.json")
 
-        let data: Data?
+        var candidateDatas: [Data] = []
         if let fileData = try? Data(contentsOf: credentialsURL) {
-            data = fileData
-        } else {
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-            let pipe = Pipe()
-            process.standardOutput = pipe
-            process.standardError = Pipe()
-            try? process.run()
+            candidateDatas.append(fileData)
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = Pipe()
+        if (try? process.run()) != nil {
             process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            let output = pipe.fileHandleForReading.readDataToEndOfFile()
-            data = output.isEmpty ? nil : output
+            if process.terminationStatus == 0 {
+                let output = pipe.fileHandleForReading.readDataToEndOfFile()
+                if !output.isEmpty {
+                    candidateDatas.append(output)
+                }
+            }
         }
 
-        guard let data,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = root["claudeAiOauth"] as? [String: Any],
-              let accessToken = oauth["accessToken"] as? String,
-              !accessToken.isEmpty
-        else { return nil }
+        var parsedPayloads: [[String: Any]] = []
+        for data in candidateDatas {
+            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let oauth = root["claudeAiOauth"] as? [String: Any],
+                  let accessToken = oauth["accessToken"] as? String,
+                  !accessToken.isEmpty
+            else { continue }
 
-        var payload: [String: Any] = ["access_token": accessToken]
-        if let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty {
-            payload["refresh_token"] = refreshToken
+            var payload: [String: Any] = ["access_token": accessToken]
+            if let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty {
+                payload["refresh_token"] = refreshToken
+            }
+            if let email = oauth["email"] as? String, !email.isEmpty {
+                payload["email"] = email
+            }
+            if let expiresAt = oauth["expiresAt"] as? Double {
+                let exp = ISO8601DateFormatter().string(
+                    from: Date(timeIntervalSince1970: expiresAt / 1000)
+                )
+                payload["expired"] = exp
+                payload["expires_at"] = exp
+            }
+            parsedPayloads.append(payload)
         }
-        if let email = oauth["email"] as? String, !email.isEmpty {
-            payload["email"] = email
+
+        guard var bestPayload = parsedPayloads.max(by: { a, b in
+            let expA = parseISO8601(a["expired"] as? String) ?? .distantPast
+            let expB = parseISO8601(b["expired"] as? String) ?? .distantPast
+            return expA < expB
+        }) else { return nil }
+
+        if bestPayload["email"] == nil || (bestPayload["email"] as? String)?.isEmpty == true {
+            let configURLs = [
+                home.appendingPathComponent(".claude.json"),
+                home.appendingPathComponent(".claude/.claude.json"),
+            ]
+            for url in configURLs {
+                if let d = try? Data(contentsOf: url),
+                   let root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                   let oauthAccount = root["oauthAccount"] as? [String: Any],
+                   let email = oauthAccount["emailAddress"] as? String,
+                   !email.isEmpty
+                {
+                    bestPayload["email"] = email
+                    break
+                }
+            }
         }
-        if let expiresAt = oauth["expiresAt"] as? Double {
-            payload["expired"] = ISO8601DateFormatter().string(
-                from: Date(timeIntervalSince1970: expiresAt / 1000)
-            )
-        }
-        return payload
+
+        return bestPayload
     }
 
     static func readAuthPayload(at url: URL) -> [String: Any]? {

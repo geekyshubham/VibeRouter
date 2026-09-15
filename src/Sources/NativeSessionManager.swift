@@ -89,6 +89,18 @@ final class NativeSessionManager: ObservableObject {
         }
     }
 
+    /// Awaitable detection for command-line callers that must print a complete snapshot.
+    @MainActor
+    func refreshNow(accounts: [ServiceType: [AuthAccount]]) async {
+        isRefreshing = true
+        let (identities, ids) = await Task.detached(priority: .utility) { [self] in
+            await detectAll(accounts: accounts)
+        }.value
+        currentByProvider = identities
+        currentAccountIDs = ids
+        isRefreshing = false
+    }
+
     private func detectAll(
         accounts: [ServiceType: [AuthAccount]]
     ) async -> ([ServiceType: NativeSessionIdentity], Set<String>) {
@@ -136,15 +148,20 @@ final class NativeSessionManager: ObservableObject {
     }
 
     private func detectClaudeIdentity() -> NativeSessionIdentity? {
-        // Identity lives in ~/.claude/.claude.json → oauthAccount.
-        let configURL = home.appendingPathComponent(".claude/.claude.json")
-        if let json = readJSON(configURL),
-           let oauth = json["oauthAccount"] as? [String: Any]
-        {
-            let email = oauth["emailAddress"] as? String
-            let uuid = oauth["accountUuid"] as? String
-            if email != nil || uuid != nil {
-                return NativeSessionIdentity(email: email, accountID: uuid, plan: nil)
+        // Identity lives in ~/.claude.json (or ~/.claude/.claude.json) → oauthAccount.
+        let configURLs = [
+            home.appendingPathComponent(".claude.json"),
+            home.appendingPathComponent(".claude/.claude.json"),
+        ]
+        for configURL in configURLs {
+            if let json = readJSON(configURL),
+               let oauth = json["oauthAccount"] as? [String: Any]
+            {
+                let email = oauth["emailAddress"] as? String
+                let uuid = oauth["accountUuid"] as? String
+                if email != nil || uuid != nil {
+                    return NativeSessionIdentity(email: email, accountID: uuid, plan: nil)
+                }
             }
         }
         // Fall back to presence of credentials (logged in but identity unknown).
@@ -505,17 +522,22 @@ final class NativeSessionManager: ObservableObject {
             writeClaudeKeychain(jsonString)
         }
         let credURL = home.appendingPathComponent(".claude/.credentials.json")
-        try ensureParent(credURL)
-        try backupThenWrite(json: credentials, to: credURL)
+        try? ensureParent(credURL)
+        _ = try? backupThenWrite(json: credentials, to: credURL)
 
-        // Merge identity into ~/.claude/.claude.json so detection reflects the switch.
+        // Merge identity into ~/.claude.json and ~/.claude/.claude.json so detection reflects the switch.
         if let email = nonEmpty(src["email"]) {
-            let configURL = home.appendingPathComponent(".claude/.claude.json")
-            var config = readJSON(configURL) ?? [:]
-            var oauthAccount = (config["oauthAccount"] as? [String: Any]) ?? [:]
-            oauthAccount["emailAddress"] = email
-            config["oauthAccount"] = oauthAccount
-            try backupThenWrite(json: config, to: configURL)
+            let configURLs = [
+                home.appendingPathComponent(".claude.json"),
+                home.appendingPathComponent(".claude/.claude.json"),
+            ]
+            for configURL in configURLs {
+                var config = readJSON(configURL) ?? [:]
+                var oauthAccount = (config["oauthAccount"] as? [String: Any]) ?? [:]
+                oauthAccount["emailAddress"] = email
+                config["oauthAccount"] = oauthAccount
+                _ = try? backupThenWrite(json: config, to: configURL)
+            }
         }
     }
 

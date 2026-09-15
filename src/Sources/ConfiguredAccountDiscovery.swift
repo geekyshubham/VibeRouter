@@ -762,7 +762,8 @@ enum ConfiguredAccountDiscovery {
         else { return nil }
 
         if let email = oauth["email"] as? String, !email.isEmpty { return email }
-        return JWTEmailExtractor.email(from: oauth["accessToken"] as? String)
+        if let email = JWTEmailExtractor.email(from: oauth["accessToken"] as? String) { return email }
+        return readClaudeConfigEmail()
     }
 
     private static func claudeEmailFromKeychain() -> String? {
@@ -773,7 +774,27 @@ enum ConfiguredAccountDiscovery {
         else { return nil }
 
         if let email = oauth["email"] as? String, !email.isEmpty { return email }
-        return JWTEmailExtractor.email(from: oauth["accessToken"] as? String)
+        if let email = JWTEmailExtractor.email(from: oauth["accessToken"] as? String) { return email }
+        return readClaudeConfigEmail()
+    }
+
+    private static func readClaudeConfigEmail() -> String? {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let configURLs = [
+            home.appendingPathComponent(".claude.json"),
+            home.appendingPathComponent(".claude/.claude.json"),
+        ]
+        for url in configURLs {
+            if let data = try? Data(contentsOf: url),
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let oauthAccount = root["oauthAccount"] as? [String: Any],
+               let email = oauthAccount["emailAddress"] as? String,
+               !email.isEmpty
+            {
+                return email
+            }
+        }
+        return nil
     }
 
     private static func claudeKeychainData() -> Data? {
