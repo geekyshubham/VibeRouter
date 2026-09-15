@@ -80,6 +80,8 @@ enum VibeRouterCLI {
                 try await showStatus(args: args, options: options)
             case "accounts", "account":
                 try await accountCommand(args: args, options: options)
+            case "auth", "token", "tokens", "refresh-tokens":
+                try await authCommand(args: args, options: options)
             case "usage", "limits", "quota":
                 try await usageCommand(args: args, options: options)
             case "switch":
@@ -208,9 +210,198 @@ enum VibeRouterCLI {
             try requireConfirmation("Delete \(account.displayName) and all files for this seat?", options: options)
             guard manager.deleteAccount(account) else { throw Failure("account_delete_failed", "Could not delete \(account.displayName).") }
             emit(["account": account.id, "deleted": true], human: "Deleted \(account.displayName)", options: options)
+        case "refresh":
+            let allFlag = takeFlag("--all", from: &args)
+            let forceFlag = takeFlag("--force", from: &args)
+            let selector = args.first
+            if selector != nil { args.removeFirst() }
+            try rejectExtra(args)
+            try await refreshAccountsCommand(selector: selector, all: allFlag || selector == nil, force: forceFlag, provider: provider, options: options)
         default:
-            throw Failure("unknown_subcommand", "Unknown account command: \(verb)", hint: "Use list, enable, disable, or delete.", exitCode: 2)
+            throw Failure("unknown_subcommand", "Unknown account command: \(verb)", hint: "Use list, enable, disable, delete, or refresh.", exitCode: 2)
         }
+    }
+
+    @MainActor
+    private static func authCommand(args: [String], options: GlobalOptions) async throws {
+        var args = args
+        let verb = (args.first?.hasPrefix("-") == false ? args.first?.lowercased() : nil) ?? "status"
+        if let first = args.first, ["refresh", "status", "list", "check"].contains(first.lowercased()) {
+            args.removeFirst()
+        }
+        let provider = takeOption("--provider", from: &args)
+        let forceFlag = takeFlag("--force", from: &args)
+        let allFlag = takeFlag("--all", from: &args)
+
+        switch verb {
+        case "refresh":
+            let selector = args.first
+            if selector != nil { args.removeFirst() }
+            try rejectExtra(args)
+            try await refreshAccountsCommand(selector: selector, all: allFlag || selector == nil, force: forceFlag, provider: provider, options: options)
+        case "status", "check", "list":
+            try rejectExtra(args)
+            try await authStatusCommand(provider: provider, options: options)
+        default:
+            let (_, all) = await loadAccounts(detectCurrent: false)
+            let matching = filterAccounts(all, provider: provider)
+            if let target = try? resolveAccount(verb, in: matching) {
+                try rejectExtra(args)
+                try await refreshAccountsCommand(selector: target.id, all: false, force: forceFlag, provider: provider, options: options)
+                return
+            }
+            throw Failure("unknown_subcommand", "Unknown auth command: \(verb)", hint: "Use `viberouter auth refresh [--all | <account>]` or `viberouter auth status`.", exitCode: 2)
+        }
+    }
+
+    @MainActor
+    private static func refreshAccountsCommand(
+        selector: String?,
+        all: Bool,
+        force: Bool,
+        provider: String?,
+        options: GlobalOptions
+    ) async throws {
+        let (_, allAccounts) = await loadAccounts(detectCurrent: false)
+        var targets = filterAccounts(allAccounts, provider: provider)
+        if let selector {
+            targets = [try resolveAccount(selector, in: targets)]
+        } else if !all {
+            throw missing("account selector or --all")
+        }
+
+        let refreshable = targets.filter { TokenRefreshService.canRefresh(file: $0.filePath) }
+        if refreshable.isEmpty {
+            let msg = targets.isEmpty ? "No accounts found to refresh." : "None of the selected accounts use refreshable OAuth tokens."
+            emit(["count": 0, "refreshed": 0, "results": []], human: msg, options: options)
+            return
+        }
+
+        var results: [[String: Any]] = []
+        var humanLines: [String] = []
+        humanLines.append(title("Token Refresh", options))
+        var refreshedCount = 0
+        var skippedCount = 0
+        var failedCount = 0
+
+        for acc in refreshable {
+            let beforePayload = NativeUsageFetcher.readAuthPayload(at: acc.filePath) ?? [:]
+            let beforeExp = TokenRefreshService.accessTokenExpiry(from: beforePayload)
+            let wasNearExpiry = TokenRefreshService.shouldRefresh(payload: beforePayload)
+
+            let ok = await TokenRefreshService.refreshAccountFile(acc.filePath, force: force)
+            let afterPayload = NativeUsageFetcher.readAuthPayload(at: acc.filePath) ?? [:]
+            let afterExp = TokenRefreshService.accessTokenExpiry(from: afterPayload)
+
+            let actuallyRotated = (afterExp != nil && beforeExp != nil && afterExp! > beforeExp!) || (beforeExp == nil && afterExp != nil)
+
+            let status: String
+            if ok {
+                if actuallyRotated || force || wasNearExpiry {
+                    status = "refreshed"
+                    refreshedCount += 1
+                } else {
+                    status = "up_to_date"
+                    skippedCount += 1
+                }
+            } else {
+                status = "failed"
+                failedCount += 1
+            }
+
+            let expStr = afterExp.map(iso) ?? "unknown"
+            let remStr = afterExp.map(relativeTime(to:)) ?? "-"
+
+            results.append([
+                "id": acc.id,
+                "display_name": acc.displayName,
+                "provider": acc.type.rawValue,
+                "status": status,
+                "success": ok,
+                "expires_at": expStr,
+                "time_remaining": remStr,
+            ])
+
+            let statusIcon: String
+            switch status {
+            case "refreshed": statusIcon = green("✓ Refreshed", options)
+            case "up_to_date": statusIcon = blue("● Valid", options)
+            default: statusIcon = red("✗ Failed", options)
+            }
+
+            humanLines.append(
+                "  \(pad(acc.type.displayName, 14)) \(pad(acc.displayName, 28)) \(pad(statusIcon, 16)) (expires \(remStr))"
+            )
+        }
+
+        humanLines.append("")
+        humanLines.append("Summary: \(refreshedCount) refreshed, \(skippedCount) already fresh, \(failedCount) failed.")
+
+        emit([
+            "total": refreshable.count,
+            "refreshed": refreshedCount,
+            "up_to_date": skippedCount,
+            "failed": failedCount,
+            "accounts": results,
+        ], human: humanLines.joined(separator: "\n"), options: options)
+    }
+
+    @MainActor
+    private static func authStatusCommand(provider: String?, options: GlobalOptions) async throws {
+        let (_, allAccounts) = await loadAccounts(detectCurrent: false)
+        let accounts = filterAccounts(allAccounts, provider: provider)
+        var rows: [[String: Any]] = []
+        var humanLines: [String] = []
+        humanLines.append(title("OAuth & Auth Token Status", options))
+        humanLines.append(
+            "  \(pad("PROVIDER", 14)) \(pad("ACCOUNT", 28)) \(pad("REFRESHABLE", 12)) \(pad("EXPIRES IN", 14)) EXPIRY"
+        )
+        humanLines.append("  \(String(repeating: "-", count: 85))")
+
+        let now = Date()
+        for acc in accounts {
+            let payload = NativeUsageFetcher.readAuthPayload(at: acc.filePath) ?? [:]
+            let canRef = TokenRefreshService.canRefresh(file: acc.filePath)
+            let exp = TokenRefreshService.accessTokenExpiry(from: payload)
+            let isExp = exp != nil ? exp! <= now : acc.isExpired
+            let remStr = exp.map(relativeTime(to:)) ?? (canRef ? "dynamic" : "static key")
+            let expIso = exp.map(iso) ?? "-"
+
+            let statusTag: String
+            if canRef {
+                if let exp {
+                    if exp <= now {
+                        statusTag = red("expired", options)
+                    } else if exp <= now.addingTimeInterval(TokenRefreshService.graceInterval) {
+                        statusTag = yellow(remStr, options)
+                    } else {
+                        statusTag = green(remStr, options)
+                    }
+                } else {
+                    statusTag = blue("active", options)
+                }
+            } else {
+                statusTag = dim("static key", options)
+            }
+
+            rows.append([
+                "id": acc.id,
+                "display_name": acc.displayName,
+                "provider": acc.type.rawValue,
+                "refreshable": canRef,
+                "expires_at": expIso,
+                "is_expired": isExp,
+            ])
+
+            humanLines.append(
+                "  \(pad(acc.type.displayName, 14)) \(pad(acc.displayName, 28)) \(pad(canRef ? "yes" : "no", 12)) \(pad(statusTag, 14)) \(expIso)"
+            )
+        }
+
+        humanLines.append("")
+        humanLines.append("Auto-refresh daemon runs every 3m and proactively rotates tokens 15m before expiry.")
+
+        emit(["accounts": rows, "count": rows.count], human: humanLines.joined(separator: "\n"), options: options)
     }
 
     @MainActor
@@ -1021,7 +1212,9 @@ enum VibeRouterCLI {
             "commands": [
                 "status": ["mutates": false],
                 "accounts list [--provider ID]": ["mutates": false],
-                "account enable|disable|delete ID": ["mutates": true],
+                "account enable|disable|delete|refresh ID": ["mutates": true],
+                "auth refresh [--all|ID] [--force]": ["mutates": true, "network": true, "description": "Proactively refreshes OAuth tokens for accounts"],
+                "auth status [--provider ID]": ["mutates": false, "description": "Inspect token expiry and refreshability"],
                 "usage [--provider ID] [--account ID]": ["mutates": false, "network": true],
                 "switch ID [--provider ID] [--subscription ID] [--no-restart]": ["mutates": true, "confirmation": true],
                 "wake ID [--provider ID]": ["mutates": true, "description": "Starts a provider session/5-hour quota window"],
@@ -1079,6 +1272,9 @@ enum VibeRouterCLI {
           accounts [--provider ID]         List accounts and capabilities
           account enable|disable ID        Toggle a proxy account
           account delete ID --yes          Delete an account/seat
+          account refresh [ID] [--all]     Refresh OAuth tokens
+          auth refresh [--all|ID] [--force] Proactively refresh OAuth access tokens
+          auth status                      Inspect OAuth expiration & refreshability
           usage [--provider ID]             Fetch live limits and reset times
           switch ID --yes                  Switch the native CLI/desktop account
           wake ID                          Trigger its session / 5-hour window
@@ -1112,7 +1308,7 @@ enum VibeRouterCLI {
     }
 
     static func completionScript(for shell: String) throws -> String {
-        let commands = "tui status accounts account usage switch wake reset analytics providers provider server login import install-cli settings api doctor capabilities agent-guide help version"
+        let commands = "tui status accounts account auth usage switch wake reset analytics providers provider server login import install-cli settings api doctor capabilities agent-guide help version"
         switch shell {
         case "zsh":
             return """
@@ -1208,6 +1404,25 @@ enum VibeRouterCLI {
     private static func title(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[1;38;5;141m\(value)\u{001B}[0m" : value }
     private static func green(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[32m\(value)\u{001B}[0m" : value }
     private static func red(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[31m\(value)\u{001B}[0m" : value }
+    private static func yellow(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[33m\(value)\u{001B}[0m" : value }
+    private static func blue(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[34m\(value)\u{001B}[0m" : value }
+    private static func dim(_ value: String, _ options: GlobalOptions) -> String { options.color ? "\u{001B}[2m\(value)\u{001B}[0m" : value }
+    private static func relativeTime(to date: Date) -> String {
+        let diff = date.timeIntervalSinceNow
+        if diff < 0 {
+            let past = Int(-diff)
+            if past < 60 { return "\(past)s ago" }
+            if past < 3600 { return "\(past / 60)m ago" }
+            if past < 86400 { return "\(past / 3600)h ago" }
+            return "\(past / 86400)d ago"
+        } else {
+            let future = Int(diff)
+            if future < 60 { return "in \(future)s" }
+            if future < 3600 { return "in \(future / 60)m" }
+            if future < 86400 { return "in \(future / 3600)h" }
+            return "in \(future / 86400)d"
+        }
+    }
 }
 
 // MARK: - Interactive TUI

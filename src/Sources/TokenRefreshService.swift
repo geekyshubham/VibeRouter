@@ -126,7 +126,7 @@ enum TokenRefreshService {
                 continue
             }
             let oldRefresh = refreshToken(from: livePayload) ?? first.refresh
-            guard let updated = await refreshPayload(livePayload, type: first.type) else { continue }
+            guard let updated = await refreshPayload(livePayload, type: first.type, forceOAuth: force) else { continue }
 
             var skipped = Set<String>()
             for job in group {
@@ -165,21 +165,19 @@ enum TokenRefreshService {
         if kind == "codex" {
             _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
             payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
-            payload = flattenedAuth(payload)
-            if !force && !shouldRefresh(payload: payload) {
-                _ = pushCodexTokensToCLIIfFresher(payload)
-                return true
-            }
         } else if kind == "claude" {
             _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file)
             payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
-            payload = flattenedAuth(payload)
-            if !force && !shouldRefresh(payload: payload) {
-                return true
+        }
+        payload = flattenedAuth(payload)
+        if !force && !shouldRefresh(payload: payload) {
+            if kind == "codex" {
+                _ = pushCodexTokensToCLIIfFresher(payload)
             }
+            return true
         }
         let oldRefresh = refreshToken(from: payload)
-        guard let updated = await refreshPayload(payload, type: kind) else { return false }
+        guard let updated = await refreshPayload(payload, type: kind, forceOAuth: force) else { return false }
         let ok = writeAuthFile(updated, to: file)
         if ok {
             if let oldRefresh, !oldRefresh.isEmpty {
@@ -188,7 +186,7 @@ enum TokenRefreshService {
                     updated: updated,
                     skipping: [file.path]
                 )
-                syncNativeCredentialStores(type: type.lowercased(), oldRefresh: oldRefresh, updated: updated)
+                syncNativeCredentialStores(type: kind, oldRefresh: oldRefresh, updated: updated)
             }
             await MainActor.run {
                 NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
@@ -219,8 +217,8 @@ enum TokenRefreshService {
         }
 
         // No parseable expiry — refresh opportunistically if last_refresh is old.
-        if let last = parseDate(payload["last_refresh"] as? String)
-            ?? parseDate(payload["expired"] as? String)
+        if let last = parseDateAny(payload["last_refresh"])
+            ?? parseDateAny(payload["expired"])
         {
             return last.addingTimeInterval(30 * 60) <= now
         }
@@ -486,9 +484,25 @@ enum TokenRefreshService {
             try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
         } ?? [:]
 
-        if root.isEmpty, let kcData = readClaudeKeychainData(),
+        if let kcData = readClaudeKeychainData(),
            let kcJSON = try? JSONSerialization.jsonObject(with: kcData) as? [String: Any] {
-            root = kcJSON
+            if root.isEmpty { root = kcJSON }
+        }
+
+        // Check if this account corresponds to the local CLI/Keychain session before overwriting.
+        // Never clobber the primary account's keychain with tokens from a secondary account!
+        let oauthObj = (root["claudeAiOauth"] as? [String: Any]) ?? root
+        let existingRefresh = stringValue(oauthObj, keys: ["refreshToken", "refresh_token"])
+        let existingEmail = stringValue(root, keys: ["email"]) ?? stringValue(oauthObj, keys: ["email"])
+        let updatedEmail = stringValue(updated, keys: ["email"])
+
+        if let existingRefresh, !existingRefresh.isEmpty, existingRefresh != oldRefresh {
+            if let existingEmail, let updatedEmail,
+               !existingEmail.isEmpty, !updatedEmail.isEmpty,
+               existingEmail.caseInsensitiveCompare(updatedEmail) != .orderedSame {
+                NSLog("[TokenRefresh] Skipping Keychain sync for secondary Claude account: %@", updatedEmail)
+                return
+            }
         }
 
         var oauth = (root["claudeAiOauth"] as? [String: Any]) ?? [:]
@@ -500,7 +514,7 @@ enum TokenRefreshService {
             oauth["refreshToken"] = refresh
             root["refresh_token"] = refresh
         }
-        if let exp = parseDate(updated["expired"] as? String) ?? parseDate(updated["expires_at"] as? String) {
+        if let exp = parseDateAny(updated["expired"]) ?? parseDateAny(updated["expires_at"]) {
             oauth["expiresAt"] = exp.timeIntervalSince1970 * 1000
         }
         root["claudeAiOauth"] = oauth
@@ -577,18 +591,46 @@ enum TokenRefreshService {
         NSLog("[TokenRefresh] Synced rotated refresh token to Cursor state.vscdb")
     }
 
-    private static func accessTokenExpiry(from payload: [String: Any]) -> Date? {
-        if let token = stringValue(payload, keys: ["access_token", "accessToken", "key"]),
+    static func canRefresh(file: URL) -> Bool {
+        guard let payload = NativeUsageFetcher.readAuthPayload(at: file),
+              let type = payload["type"] as? String else { return false }
+        let kind = type.lowercased()
+        guard ["codex", "claude", "antigravity", "gemini", "xai", "grok", "kiro", "kimi", "cursor"].contains(kind) else {
+            return false
+        }
+        let flat = flattenedAuth(payload)
+        return refreshToken(from: flat) != nil
+    }
+
+    static func accessTokenExpiry(from payload: [String: Any]) -> Date? {
+        let flat = flattenedAuth(payload)
+        if let token = stringValue(flat, keys: ["access_token", "accessToken", "key"]),
            let exp = jwtExpiry(token)
         {
             return exp
         }
-        return parseDate(payload["expired"] as? String)
-            ?? parseDate(payload["expires_at"] as? String)
-            ?? parseDate(payload["expiresAt"] as? String)
+        for key in ["expired", "expires_at", "expiresAt", "expiry"] {
+            if let date = parseDateAny(flat[key]) {
+                return date
+            }
+        }
+        // Fallback: derive from last_refresh/timestamp + expires_in
+        if let expiresIn = (flat["expires_in"] as? NSNumber)?.doubleValue
+            ?? (flat["expiresIn"] as? NSNumber)?.doubleValue
+            ?? Double(stringValue(flat, keys: ["expires_in", "expiresIn"]) ?? "")
+        {
+            let baseDate = parseDateAny(flat["last_refresh"])
+                ?? parseDateAny(flat["lastRefresh"])
+                ?? parseDateAny(flat["timestamp"])
+                ?? parseDateAny(flat["created_at"])
+            if let baseDate {
+                return baseDate.addingTimeInterval(expiresIn)
+            }
+        }
+        return nil
     }
 
-    private static func refreshToken(from payload: [String: Any]) -> String? {
+    static func refreshToken(from payload: [String: Any]) -> String? {
         stringValue(flattenedAuth(payload), keys: ["refresh_token", "refreshToken", "refresh"])
     }
 
@@ -642,15 +684,15 @@ enum TokenRefreshService {
 
     // MARK: - Provider refresh
 
-    private static func refreshPayload(_ payload: [String: Any], type: String) async -> [String: Any]? {
+    private static func refreshPayload(_ payload: [String: Any], type: String, forceOAuth: Bool = false) async -> [String: Any]? {
         switch type {
         case "codex":
             return await refreshOpenAI(payload)
         case "claude":
-            return await refreshAnthropic(payload)
+            return await refreshAnthropic(payload, forceOAuth: forceOAuth)
         case "antigravity", "gemini":
             return await refreshGoogle(payload)
-        case "xai":
+        case "xai", "grok":
             return await refreshXAI(payload)
         case "kiro":
             return await refreshKiro(payload)
@@ -698,9 +740,10 @@ enum TokenRefreshService {
         }
     }
 
-    private static func refreshAnthropic(_ payload: [String: Any]) async -> [String: Any]? {
-        // If Keychain/CLI has newer unexpired tokens, adopt those first
-        if let local = NativeUsageFetcher.readClaudeAppPayload(),
+    private static func refreshAnthropic(_ payload: [String: Any], forceOAuth: Bool = false) async -> [String: Any]? {
+        // If Keychain/CLI has newer unexpired tokens, adopt those first (unless forcing network OAuth exchange)
+        if !forceOAuth,
+           let local = NativeUsageFetcher.readClaudeAppPayload(),
            NativeUsageFetcher.shouldAdoptClaudeCLITokens(local: local, file: payload)
         {
             return copyTokenFields(from: local, onto: payload)
@@ -1009,6 +1052,31 @@ enum TokenRefreshService {
                 let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty { return trimmed }
             }
+        }
+        return nil
+    }
+
+    static func parseDateAny(_ value: Any?) -> Date? {
+        guard let value else { return nil }
+        if let date = value as? Date { return date }
+        if let num = value as? NSNumber {
+            let t = num.doubleValue
+            if t > 1_000_000_000_000 {
+                return Date(timeIntervalSince1970: t / 1000.0)
+            } else if t > 1_000_000_000 {
+                return Date(timeIntervalSince1970: t)
+            }
+        }
+        if let str = value as? String {
+            let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let t = Double(trimmed) {
+                if t > 1_000_000_000_000 {
+                    return Date(timeIntervalSince1970: t / 1000.0)
+                } else if t > 1_000_000_000 {
+                    return Date(timeIntervalSince1970: t)
+                }
+            }
+            return parseDate(trimmed)
         }
         return nil
     }

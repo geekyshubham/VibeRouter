@@ -10,6 +10,9 @@ struct AccountRowView: View {
     let onToggleDisabled: () -> Void
     let onRemove: () -> Void
     
+    @State private var isRefreshing = false
+    @State private var refreshStatus: String? = nil
+    
     var body: some View {
         HStack(spacing: 8) {
             Circle()
@@ -28,6 +31,48 @@ struct AccountRowView: View {
                 Text("(disabled)")
                     .font(.caption2)
                     .foregroundColor(.secondary)
+            }
+            if TokenRefreshService.canRefresh(file: account.filePath) {
+                Button(action: {
+                    isRefreshing = true
+                    refreshStatus = nil
+                    Task {
+                        let ok = await TokenRefreshService.refreshAccountFile(account.filePath, force: true)
+                        await MainActor.run {
+                            isRefreshing = false
+                            refreshStatus = ok ? "Refreshed" : "Failed"
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                                refreshStatus = nil
+                            }
+                        }
+                    }
+                }) {
+                    HStack(spacing: 3) {
+                        if isRefreshing {
+                            ProgressView()
+                                .scaleEffect(0.5)
+                                .frame(width: 9, height: 9)
+                        } else {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 9))
+                        }
+                        if let status = refreshStatus {
+                            Text(status)
+                                .font(.caption2)
+                                .foregroundColor(status == "Refreshed" ? MenuBarDesign.success : MenuBarDesign.danger)
+                        } else {
+                            Text("Refresh")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(isRefreshing)
+                .help("Refresh this account's OAuth access token now")
+                .onHover { inside in
+                    if inside && !isRefreshing { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                }
             }
             if showDisableToggle {
                 let canDisable = account.isDisabled || !isLastEnabled
@@ -133,6 +178,7 @@ struct ServiceRow<ExtraContent: View>: View {
     @State private var isExpanded = false
     @State private var accountToRemove: AuthAccount?
     @State private var showingRemoveConfirmation = false
+    @State private var isRefreshingAll = false
 
     private var activeCount: Int { accounts.filter { !$0.isExpired }.count }
     private var expiredCount: Int { accounts.filter { $0.isExpired }.count }
@@ -216,6 +262,41 @@ struct ServiceRow<ExtraContent: View>: View {
                         Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
                             .font(.caption)
                             .foregroundColor(.secondary)
+
+                        Spacer()
+
+                        let refreshableAccounts = accounts.filter { TokenRefreshService.canRefresh(file: $0.filePath) }
+                        if !refreshableAccounts.isEmpty {
+                            Button(action: {
+                                isRefreshingAll = true
+                                Task {
+                                    for acc in refreshableAccounts {
+                                        _ = await TokenRefreshService.refreshAccountFile(acc.filePath, force: true)
+                                    }
+                                    await MainActor.run {
+                                        isRefreshingAll = false
+                                    }
+                                }
+                            }) {
+                                HStack(spacing: 3) {
+                                    if isRefreshingAll {
+                                        ProgressView().scaleEffect(0.5).frame(width: 9, height: 9)
+                                    } else {
+                                        Image(systemName: "arrow.triangle.2.circlepath")
+                                            .font(.system(size: 9))
+                                    }
+                                    Text(isRefreshingAll ? "Refreshing..." : "Refresh All")
+                                        .font(.caption2)
+                                }
+                                .foregroundColor(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(isRefreshingAll)
+                            .help("Force refresh tokens for all \(serviceType.displayName) accounts")
+                            .onHover { inside in
+                                if inside && !isRefreshingAll { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+                            }
+                        }
                     }
                     .padding(.leading, 28)
                     .contentShape(Rectangle())
@@ -751,6 +832,23 @@ struct SettingsView: View {
                         Button("Open Folder") {
                             openAuthFolder()
                         }
+                    }
+
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Token refresh")
+                            Text("Auto-refreshes OAuth tokens 15m before expiry")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Refresh All Tokens") {
+                            Task {
+                                _ = await TokenRefreshService.refreshAllNearExpiry(force: true)
+                            }
+                        }
+                        .controlSize(.small)
+                        .help("Check and refresh all connected OAuth accounts immediately")
                     }
 
                     HStack {
