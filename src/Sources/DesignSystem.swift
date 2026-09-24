@@ -276,10 +276,14 @@ extension View {
     }
 
     /// Sets the macOS pointing-hand cursor while hovering (for custom tap targets).
+    ///
+    /// Uses `set()`, not `push()`/`pop()`. SwiftUI `.onHover` fires `false` on appear
+    /// and races across adjacent buttons; `NSCursor.pop()` with an empty stack raises
+    /// `NSInternalInconsistencyException` and kills the menu-bar app.
     func pointerCursor(_ enabled: Bool = true) -> some View {
         onHover { inside in
             guard enabled else { return }
-            if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
+            (inside ? NSCursor.pointingHand : NSCursor.arrow).set()
         }
     }
 }

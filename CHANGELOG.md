@@ -7,6 +7,12 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- **Claude rate-limit resets** — Claude accounts now get the same reset bank as ChatGPT and Grok. Saved resets (the Settings → Usage "Reset for free" grant) and the weekly session reset (`/limit-reset`) are read from Claude's OAuth usage API and can be applied from the usage card or `viberouter reset`. A grant Anthropic only exposes on claude.ai stays hidden here instead of showing a false "none left".
+
+### Fixed
+- **Claude Code no longer gets logged out every other refresh** — Importing the Claude Code account copied its rotating refresh token into `~/.cli-proxy-api`. VibeRouter's keep-alive, usage fetch, and the bundled proxy all POSTed that leftover token; Anthropic invalidated the previous one and `claude` printed `Login expired · Please run /login`. Native Claude Code now owns the refresh token exclusively. The proxy copy keeps only the access token (overlaid from the keychain) and never writes a rotated token back over Claude Code's session.
+
+### Added
 - **Model routing in the management console** — The console's new Models tab shows every model the connected accounts can serve, with the provider(s) backing each and live availability, and lets you decide exactly what VibeRouter serves and in what order. Toggle any model off to stop serving it (hidden from `/v1/models`, requests answered with a clear "disabled in the management console" error); arrange the rest into a priority order (first match wins); and optionally enable **failover to next model** so a request whose model is exhausted everywhere (quota hit on every provider/account serving it) automatically flows to the next model in your priority list instead of failing. Settings live under `routing:` (`model-priority`, `disabled-models`, `model-failover`), survive config regeneration and app restarts, and apply instantly via config hot-reload.
 
 ### Fixed

@@ -7,6 +7,29 @@ func analyticsCutoffStart(now: Date, historyDays: Int) -> Date {
     return Calendar.current.startOfDay(for: cutoffDate)
 }
 
+/// `Int(Double)` traps on NaN / Inf / values outside Int (`EXC_BREAKPOINT`).
+/// JSONSerialization boxes every number as Double-backed NSNumber, so a quota
+/// field of `1e20` or a sentinel used to kill the menu-bar app during a scan.
+enum JSONNumber {
+    static func int(_ raw: Any?) -> Int {
+        if let n = raw as? Int { return n }
+        if let n = raw as? Double { return int(from: n) }
+        if let n = raw as? NSNumber { return int(from: n.doubleValue) }
+        if let s = raw as? String {
+            if let i = Int(s) { return i }
+            if let d = Double(s) { return int(from: d) }
+        }
+        return 0
+    }
+
+    static func int(from value: Double) -> Int {
+        guard value.isFinite else { return 0 }
+        if value >= Double(Int.max) { return Int.max }
+        if value <= Double(Int.min) { return Int.min }
+        return Int(value)
+    }
+}
+
 // MARK: - Kiro local credits (session JSON metering)
 
 /// Reads `~/.kiro/sessions/cli/*.json` turn metadata (`metering_usage` credit arrays).
@@ -569,10 +592,7 @@ enum LocalGrokUsage {
     }
 
     private static func intValue(_ raw: Any?) -> Int {
-        if let n = raw as? Int { return n }
-        if let n = raw as? Double { return Int(n) }
-        if let n = raw as? NSNumber { return n.intValue }
-        return 0
+        JSONNumber.int(raw)
     }
 
     private static func dayKey(for date: Date) -> Int {

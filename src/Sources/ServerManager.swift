@@ -262,6 +262,10 @@ class ServerManager: ObservableObject {
         // Handle output
         outputPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let output = String(data: data, encoding: .utf8), !output.isEmpty {
                 self?.addLog(output)
             }
@@ -269,6 +273,10 @@ class ServerManager: ObservableObject {
         
         errorPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let output = String(data: data, encoding: .utf8), !output.isEmpty {
                 self?.addLog("⚠️ \(output)")
             }
@@ -457,6 +465,10 @@ class ServerManager: ObservableObject {
         // Capture all provider output (not just Copilot) for diagnostics / device codes.
         outputPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 capture.append(str)
                 if case .copilotLogin = command {
@@ -466,6 +478,10 @@ class ServerManager: ObservableObject {
         }
         errorPipe.fileHandleForReading.readabilityHandler = { handle in
             let data = handle.availableData
+            if data.isEmpty {
+                handle.readabilityHandler = nil
+                return
+            }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 capture.append(str)
             }

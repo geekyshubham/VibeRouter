@@ -7,7 +7,7 @@ final class RateLimitResetTests: XCTestCase {
     func testResetBankSupportedProviders() {
         XCTAssertTrue(RateLimitResetService.supports(.codex))
         XCTAssertTrue(RateLimitResetService.supports(.grok))
-        XCTAssertFalse(RateLimitResetService.supports(.claude))
+        XCTAssertTrue(RateLimitResetService.supports(.claude))
         XCTAssertFalse(RateLimitResetService.supports(.gemini))
         XCTAssertFalse(RateLimitResetService.supports(.copilot))
         XCTAssertFalse(RateLimitResetService.supports(.kiro))
@@ -116,6 +116,162 @@ final class RateLimitResetTests: XCTestCase {
         XCTAssertEqual(payload.first, 0x52)
         XCTAssertEqual(Int(payload.dropFirst().first!), "abc".utf8.count)
         XCTAssertEqual(Data(payload.dropFirst(2)), Data("abc".utf8))
+    }
+
+    // MARK: - Claude resets
+
+    func testClaudeCedarGrantIsBankedAndSpendable() {
+        let inventory = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": true,
+                "grants": [[
+                    "id": "opus55",
+                    "label": "Get extra wiggle room to explore Opus 5.5",
+                    "resets_left": 1,
+                    "ends_at": Self.iso(Date().addingTimeInterval(86_400 * 20)),
+                    "usable_now": true,
+                    "clears": ["five_hour", "seven_day"],
+                ]],
+                "next_grant_id": "opus55",
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: true
+        )
+        XCTAssertEqual(inventory?.bank.availableCount, 1)
+        XCTAssertEqual(inventory?.bank.canRedeem, true)
+        XCTAssertEqual(inventory?.offer?.id, "opus55")
+        XCTAssertEqual(inventory?.offer?.program, .cedar)
+        XCTAssertEqual(inventory?.bank.sampleTitle, "Get extra wiggle room to explore Opus 5.5")
+        XCTAssertNotNil(RateLimitResetService.claudeBankForDisplay(inventory!))
+    }
+
+    func testClaudeCedarIgnoresSpentPausedAndExpiredGrants() {
+        let inventory = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": true,
+                "grants": [
+                    ["id": "spent", "resets_left": 0, "usable_now": true],
+                    ["id": "paused", "resets_left": 1, "paused": true, "usable_now": true],
+                    [
+                        "id": "expired",
+                        "resets_left": 1,
+                        "usable_now": true,
+                        "ends_at": Self.iso(Date().addingTimeInterval(-3600)),
+                    ],
+                    [
+                        "id": "saved",
+                        "resets_left": 2,
+                        "usable_now": false,
+                        "use_requires_limit": true,
+                        "ends_at": Self.iso(Date().addingTimeInterval(86_400)),
+                        "clears": ["five_hour"],
+                    ],
+                ],
+                "next_grant_id": "saved",
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: true
+        )
+        XCTAssertEqual(inventory?.bank.availableCount, 2)
+        XCTAssertNil(inventory?.offer)
+        XCTAssertEqual(inventory?.bank.canRedeem, false)
+        XCTAssertEqual(inventory?.bank.sampleTitle, "Saved until you reach a usage limit")
+    }
+
+    func testClaudeSurfaceBlindGrantIsNotAFalseZero() {
+        let inventory = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": false,
+                "ineligible_reason": "surface",
+                "grants": [],
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: true
+        )
+        XCTAssertEqual(inventory?.surfaceBlind, true)
+        XCTAssertEqual(inventory?.bank.availableCount, 0)
+        XCTAssertNil(inventory.flatMap(RateLimitResetService.claudeBankForDisplay))
+    }
+
+    func testClaudeJuniperSessionResetIsOfferedAndCedarWinsWhenBothExist() {
+        let juniperOnly = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: nil,
+            cedarReached: true,
+            juniperField: [
+                "eligible": true,
+                "arm": "reset",
+                "available": true,
+            ],
+            juniperReached: true
+        )
+        XCTAssertEqual(juniperOnly?.bank.availableCount, 1)
+        XCTAssertEqual(juniperOnly?.offer?.program, .juniper)
+        XCTAssertEqual(juniperOnly?.bank.sampleTitle, "Session limit reset")
+
+        let both = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": true,
+                "next_grant_id": "grant1",
+                "grants": [[
+                    "id": "grant1",
+                    "resets_left": 1,
+                    "usable_now": true,
+                    "clears": ["seven_day"],
+                ]],
+            ],
+            cedarReached: true,
+            juniperField: ["eligible": true, "arm": "reset", "available": true],
+            juniperReached: true
+        )
+        XCTAssertEqual(both?.bank.availableCount, 2)
+        XCTAssertEqual(both?.offer?.program, .cedar)
+        XCTAssertEqual(both?.bank.sampleTitle, "Weekly limit reset")
+    }
+
+    func testClaudeResetProbesThatFailDoNotInventAnEmptyBank() {
+        XCTAssertNil(
+            RateLimitResetService.parseClaudeResetInventory(
+                cedarField: nil,
+                cedarReached: false,
+                juniperField: nil,
+                juniperReached: false
+            )
+        )
+        XCTAssertNil(
+            RateLimitResetService.parseClaudeResetInventory(
+                cedarField: nil,
+                cedarReached: false,
+                juniperField: ["eligible": false, "arm": "reset", "available": false],
+                juniperReached: true
+            )
+        )
+    }
+
+    func testClaudeRedeemResultMessages() {
+        let reset = RateLimitResetService.claudeRedeemResult(
+            "reset",
+            program: .cedar,
+            cleared: ["five_hour", "seven_day"]
+        )
+        guard case .success(let message) = reset else {
+            return XCTFail("expected success")
+        }
+        XCTAssertTrue(message.contains("session and weekly limits"))
+
+        let session = RateLimitResetService.claudeRedeemResult("reset", program: .juniper, cleared: [])
+        guard case .success(let sessionMessage) = session else {
+            return XCTFail("expected success")
+        }
+        XCTAssertTrue(sessionMessage.contains("weekly limit still applies"))
+
+        let held = RateLimitResetService.claudeRedeemResult("not_limited", program: .cedar, cleared: [])
+        guard case .failure(let heldMessage) = held else {
+            return XCTFail("expected failure")
+        }
+        XCTAssertTrue(heldMessage.contains("Nothing was consumed"))
     }
 
     func testGrokGRPCFailureDetectsTrailerStatus() {

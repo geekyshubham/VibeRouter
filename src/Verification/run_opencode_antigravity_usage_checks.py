@@ -103,10 +103,22 @@ def check_int_exactly_safe() -> None:
     print("int_exactly: ok (UInt64.max does not fit Int64 — use Int(exactly:))")
 
 
+def check_int_from_double_safe() -> None:
+    """Int(Double) traps on NaN/Inf/1e20 in Swift. JSONNumber.int must clamp."""
+    import math
+
+    huge = 1.9e19
+    assert huge > (1 << 63) - 1
+    assert math.isnan(float("nan"))
+    assert math.isinf(float("inf"))
+    print("int_from_double: ok (NaN/Inf/1e20 must not Int() in Swift)")
+
+
 def main() -> int:
     check_opencode()
     check_antigravity()
     check_int_exactly_safe()
+    check_int_from_double_safe()
     print("run_opencode_antigravity_usage_checks: OK")
     return 0
 

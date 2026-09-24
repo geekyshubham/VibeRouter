@@ -299,7 +299,6 @@ enum ConfiguredAccountImporter {
             return .failure(message: "Claude Code credentials are missing an access token")
         }
 
-        let refreshToken = oauth["refreshToken"] as? String ?? ""
         let expiresAtMs = oauth["expiresAt"] as? Double
         let expiresAt = expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
         let email = (oauth["email"] as? String)
@@ -310,11 +309,13 @@ enum ConfiguredAccountImporter {
         let expired = expiresAt.map { ISO8601DateFormatter().string(from: $0) }
             ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
 
+        // Keep the rotating refresh token in Claude Code's keychain only.
+        // Importing it into ~/.cli-proxy-api makes VibeRouter a second OAuth
+        // client on the same family; the next refresh logs `claude` out.
         let record: [String: Any] = [
             "type": "claude",
             "email": email,
             "access_token": accessToken,
-            "refresh_token": refreshToken,
             "expired": expired,
             "last_refresh": ISO8601DateFormatter().string(from: now),
         ]

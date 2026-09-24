@@ -966,11 +966,13 @@ enum LocalTokenCostScanner {
 
     private static func intValue(_ dict: [String: Any], keys: [String]) -> Int {
         for key in keys {
-            if let v = dict[key] as? Int { return v }
-            if let v = dict[key] as? Double { return Int(v) }
-            if let v = dict[key] as? NSNumber { return v.intValue }
-            if let v = dict[key] as? String, let i = Int(v) { return i }
-            if let v = dict[key] as? String, let d = Double(v) { return Int(d) }
+            guard let raw = dict[key] else { continue }
+            switch raw {
+            case is Int, is Double, is NSNumber, is String:
+                return JSONNumber.int(raw)
+            default:
+                continue
+            }
         }
         return 0
     }

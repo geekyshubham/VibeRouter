@@ -306,6 +306,74 @@ final class TokenRefreshServiceTests: XCTestCase {
         )
     }
 
+    func testOverlayClaudeDoesNotCopyNativeRefreshToken() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vp-claude-overlay-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let authFile = dir.appendingPathComponent("claude-a.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude",
+            "email": "a@x.com",
+            "access_token": "old-at",
+            "refresh_token": "rt-imported",
+            "expired": "2020-01-01T00:00:00Z",
+        ]).write(to: authFile)
+
+        XCTAssertTrue(
+            NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+                onto: authFile,
+                localClaude: [
+                    "email": "a@x.com",
+                    "access_token": "live-at",
+                    "refresh_token": "rt-native",
+                    "expired": "2099-01-01T00:00:00Z",
+                ]
+            )
+        )
+        let updated = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: authFile))
+        XCTAssertEqual(updated["access_token"] as? String, "live-at")
+        XCTAssertNil(updated["refresh_token"] as? String)
+        XCTAssertNil(updated["refreshToken"] as? String)
+    }
+
+    func testShouldNotNetworkRefreshClaudeWhenNativeSessionExists() {
+        XCTAssertFalse(
+            TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: [
+                    "email": "a@x.com",
+                    "access_token": "file-at",
+                    "refresh_token": "rt-file",
+                ],
+                native: [
+                    "email": "a@x.com",
+                    "access_token": "cli-at",
+                    "refresh_token": "rt-cli",
+                ]
+            )
+        )
+        XCTAssertTrue(
+            TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: [
+                    "email": "other@x.com",
+                    "access_token": "file-at",
+                    "refresh_token": "rt-file",
+                ],
+                native: [
+                    "email": "a@x.com",
+                    "access_token": "cli-at",
+                    "refresh_token": "rt-cli",
+                ]
+            )
+        )
+        XCTAssertTrue(
+            TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: ["email": "a@x.com", "refresh_token": "rt-file"],
+                native: nil
+            )
+        )
+    }
+
     func testCopyTokenFieldsIncludesCamelCaseAliases() {
         let original: [String: Any] = [
             "type": "cursor",

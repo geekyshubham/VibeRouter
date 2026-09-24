@@ -33,7 +33,23 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         super.init()
     }
 
+    /// Agent apps don't activate an existing instance. A second copy is the usual
+    /// "I clicked the app and it crashed" report: duplicate status item, bind fail, quit.
+    private static func exitIfAlreadyRunning() -> Bool {
+        guard let id = Bundle.main.bundleIdentifier else { return false }
+        let others = NSRunningApplication.runningApplications(withBundleIdentifier: id)
+            .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
+        guard let existing = others.first else { return false }
+        NSLog("[VibeRouter] Already running (pid %d); exiting this instance", existing.processIdentifier)
+        NSApp.terminate(nil)
+        return true
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // LSUIElement has no Dock icon, so clicking VibeRouter.app starts a second copy
+        // that fights for the status item and port 8317 — looks like a crash.
+        if Self.exitIfAlreadyRunning() { return }
+
         // Setup standard Edit menu for keyboard shortcuts (Cmd+C/V/X/A)
         setupMainMenu()
 

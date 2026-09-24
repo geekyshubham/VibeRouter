@@ -260,6 +260,36 @@ def main() -> None:
         check("sibling email preserved", a["email"] == "a@x.com")
         check("unrelated file not touched", other["refresh_token"] == "rt-other")
 
+    def should_network_refresh_claude(payload: dict, native: dict | None) -> bool:
+        if not native:
+            return True
+        local_email = (native.get("email") or "").strip()
+        file_email = (payload.get("email") or "").strip()
+        if local_email and file_email and local_email.lower() != file_email.lower():
+            return True
+        if not (native.get("access_token") or native.get("refresh_token")):
+            return True
+        return False
+
+    check(
+        "native Claude Code session blocks proxy refresh",
+        not should_network_refresh_claude(
+            {"email": "a@x.com", "refresh_token": "rt-file"},
+            {"email": "a@x.com", "access_token": "cli-at", "refresh_token": "rt-cli"},
+        ),
+    )
+    check(
+        "different Claude account can still refresh",
+        should_network_refresh_claude(
+            {"email": "other@x.com", "refresh_token": "rt-file"},
+            {"email": "a@x.com", "access_token": "cli-at"},
+        ),
+    )
+    check(
+        "no native session still refreshes Claude",
+        should_network_refresh_claude({"email": "a@x.com", "refresh_token": "rt-file"}, None),
+    )
+
     scope = "openid email profile offline_access"
     check("openai refresh keeps offline_access", "offline_access" in scope)
 

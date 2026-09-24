@@ -80,6 +80,16 @@ final class LocalUsageAttributionTests: XCTestCase {
         XCTAssertEqual(LocalGrokUsage.estimatedCumulativeTokens(before: 0, context: 0, turns: 0), 0)
     }
 
+    func testJSONNumberDoesNotTrapOnNonFiniteOrHugeDoubles() {
+        XCTAssertEqual(JSONNumber.int(from: .nan), 0)
+        XCTAssertEqual(JSONNumber.int(from: .infinity), 0)
+        XCTAssertEqual(JSONNumber.int(from: -.infinity), 0)
+        XCTAssertEqual(JSONNumber.int(from: Double(Int.max) + 1000), Int.max)
+        XCTAssertEqual(JSONNumber.int(1.9e19 as Double), Int.max)
+        XCTAssertEqual(JSONNumber.int("42"), 42)
+        XCTAssertEqual(JSONNumber.int(12), 12)
+    }
+
     func testGrokSkipsEphemeralTmpSessions() {
         XCTAssertTrue(LocalGrokUsage.isEphemeralSessionPath("/private/tmp/guardianbot/signals.json"))
         XCTAssertTrue(LocalGrokUsage.isEphemeralSessionPath("%2Fprivate%2Ftmp%2Fguardianbot-fixture/signals.json"))

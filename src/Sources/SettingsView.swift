@@ -70,9 +70,7 @@ struct AccountRowView: View {
                 .buttonStyle(.plain)
                 .disabled(isRefreshing)
                 .help("Refresh this account's OAuth access token now")
-                .onHover { inside in
-                    if inside && !isRefreshing { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                }
+                .pointerCursor(!isRefreshing)
             }
             if showDisableToggle {
                 let canDisable = account.isDisabled || !isLastEnabled
@@ -84,11 +82,7 @@ struct AccountRowView: View {
                 .buttonStyle(.plain)
                 .disabled(!canDisable)
                 .help(!canDisable ? "At least one account must remain enabled" : "")
-                .onHover { inside in
-                    if canDisable {
-                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
-                }
+                .pointerCursor(canDisable)
             }
             Button(action: onRemove) {
                 HStack(spacing: 2) {
@@ -100,9 +94,7 @@ struct AccountRowView: View {
                 .foregroundColor(removeColor)
             }
             .buttonStyle(.plain)
-            .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
+            .pointerCursor()
         }
         .padding(.leading, 28)
     }
@@ -293,9 +285,7 @@ struct ServiceRow<ExtraContent: View>: View {
                             .buttonStyle(.plain)
                             .disabled(isRefreshingAll)
                             .help("Force refresh tokens for all \(serviceType.displayName) accounts")
-                            .onHover { inside in
-                                if inside && !isRefreshingAll { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                            }
+                            .pointerCursor(!isRefreshingAll)
                         }
                     }
                     .padding(.leading, 28)
@@ -408,11 +398,7 @@ struct CustomProviderCredentialRowView: View {
                 .buttonStyle(.plain)
                 .disabled(!canDisable)
                 .help(!canDisable ? "At least one API key must remain enabled" : "")
-                .onHover { inside in
-                    if canDisable {
-                        if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-                    }
-                }
+                .pointerCursor(canDisable)
             }
             Button(action: onRemove) {
                 HStack(spacing: 2) {
@@ -424,9 +410,7 @@ struct CustomProviderCredentialRowView: View {
                 .foregroundColor(removeColor)
             }
             .buttonStyle(.plain)
-            .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
+            .pointerCursor()
         }
         .padding(.leading, 28)
     }
@@ -703,9 +687,7 @@ struct SettingsView: View {
             }
             .font(.caption)
             .padding(.top, 4)
-            .onHover { inside in
-                if inside { NSCursor.pointingHand.push() } else { NSCursor.pop() }
-            }
+            .pointerCursor()
         }
         .padding(.bottom, 12)
     }

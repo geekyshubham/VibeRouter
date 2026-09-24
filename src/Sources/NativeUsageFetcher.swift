@@ -1195,9 +1195,16 @@ enum NativeUsageFetcher {
                 }
             }
 
-            _ = await TokenRefreshService.refreshAccountFile(authFile, force: true)
-            _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
-            payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+            // Do not force-rotate the Claude Code refresh token. A 401 here is often
+            // a stale proxy copy; POSTing the leftover RT logs Claude Code out.
+            if TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: payload,
+                native: readClaudeAppPayload()
+            ) {
+                _ = await TokenRefreshService.refreshAccountFile(authFile, force: true)
+                _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
+                payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+            }
             return await fetchClaudeUsageOnce(
                 authAccountID: authAccountID,
                 providerID: providerID,
@@ -1266,6 +1273,9 @@ enum NativeUsageFetcher {
                 label: "Weekly (Opus)"
             )
             let windows = [primary, secondary, sevenDayOpus, sevenDaySonnet].compactMap { $0 }
+            let resetBank = windows.isEmpty
+                ? nil
+                : await RateLimitResetService.fetchClaudeBank(accessToken: accessToken)
 
             return ProviderUsageSnapshot(
                 id: authAccountID,
@@ -1273,6 +1283,7 @@ enum NativeUsageFetcher {
                 source: "Claude OAuth",
                 windows: windows,
                 accountEmail: email,
+                rateLimitResets: resetBank,
                 updatedAt: Date(),
                 errorMessage: windows.isEmpty ? "No quota windows reported" : nil,
                 isRefreshing: false
@@ -3055,28 +3066,38 @@ enum NativeUsageFetcher {
     ) -> Bool {
         guard var payload = readAuthPayload(at: authFile) else { return false }
         let local = localClaude ?? readClaudeAppPayload()
-        guard let local, shouldAdoptClaudeCLITokens(local: local, file: payload, now: now) else {
-            return false
+        payload = TokenRefreshService.flattenedAuth(payload)
+        var changed = false
+
+        if let local, shouldAdoptClaudeCLITokens(local: local, file: payload, now: now) {
+            if let access = stringValue(local, keys: ["access_token"]) {
+                payload["access_token"] = access
+            }
+            if let email = stringValue(local, keys: ["email"]), !email.isEmpty {
+                if payload["email"] == nil || (payload["email"] as? String)?.isEmpty == true {
+                    payload["email"] = email
+                }
+            }
+            if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
+                payload["expired"] = exp
+                payload["expires_at"] = exp
+            }
+            payload["last_refresh"] = ISO8601DateFormatter().string(from: now)
+            changed = true
         }
 
-        payload = TokenRefreshService.flattenedAuth(payload)
-        if let access = stringValue(local, keys: ["access_token"]) {
-            payload["access_token"] = access
+        // Claude Code owns the rotating refresh token for this account. Leaving
+        // it in ~/.cli-proxy-api lets the bundled proxy POST it, Anthropic
+        // invalidates the previous RT, and `claude` logs out on the next request.
+        if let local,
+           !TokenRefreshService.shouldNetworkRefreshClaude(payload: payload, native: local),
+           payload["refresh_token"] != nil || payload["refreshToken"] != nil
+        {
+            payload.removeValue(forKey: "refresh_token")
+            payload.removeValue(forKey: "refreshToken")
+            changed = true
         }
-        if let refresh = stringValue(local, keys: ["refresh_token"]) {
-            payload["refresh_token"] = refresh
-        }
-        if let email = stringValue(local, keys: ["email"]), !email.isEmpty {
-            if payload["email"] == nil || (payload["email"] as? String)?.isEmpty == true {
-                payload["email"] = email
-            }
-        }
-        if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
-            payload["expired"] = exp
-            payload["expires_at"] = exp
-        }
-        payload["last_refresh"] = ISO8601DateFormatter().string(from: now)
-        return writeAuthPayload(payload, to: authFile)
+        return changed ? writeAuthPayload(payload, to: authFile) : false
     }
 
     /// True when `local` belongs to the same Claude account (or account matches) and has a newer/valid access token than `file`.
@@ -3324,7 +3345,7 @@ enum NativeUsageFetcher {
                 return number.intValue
             }
             if let value = json[key] as? Int { return value }
-            if let value = json[key] as? Double { return Int(value) }
+            if let value = json[key] as? Double { return JSONNumber.int(from: value) }
             if let value = json[key] as? String, let parsed = Int(value) { return parsed }
         }
         return nil

@@ -68,6 +68,7 @@ enum TokenRefreshService {
             guard var payload = NativeUsageFetcher.readAuthPayload(at: file),
                   let type = payload["type"] as? String
             else { continue }
+            if payload["disabled"] as? Bool == true { continue }
             let kind = type.lowercased()
             if kind == "codex" {
                 // Adopt the live CLI/desktop session before considering a network refresh.
@@ -493,16 +494,12 @@ enum TokenRefreshService {
         // Never clobber the primary account's keychain with tokens from a secondary account!
         let oauthObj = (root["claudeAiOauth"] as? [String: Any]) ?? root
         let existingRefresh = stringValue(oauthObj, keys: ["refreshToken", "refresh_token"])
-        let existingEmail = stringValue(root, keys: ["email"]) ?? stringValue(oauthObj, keys: ["email"])
-        let updatedEmail = stringValue(updated, keys: ["email"])
 
         if let existingRefresh, !existingRefresh.isEmpty, existingRefresh != oldRefresh {
-            if let existingEmail, let updatedEmail,
-               !existingEmail.isEmpty, !updatedEmail.isEmpty,
-               existingEmail.caseInsensitiveCompare(updatedEmail) != .orderedSame {
-                NSLog("[TokenRefresh] Skipping Keychain sync for secondary Claude account: %@", updatedEmail)
-                return
-            }
+            // Native Claude Code already rotated. Writing our leftover family into
+            // the keychain is what logs `claude` out every other refresh.
+            NSLog("[TokenRefresh] Skipping Keychain sync; Claude Code refresh token already moved on")
+            return
         }
 
         var oauth = (root["claudeAiOauth"] as? [String: Any]) ?? [:]
@@ -740,13 +737,48 @@ enum TokenRefreshService {
         }
     }
 
+    /// Claude Code and VibeRouter cannot both POST the same rotating refresh token.
+    /// A leftover RT is rejected (or reused) and Anthropic revokes the family —
+    /// `claude` then prints "Login expired · Please run /login".
+    static func shouldNetworkRefreshClaude(
+        payload: [String: Any],
+        native: [String: Any]?
+    ) -> Bool {
+        guard let native else { return true }
+        let local = flattenedAuth(native)
+        let file = flattenedAuth(payload)
+        guard stringValue(local, keys: ["access_token", "refresh_token"]) != nil else {
+            return true
+        }
+        if let fileEmail = stringValue(file, keys: ["email"]),
+           let localEmail = stringValue(local, keys: ["email"]),
+           !fileEmail.isEmpty, !localEmail.isEmpty,
+           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
+        {
+            return true
+        }
+        return false
+    }
+
     private static func refreshAnthropic(_ payload: [String: Any], forceOAuth: Bool = false) async -> [String: Any]? {
-        // If Keychain/CLI has newer unexpired tokens, adopt those first (unless forcing network OAuth exchange)
+        let local = NativeUsageFetcher.readClaudeAppPayload()
+        // Native Claude Code owns this token family. Overlay the live access token
+        // and never POST the refresh token — even on force, even if the file looks newer.
+        if let local, !shouldNetworkRefreshClaude(payload: payload, native: local) {
+            var adopted = copyTokenFields(from: local, onto: payload)
+            adopted.removeValue(forKey: "refresh_token")
+            adopted.removeValue(forKey: "refreshToken")
+            NSLog("[TokenRefresh] Skipping Anthropic refresh; Claude Code owns this token family")
+            return adopted
+        }
         if !forceOAuth,
-           let local = NativeUsageFetcher.readClaudeAppPayload(),
+           let local,
            NativeUsageFetcher.shouldAdoptClaudeCLITokens(local: local, file: payload)
         {
-            return copyTokenFields(from: local, onto: payload)
+            var adopted = copyTokenFields(from: local, onto: payload)
+            adopted.removeValue(forKey: "refresh_token")
+            adopted.removeValue(forKey: "refreshToken")
+            return adopted
         }
 
         guard let refresh = refreshToken(from: payload) else { return nil }

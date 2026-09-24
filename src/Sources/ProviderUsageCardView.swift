@@ -800,6 +800,8 @@ private struct AccountUsageBlock: View {
             return "Apply one banked ChatGPT/Codex reset — clears the 5-hour and weekly Codex limits immediately (\(availableCount) left)."
         case .grok:
             return "Apply one SuperGrok usage reset — clears your full weekly pool immediately (\(availableCount) left)."
+        case .claude:
+            return "Apply one banked Claude reset — refills the limit named on the reset (session or weekly) immediately (\(availableCount) left)."
         default:
             return "Apply one banked \(serviceType.displayName) reset — clears current usage limits immediately (\(availableCount) left)."
         }
@@ -1202,6 +1204,8 @@ private struct AccountUsageBlock: View {
             return "Manual rate-limit resets from ChatGPT/Codex (same inventory as Cockpit Tools). Use the button below to apply one."
         case .grok:
             return "SuperGrok one-time usage resets — clear your full weekly pool once per reset. Use the button below to apply one."
+        case .claude:
+            return "Banked Claude limit resets (Settings → Usage, or the weekly session reset). Use the button below to apply one."
         default:
             return "Manual rate-limit resets from \(serviceType.displayName). Use the button below to apply one."
         }

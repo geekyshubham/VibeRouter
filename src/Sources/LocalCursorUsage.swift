@@ -369,11 +369,7 @@ enum LocalCursorUsage {
     }
 
     private static func intValue(_ raw: Any?) -> Int {
-        if let n = raw as? Int { return n }
-        if let n = raw as? Double { return Int(n) }
-        if let n = raw as? NSNumber { return n.intValue }
-        if let n = raw as? String, let v = Int(n) { return v }
-        return 0
+        JSONNumber.int(raw)
     }
 
     private static func dayKey(for date: Date) -> Int {

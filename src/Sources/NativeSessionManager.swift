@@ -507,8 +507,12 @@ final class NativeSessionManager: ObservableObject {
         guard let access = nonEmpty(src["access_token"]) else {
             throw SwitchError.missingToken("access_token")
         }
-        var oauth: [String: Any] = ["accessToken": access]
-        if let refresh = nonEmpty(src["refresh_token"]) { oauth["refreshToken"] = refresh }
+        // Never clobber Claude Code's keychain with an access-token-only copy.
+        // Imported VibeRouter files omit the refresh token on purpose.
+        guard let refresh = nonEmpty(src["refresh_token"]) else {
+            throw SwitchError.missingToken("refresh_token")
+        }
+        var oauth: [String: Any] = ["accessToken": access, "refreshToken": refresh]
         if let expiresAt = expiryMillis(from: src) { oauth["expiresAt"] = expiresAt }
         if let sub = nonEmpty(src["subscriptionType"]) ?? nonEmpty(src["plan_type"]) {
             oauth["subscriptionType"] = sub
