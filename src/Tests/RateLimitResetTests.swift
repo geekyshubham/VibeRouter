@@ -196,6 +196,91 @@ final class RateLimitResetTests: XCTestCase {
         XCTAssertNil(inventory.flatMap(RateLimitResetService.claudeBankForDisplay))
     }
 
+    func testClaudeWallGrantIsShownWhenAnytimeReadIsSurfaceBlind() {
+        let anytime = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": false,
+                "ineligible_reason": "surface",
+                "grants": [],
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: false
+        )
+        let wall = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": true,
+                "next_grant_id": "opus55",
+                "grants": [[
+                    "id": "opus55",
+                    "resets_left": 1,
+                    "usable_now": true,
+                    "clears": ["five_hour", "seven_day"],
+                ]],
+            ],
+            cedarReached: true,
+            juniperField: ["eligible": true, "arm": "reset", "available": true],
+            juniperReached: true
+        )
+        let chosen = RateLimitResetService.preferClaudeResetInventory(anytime: anytime, atWall: wall)
+        XCTAssertEqual(chosen?.offer?.program, .cedar)
+        XCTAssertEqual(chosen?.offer?.id, "opus55")
+        XCTAssertEqual(chosen?.bank.canRedeem, true)
+        XCTAssertEqual(chosen?.bank.availableCount, 2)
+        XCTAssertNotNil(chosen.flatMap(RateLimitResetService.claudeBankForDisplay))
+    }
+
+    func testClaudeSurfaceBlindAnytimeStaysHiddenWhenWallIsEmpty() {
+        let anytime = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": false,
+                "ineligible_reason": "surface",
+                "grants": [],
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: false
+        )
+        let wall = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: ["eligible": false, "grants": []],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: true
+        )
+        let chosen = RateLimitResetService.preferClaudeResetInventory(anytime: anytime, atWall: wall)
+        XCTAssertEqual(chosen?.surfaceBlind, true)
+        XCTAssertNil(chosen.flatMap(RateLimitResetService.claudeBankForDisplay))
+    }
+
+    func testClaudeSavedGrantStillDisplaysWhenItCannotBeSpentYet() {
+        let anytime = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: [
+                "eligible": true,
+                "next_grant_id": "saved",
+                "grants": [[
+                    "id": "saved",
+                    "resets_left": 1,
+                    "usable_now": false,
+                    "use_requires_limit": true,
+                    "clears": ["five_hour"],
+                ]],
+            ],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: false
+        )
+        let wall = RateLimitResetService.parseClaudeResetInventory(
+            cedarField: ["eligible": false, "grants": []],
+            cedarReached: true,
+            juniperField: nil,
+            juniperReached: true
+        )
+        let chosen = RateLimitResetService.preferClaudeResetInventory(anytime: anytime, atWall: wall)
+        XCTAssertEqual(chosen?.bank.availableCount, 1)
+        XCTAssertEqual(chosen?.bank.canRedeem, false)
+        XCTAssertNotNil(chosen.flatMap(RateLimitResetService.claudeBankForDisplay))
+    }
+
     func testClaudeJuniperSessionResetIsOfferedAndCedarWinsWhenBothExist() {
         let juniperOnly = RateLimitResetService.parseClaudeResetInventory(
             cedarField: nil,

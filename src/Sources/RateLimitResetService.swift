@@ -488,9 +488,15 @@ enum RateLimitResetService {
 
     private static let claudeOAuthBase = "https://api.anthropic.com/api/oauth"
     private static let claudeAPIBase = "https://api.anthropic.com"
-    /// Matches the Claude Code build that speaks this reset API. An older
-    /// UA is an `ineligible_reason` of `cli_version`.
-    private static let claudeResetUserAgent = "claude-code/2.1.281"
+    /// Claude answers `ineligible_reason=cli_version` when this UA is older
+    /// than the CLI build that speaks the reset API. Prefer the installed
+    /// `claude` version; the floor is the build this client was checked against.
+    private static let claudeResetUserAgent: String = {
+        if let version = installedClaudeCodeVersion() {
+            return "claude-code/\(version)"
+        }
+        return "claude-code/2.1.283"
+    }()
 
     /// Bank for snapshots. Nil when the probes fail, or when the only answer
     /// is "this grant is web-only" — that must not paint "no resets left".
@@ -503,6 +509,30 @@ enum RateLimitResetService {
     static func claudeBankForDisplay(_ listing: ClaudeResetInventory) -> RateLimitResetBank? {
         if listing.surfaceBlind && listing.bank.availableCount == 0 { return nil }
         return listing.bank
+    }
+
+    /// `cedar_ember=1` is the anytime read. The spendable grant Claude Code
+    /// shows at a limit lives on `cedar_ember` inside `at_wall=1` — a
+    /// surface-blind anytime body must not hide that grant.
+    static func preferClaudeResetInventory(
+        anytime: ClaudeResetInventory?,
+        atWall: ClaudeResetInventory?
+    ) -> ClaudeResetInventory? {
+        switch (anytime, atWall) {
+        case (nil, nil):
+            return nil
+        case (let listing?, nil), (nil, let listing?):
+            return listing
+        case (let anytime?, let atWall?):
+            if atWall.offer != nil { return atWall }
+            if anytime.offer != nil { return anytime }
+            if atWall.bank.availableCount > 0 { return atWall }
+            if anytime.bank.availableCount > 0 { return anytime }
+            // Neither read has a grant. Keep the surface-blind anytime body
+            // so a web-only grant stays blank instead of "none left".
+            if anytime.surfaceBlind { return anytime }
+            return atWall
+        }
     }
 
     /// Pure parse of the two usage-probe fields. `*Reached == false` means the
@@ -633,48 +663,59 @@ enum RateLimitResetService {
         }
     }
 
-    private enum ClaudeFieldProbe {
-        case failed
-        case value([String: Any]?)
-
-        var reached: Bool {
-            if case .failed = self { return false }
-            return true
-        }
-
-        var field: [String: Any]? {
-            if case .value(let value) = self { return value }
-            return nil
-        }
-    }
-
     private static func listClaudeResets(accessToken: String) async -> ClaudeResetInventory? {
-        async let cedar = probeClaudeResetField(
+        async let anytime = probeClaudeUsage(
             accessToken: accessToken,
-            query: "cedar_ember=1&skip_spend=1",
-            field: "cedar_ember"
+            query: "cedar_ember=1&skip_spend=1"
         )
-        async let juniper = probeClaudeResetField(
+        async let wall = probeClaudeUsage(
             accessToken: accessToken,
-            query: "at_wall=1&skip_spend=1",
-            field: "juniper_tide"
+            query: "at_wall=1&skip_spend=1"
         )
-        let cedarProbe = await cedar
-        let juniperProbe = await juniper
-        return parseClaudeResetInventory(
-            cedarField: cedarProbe.field,
-            cedarReached: cedarProbe.reached,
-            juniperField: juniperProbe.field,
-            juniperReached: juniperProbe.reached
+        let anytimeProbe = await anytime
+        let wallProbe = await wall
+        let anytimeCedar = anytimeProbe.field("cedar_ember")
+        let wallCedar = wallProbe.field("cedar_ember")
+        let wallJuniper = wallProbe.field("juniper_tide")
+        return preferClaudeResetInventory(
+            anytime: parseClaudeResetInventory(
+                cedarField: anytimeCedar.value,
+                cedarReached: anytimeCedar.reached,
+                juniperField: nil,
+                juniperReached: false
+            ),
+            atWall: parseClaudeResetInventory(
+                cedarField: wallCedar.value,
+                cedarReached: wallCedar.reached,
+                juniperField: wallJuniper.value,
+                juniperReached: wallJuniper.reached
+            )
         )
     }
 
-    private static func probeClaudeResetField(
+    private struct ClaudeUsageProbe {
+        var reached: Bool
+        var json: [String: Any]?
+
+        func field(_ name: String) -> (reached: Bool, value: [String: Any]?) {
+            guard reached, let json else { return (false, nil) }
+            guard let raw = json[name] else {
+                if json["five_hour"] != nil || json["seven_day"] != nil { return (true, nil) }
+                return (false, nil)
+            }
+            if raw is NSNull { return (true, nil) }
+            guard let object = raw as? [String: Any] else { return (false, nil) }
+            return (true, object)
+        }
+    }
+
+    private static func probeClaudeUsage(
         accessToken: String,
-        query: String,
-        field: String
-    ) async -> ClaudeFieldProbe {
-        guard let url = URL(string: "\(claudeOAuthBase)/usage?\(query)") else { return .failed }
+        query: String
+    ) async -> ClaudeUsageProbe {
+        guard let url = URL(string: "\(claudeOAuthBase)/usage?\(query)") else {
+            return ClaudeUsageProbe(reached: false, json: nil)
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "GET"
         request.timeoutInterval = 12
@@ -684,16 +725,10 @@ enum RateLimitResetService {
             guard let http = response as? HTTPURLResponse,
                   (200...299).contains(http.statusCode),
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return .failed }
-            guard let raw = json[field] else {
-                if json["five_hour"] != nil || json["seven_day"] != nil { return .value(nil) }
-                return .failed
-            }
-            if raw is NSNull { return .value(nil) }
-            guard let object = raw as? [String: Any] else { return .failed }
-            return .value(object)
+            else { return ClaudeUsageProbe(reached: false, json: nil) }
+            return ClaudeUsageProbe(reached: true, json: json)
         } catch {
-            return .failed
+            return ClaudeUsageProbe(reached: false, json: nil)
         }
     }
 
@@ -877,10 +912,26 @@ enum RateLimitResetService {
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("cli", forHTTPHeaderField: "x-app")
         request.setValue(claudeResetUserAgent, forHTTPHeaderField: "User-Agent")
         if jsonBody {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
+    }
+
+    /// `~/.local/bin/claude` is a symlink whose last component is the version.
+    private static func installedClaudeCodeVersion() -> String? {
+        let link = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".local/bin/claude")
+        var path = link.path
+        if let dest = try? FileManager.default.destinationOfSymbolicLink(atPath: path) {
+            path = dest.hasPrefix("/")
+                ? dest
+                : link.deletingLastPathComponent().appendingPathComponent(dest).path
+        }
+        let name = URL(fileURLWithPath: path).lastPathComponent
+        guard name.range(of: #"^\d+\.\d+\.\d+$"#, options: .regularExpression) != nil else { return nil }
+        return name
     }
 
     private static func boolValue(_ json: [String: Any], key: String) -> Bool? {

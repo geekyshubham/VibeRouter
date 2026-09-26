@@ -733,7 +733,6 @@ private struct AccountUsageBlock: View {
     @ViewBuilder
     private var resetBankControls: some View {
         if let resets = usage?.rateLimitResets,
-           resets.canRedeem,
            resets.availableCount > 0,
            !account.isDisabled,
            !account.isExpired,
@@ -742,11 +741,7 @@ private struct AccountUsageBlock: View {
             VStack(alignment: .leading, spacing: 4) {
                 if pendingResetConfirm {
                     HStack(spacing: 6) {
-                        Text(
-                            resets.availableCount == 1
-                                ? "Use your rate-limit reset now? Limits clear immediately."
-                                : "Use 1 of \(resets.availableCount) resets now? Limits clear immediately."
-                        )
+                        Text(resetConfirmPrompt(resets))
                         .font(.caption2)
                         Spacer(minLength: 0)
                         Button("Cancel") { pendingResetConfirm = false }
@@ -780,7 +775,9 @@ private struct AccountUsageBlock: View {
                     .controlSize(.small)
                     .tint(tint)
                     .disabled(isRedeemingReset)
-                    .help(resetButtonHelp(resets.availableCount))
+                    .help(resets.canRedeem
+                        ? resetButtonHelp(resets.availableCount)
+                        : "Saved until you reach a usage limit. Trying it now does not use the reset if Claude refuses.")
                 }
 
                 if let resetMessage {
@@ -792,6 +789,16 @@ private struct AccountUsageBlock: View {
                 }
             }
         }
+    }
+
+    private func resetConfirmPrompt(_ resets: RateLimitResetBank) -> String {
+        if !resets.canRedeem {
+            return "This reset is saved until you hit a usage limit. Try it anyway?"
+        }
+        if resets.availableCount == 1 {
+            return "Use your rate-limit reset now? Limits clear immediately."
+        }
+        return "Use 1 of \(resets.availableCount) resets now? Limits clear immediately."
     }
 
     private func resetButtonHelp(_ availableCount: Int) -> String {
