@@ -1114,6 +1114,7 @@ enum VibeRouterCLI {
                     "expires_at": reset.nextExpiresAt.map(iso) as Any? ?? NSNull(),
                     "title": reset.sampleTitle as Any? ?? NSNull(),
                     "can_redeem": reset.canRedeem,
+                    "surface_only": reset.surfaceOnly,
                 ]
             } ?? NSNull(),
             "updated_at": snapshot.updatedAt.map(iso) ?? NSNull(),

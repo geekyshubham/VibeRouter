@@ -135,20 +135,27 @@ struct RateLimitResetBank: Equatable {
     let sampleTitle: String?
     /// Whether VibeRouter can redeem/consume a reset programmatically.
     let canRedeem: Bool
+    /// Claude told this OAuth login the saved grant is only on claude.ai.
+    let surfaceOnly: Bool
 
     init(
         availableCount: Int,
         nextExpiresAt: Date? = nil,
         sampleTitle: String? = nil,
-        canRedeem: Bool = true
+        canRedeem: Bool = true,
+        surfaceOnly: Bool = false
     ) {
         self.availableCount = availableCount
         self.nextExpiresAt = nextExpiresAt
         self.sampleTitle = sampleTitle
         self.canRedeem = canRedeem
+        self.surfaceOnly = surfaceOnly
     }
 
     var summaryLine: String {
+        if surfaceOnly {
+            return "Reset for free is on claude.ai"
+        }
         if availableCount <= 0 {
             return "No rate-limit resets left"
         }

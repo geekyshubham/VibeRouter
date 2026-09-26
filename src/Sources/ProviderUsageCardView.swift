@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 
 struct ProviderUsageCardView: View {
     let serviceType: ServiceType
@@ -733,13 +734,31 @@ private struct AccountUsageBlock: View {
     @ViewBuilder
     private var resetBankControls: some View {
         if let resets = usage?.rateLimitResets,
-           resets.availableCount > 0,
+           (resets.availableCount > 0 || resets.surfaceOnly),
            !account.isDisabled,
            !account.isExpired,
            showUsage
         {
             VStack(alignment: .leading, spacing: 4) {
-                if pendingResetConfirm {
+                if resets.surfaceOnly {
+                    Button {
+                        if let url = URL(string: "https://claude.ai/settings/usage") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: "arrow.up.right.circle.fill")
+                            Text("Reset on claude.ai")
+                                .font(.caption2.weight(.semibold))
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 5)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .tint(tint)
+                    .help("This Claude login can't spend the saved reset. Anthropic only offers it on claude.ai → Settings → Usage → Reset for free.")
+                } else if pendingResetConfirm {
                     HStack(spacing: 6) {
                         Text(resetConfirmPrompt(resets))
                         .font(.caption2)
@@ -1174,7 +1193,7 @@ private struct AccountUsageBlock: View {
     /// Cockpit-style chip: how many manual rate-limit resets remain (any provider).
     @ViewBuilder
     private func rateLimitResetsBadge(_ resets: RateLimitResetBank, tint: Color) -> some View {
-        let hasResets = resets.availableCount > 0
+        let hasResets = resets.availableCount > 0 || resets.surfaceOnly
         HStack(spacing: 8) {
             Image(systemName: hasResets ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
                 .font(.system(size: 12, weight: .semibold))
@@ -1212,6 +1231,9 @@ private struct AccountUsageBlock: View {
         case .grok:
             return "SuperGrok one-time usage resets — clear your full weekly pool once per reset. Use the button below to apply one."
         case .claude:
+            if usage?.rateLimitResets?.surfaceOnly == true {
+                return "Anthropic only exposes this saved reset on claude.ai. The button opens Settings → Usage."
+            }
             return "Banked Claude limit resets (Settings → Usage, or the weekly session reset). Use the button below to apply one."
         default:
             return "Manual rate-limit resets from \(serviceType.displayName). Use the button below to apply one."

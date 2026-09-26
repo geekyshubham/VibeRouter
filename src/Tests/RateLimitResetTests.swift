@@ -193,7 +193,10 @@ final class RateLimitResetTests: XCTestCase {
         )
         XCTAssertEqual(inventory?.surfaceBlind, true)
         XCTAssertEqual(inventory?.bank.availableCount, 0)
-        XCTAssertNil(inventory.flatMap(RateLimitResetService.claudeBankForDisplay))
+        let shown = inventory.flatMap(RateLimitResetService.claudeBankForDisplay)
+        XCTAssertEqual(shown?.surfaceOnly, true)
+        XCTAssertEqual(shown?.canRedeem, false)
+        XCTAssertEqual(shown?.summaryLine, "Reset for free is on claude.ai")
     }
 
     func testClaudeWallGrantIsShownWhenAnytimeReadIsSurfaceBlind() {
@@ -249,7 +252,7 @@ final class RateLimitResetTests: XCTestCase {
         )
         let chosen = RateLimitResetService.preferClaudeResetInventory(anytime: anytime, atWall: wall)
         XCTAssertEqual(chosen?.surfaceBlind, true)
-        XCTAssertNil(chosen.flatMap(RateLimitResetService.claudeBankForDisplay))
+        XCTAssertEqual(chosen.flatMap(RateLimitResetService.claudeBankForDisplay)?.surfaceOnly, true)
     }
 
     func testClaudeSavedGrantStillDisplaysWhenItCannotBeSpentYet() {

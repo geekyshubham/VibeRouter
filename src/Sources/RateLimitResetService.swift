@@ -505,9 +505,17 @@ enum RateLimitResetService {
         return claudeBankForDisplay(listing)
     }
 
-    /// Nil when there is nothing honest to paint (probe miss, or a web-only grant).
+    /// Nil on a probe miss. A web-only grant is a real row: this login cannot
+    /// spend it, so the card points at claude.ai instead of hiding the control.
     static func claudeBankForDisplay(_ listing: ClaudeResetInventory) -> RateLimitResetBank? {
-        if listing.surfaceBlind && listing.bank.availableCount == 0 { return nil }
+        if listing.surfaceBlind && listing.bank.availableCount == 0 {
+            return RateLimitResetBank(
+                availableCount: 0,
+                sampleTitle: "Settings → Usage → Reset for free",
+                canRedeem: false,
+                surfaceOnly: true
+            )
+        }
         return listing.bank
     }
 
