@@ -336,7 +336,10 @@ class ThinkingProxy {
 
     private func serveKiro(_ translated: KiroDirectProvider.TranslatedRequest, connection: NWConnection) {
         Task {
-            switch await KiroDirectProvider.send(conversationState: translated.conversationState) {
+            switch await KiroDirectProvider.send(
+                conversationState: translated.conversationState,
+                systemPrompt: translated.systemPrompt
+            ) {
             case .failure(let status, let message):
                 NSLog("[ThinkingProxy] Kiro request failed (%d): %@", status, message)
                 let payload: [String: Any] = [

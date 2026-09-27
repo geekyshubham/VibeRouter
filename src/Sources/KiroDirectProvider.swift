@@ -311,6 +311,7 @@ enum KiroDirectProvider {
         let conversationState: [String: Any]
         let model: String
         let stream: Bool
+        let systemPrompt: String
         /// Rough char/4 figure. Kiro reports credits, never tokens, so the
         /// Anthropic-shaped `usage` block can only ever be an estimate.
         let estimatedInputTokens: Int
@@ -337,45 +338,79 @@ enum KiroDirectProvider {
             turns[index].text = systemText + "\n\n" + turns[index].text
         }
 
-        // history must be strict user/assistant pairs; the last user turn is current.
-        let currentIndex = turns.lastIndex(where: { $0.role == "user" }) ?? (turns.count - 1)
-        let current = turns[currentIndex]
-        let historyTurns = Array(turns[..<currentIndex])
+        // Kiro validates history strictly: user/assistant must alternate, every
+        // toolResult must pair with the toolUse of the assistant right before
+        // it, and every tool name used in history must exist in the request's
+        // tool list. Claude Code histories can violate all of that after a
+        // rewind, compaction, or a mid-session model switch, and Kiro then 400s
+        // the call ("unexpected `tool_use_id` found in `tool_result`"), which
+        // Claude Code surfaces as the orphaned-tool_result error that only
+        // /rewind recovers from. Fold and repair the shape instead.
+        let merged = mergedTurns(
+            turns.filter { !($0.role == "assistant" && $0.text.isEmpty && $0.toolUses.isEmpty) }
+        )
+        guard !merged.isEmpty else { return nil }
 
-        var history: [[String: Any]] = []
-        var pendingUser: Turn?
-        for turn in historyTurns {
-            if turn.role == "user" {
-                pendingUser = turn
-            } else if let user = pendingUser {
-                history.append(["userInputMessage": userInputMessage(user, model: model, tools: [])])
-                history.append(["assistantResponseMessage": assistantResponseMessage(turn)])
-                pendingUser = nil
+        let currentIndex = merged.lastIndex(where: { $0.role == "user" }) ?? (merged.count - 1)
+        var current = merged[currentIndex]
+        var history = repairHistory(Array(merged[..<currentIndex]), currentResults: current.toolResults)
+
+        // The current user turn's results need matching uses in the last
+        // history assistant; synthesize any that the history no longer carries.
+        if !current.toolResults.isEmpty {
+            if var last = history.popLast() {
+                let paired = Set(last.toolUses.compactMap { $0["toolUseId"] as? String })
+                let missing = current.toolResults.filter {
+                    !paired.contains($0["toolUseId"] as? String ?? "")
+                }
+                if !missing.isEmpty {
+                    if last.text.isEmpty { last.text = "Tool calls were made." }
+                    last.toolUses += missing.map { syntheticUse(for: $0) }
+                }
+                history.append(last)
+            } else {
+                // Nothing precedes the turn, so the results cannot be paired
+                // at all; dropping them beats failing the whole request.
+                current.toolResults = []
             }
         }
-        // An unpaired trailing user turn would desync the pairing; fold it forward.
-        var currentTurn = current
-        if let dangling = pendingUser {
-            currentTurn.text = [dangling.text, current.text].filter { !$0.isEmpty }.joined(separator: "\n\n")
-            currentTurn.toolResults = dangling.toolResults + current.toolResults
+
+        // Kiro checks tool names referenced in history against the request's
+        // tool list; re-add any the current turn no longer advertises.
+        var requestTools = tools
+        let historyToolNames = Set(history.flatMap { $0.toolUses.compactMap { $0["name"] as? String } })
+        let advertised = Set(requestTools.compactMap {
+            ($0["toolSpecification"] as? [String: Any])?["name"] as? String
+        })
+        for name in historyToolNames.sorted() where !advertised.contains(name) {
+            requestTools.append(["toolSpecification": [
+                "name": name,
+                "description": "Tool",
+                "inputSchema": ["json": ["type": "object", "properties": [String: Any]()]],
+            ]])
         }
 
         var conversationState: [String: Any] = [
             "chatTriggerType": "MANUAL",
             "conversationId": UUID().uuidString,
-            "currentMessage": ["userInputMessage": userInputMessage(currentTurn, model: model, tools: tools)],
-            "history": history,
+            "currentMessage": ["userInputMessage": userInputMessage(current, model: model, tools: requestTools)],
+            "history": history.map { turn in
+                turn.role == "user"
+                    ? ["userInputMessage": userInputMessage(turn, model: model, tools: [])]
+                    : ["assistantResponseMessage": assistantResponseMessage(turn)]
+            },
         ]
         let effortFields = modelRequestFields(from: root, model: model)
         if !effortFields.isEmpty {
             conversationState["__effort"] = effortFields
         }
 
-        let promptChars = turns.reduce(0) { $0 + $1.text.utf8.count } + systemText.utf8.count
+        let promptChars = merged.reduce(0) { $0 + $1.text.utf8.count } + systemText.utf8.count
         return TranslatedRequest(
             conversationState: conversationState,
             model: requestedModel,
             stream: stream,
+            systemPrompt: systemText,
             estimatedInputTokens: max(1, promptChars / 4)
         )
     }
@@ -469,6 +504,81 @@ enum KiroDirectProvider {
             }
             self.text = text
         }
+    }
+
+    /// Fold consecutive same-role turns so the sequence strictly alternates.
+    /// Claude Code merges tool results and queued messages into back-to-back
+    /// user turns; the previous builder silently dropped the earlier ones.
+    static func mergedTurns(_ turns: [Turn]) -> [Turn] {
+        var merged: [Turn] = []
+        for turn in turns {
+            if let last = merged.last, last.role == turn.role {
+                let joiner = (!last.text.isEmpty && !turn.text.isEmpty) ? "\n\n" : ""
+                merged[merged.count - 1].text += joiner + turn.text
+                merged[merged.count - 1].toolUses += turn.toolUses
+                merged[merged.count - 1].toolResults += turn.toolResults
+            } else {
+                merged.append(turn)
+            }
+        }
+        return merged
+    }
+
+    /// Shape a raw turn sequence into history Kiro accepts:
+    /// - starts with a plain user turn,
+    /// - strictly alternates user/assistant,
+    /// - every assistant toolUse is answered by the following user turn,
+    /// - every toolResult is covered by the preceding assistant's toolUses.
+    /// `currentResults` are the results riding on the current user turn; they
+    /// answer the last history assistant's uses.
+    static func repairHistory(_ turns: [Turn], currentResults: [[String: Any]] = []) -> [Turn] {
+        var entries = mergedTurns(turns)
+        // Kiro's history must start with a plain user turn. Drop leading
+        // assistant turns; a leading user turn cannot carry toolResults, so
+        // strip those — and drop the entry entirely when nothing but the
+        // results would remain, since Bedrock rejects whitespace-only turns.
+        while !entries.isEmpty {
+            if entries[0].role != "user" { entries.removeFirst(); continue }
+            if !entries[0].toolResults.isEmpty {
+                let keepText = !entries[0].text.isEmpty
+                entries[0].toolResults = []
+                if !keepText { entries.removeFirst(); continue }
+            }
+            break
+        }
+        guard !entries.isEmpty else { return entries }
+
+        // Uses the following user turn never answers make Kiro demand their
+        // results; trim each assistant down to what was actually reported.
+        // The last entry's results may ride on the current turn instead.
+        for index in entries.indices where entries[index].role == "assistant" {
+            guard !entries[index].toolUses.isEmpty else { continue }
+            let answered = index + 1 < entries.count
+                ? Set(entries[index + 1].toolResults.compactMap { $0["toolUseId"] as? String })
+                : Set(currentResults.compactMap { $0["toolUseId"] as? String })
+            entries[index].toolUses = entries[index].toolUses.filter {
+                answered.contains($0["toolUseId"] as? String ?? "")
+            }
+        }
+
+        // Results whose uses the history no longer carries get a synthetic use
+        // on the assistant right before them so the pairing holds.
+        for index in entries.indices
+        where entries[index].role == "user" && !entries[index].toolResults.isEmpty {
+            guard index > 0, entries[index - 1].role == "assistant" else { continue }
+            let paired = Set(entries[index - 1].toolUses.compactMap { $0["toolUseId"] as? String })
+            let missing = entries[index].toolResults.filter {
+                !paired.contains($0["toolUseId"] as? String ?? "")
+            }
+            guard !missing.isEmpty else { continue }
+            if entries[index - 1].text.isEmpty { entries[index - 1].text = "Tool calls were made." }
+            entries[index - 1].toolUses += missing.map { syntheticUse(for: $0) }
+        }
+        return entries
+    }
+
+    private static func syntheticUse(for result: [String: Any]) -> [String: Any] {
+        ["toolUseId": result["toolUseId"] ?? "", "name": "unknown_tool", "input": [String: Any]()]
     }
 
     static func toolResultText(_ raw: Any?) -> String {
@@ -746,7 +856,7 @@ enum KiroDirectProvider {
         case failure(status: Int, message: String)
     }
 
-    static func send(conversationState: [String: Any]) async -> CallResult {
+    static func send(conversationState: [String: Any], systemPrompt: String = "") async -> CallResult {
         guard let token = await accessToken() else {
             return .failure(status: 401, message: "No usable Kiro credentials — add a Kiro account in VibeRouter")
         }
@@ -759,14 +869,119 @@ enum KiroDirectProvider {
         guard let url = URL(string: endpoint) else {
             return .failure(status: 500, message: "Could not build the Kiro request")
         }
-        let first = await postKiro(url: url, token: token, payload: payload)
-        if case .failure(_, let message) = first,
-           payload["additionalModelRequestFields"] != nil,
-           message.contains("additionalModelRequestFields") {
-            payload.removeValue(forKey: "additionalModelRequestFields")
-            return await postKiro(url: url, token: token, payload: payload)
+        // Kiro limits the complete request, including history, tool results and
+        // schemas. Its limit can be lower than the model's advertised context.
+        // Keep the current turn and the newest history, then shrink further if
+        // Kiro's own content-length check still rejects the estimate.
+        payload = trimHistory(in: payload, systemPrompt: systemPrompt, maxBytes: 900_000)
+        for attempt in 0...3 {
+            let result = await postKiro(url: url, token: token, payload: payload)
+            guard case .failure(_, let message) = result else { return result }
+            if payload["additionalModelRequestFields"] != nil,
+               message.contains("additionalModelRequestFields") {
+                payload.removeValue(forKey: "additionalModelRequestFields")
+                continue
+            }
+            guard message.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD"), attempt < 3 else {
+                return result
+            }
+            let bytes = payloadByteCount(payload)
+            let smaller = trimHistory(
+                in: payload, systemPrompt: systemPrompt,
+                maxBytes: max(80_000, bytes * 7 / 10)
+            )
+            guard payloadByteCount(smaller) < bytes else {
+                return .failure(
+                    status: 413,
+                    message: "The current message exceeds Kiro's input limit. Shorten the message or tool output and retry."
+                )
+            }
+            payload = smaller
         }
-        return first
+        return .failure(status: 413, message: "The Kiro request is still too large after trimming history")
+    }
+
+    static func payloadByteCount(_ payload: [String: Any]) -> Int {
+        (try? JSONSerialization.data(withJSONObject: payload).count) ?? Int.max
+    }
+
+    /// Remove complete old user/assistant pairs. Results on the new first user
+    /// belonged to the removed assistant, so strip those too. Carry the system
+    /// prompt forward because Kiro has no separate system field.
+    static func trimHistory(
+        in payload: [String: Any], systemPrompt: String, maxBytes: Int
+    ) -> [String: Any] {
+        var result = payload
+        guard var state = result["conversationState"] as? [String: Any],
+              var history = state["history"] as? [[String: Any]],
+              var current = state["currentMessage"] as? [String: Any]
+        else { return result }
+
+        let currentUser = current["userInputMessage"] as? [String: Any] ?? [:]
+        let currentContext = currentUser["userInputMessageContext"] as? [String: Any] ?? [:]
+        let hasCurrentResults = !(currentContext["toolResults"] as? [[String: Any]] ?? []).isEmpty
+        let minimumHistory = hasCurrentResults ? 2 : 0
+
+        while payloadByteCount(result) > maxBytes && history.count > minimumHistory {
+            guard history.count >= 2 else { break }
+            history.removeFirst(2)
+            if !history.isEmpty {
+                var first = history[0]["userInputMessage"] as? [String: Any] ?? [:]
+                if var context = first["userInputMessageContext"] as? [String: Any] {
+                    context.removeValue(forKey: "toolResults")
+                    if context.isEmpty { first.removeValue(forKey: "userInputMessageContext") }
+                    else { first["userInputMessageContext"] = context }
+                }
+                let text = (first["content"] as? String ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // A tool-result-only turn cannot begin a Kiro history. Give
+                // the remaining assistant a plain user turn to answer.
+                let keptText = text.isEmpty ? "Earlier tool output was omitted." : text
+                first["content"] = systemPrompt.isEmpty ? keptText : systemPrompt + "\n\n" + keptText
+                history[0]["userInputMessage"] = first
+            }
+            if history.isEmpty, !systemPrompt.isEmpty,
+               var user = current["userInputMessage"] as? [String: Any] {
+                let text = user["content"] as? String ?? ""
+                user["content"] = systemPrompt + "\n\n" + text
+                current["userInputMessage"] = user
+            }
+            state["history"] = history
+            state["currentMessage"] = current
+            result["conversationState"] = state
+        }
+
+        // A single shell result can itself exceed the whole request budget.
+        // Keep its beginning and end so the model sees both the command output
+        // and any trailing diagnostics, with an explicit omission marker.
+        if payloadByteCount(result) > maxBytes,
+           var user = current["userInputMessage"] as? [String: Any],
+           var context = user["userInputMessageContext"] as? [String: Any],
+           var results = context["toolResults"] as? [[String: Any]], !results.isEmpty {
+            let cap = max(2_000, maxBytes / max(4, results.count * 4))
+            var changed = false
+            for index in results.indices {
+                guard var content = results[index]["content"] as? [[String: Any]] else { continue }
+                for item in content.indices {
+                    guard let text = content[item]["text"] as? String, text.count > cap else { continue }
+                    let head = cap * 3 / 4
+                    let tail = cap - head
+                    content[item]["text"] = String(text.prefix(head))
+                        + "\n[Older tool output omitted to fit Kiro's input limit]\n"
+                        + String(text.suffix(tail))
+                    changed = true
+                }
+                results[index]["content"] = content
+            }
+            if changed {
+                context["toolResults"] = results
+                user["userInputMessageContext"] = context
+                current["userInputMessage"] = user
+                state["currentMessage"] = current
+                result["conversationState"] = state
+            }
+        }
+        return result
     }
 
     private static func postKiro(url: URL, token: String, payload: [String: Any]) async -> CallResult {
