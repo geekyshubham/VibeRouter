@@ -110,6 +110,27 @@ enum KiroDirectProvider {
         upstreamModel(for: model) != nil
     }
 
+    /// Claude Code posts `/v1/messages?beta=true` and `/v1/messages/count_tokens`.
+    /// The query string is not part of the route.
+    enum HTTPRoute: Equatable {
+        case messages
+        case countTokens
+    }
+
+    static func httpRoute(for path: String) -> HTTPRoute? {
+        let bare = path.split(separator: "?", maxSplits: 1).first.map(String.init) ?? path
+        if bare.hasSuffix("/v1/messages/count_tokens") { return .countTokens }
+        if bare.hasSuffix("/v1/messages") { return .messages }
+        return nil
+    }
+
+    static func modelName(in body: String) -> String? {
+        guard let data = body.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return root["model"] as? String
+    }
+
     /// `kiro/claude-opus-5.5` and the original bare Sonnet/Haiku/auto IDs.
     static func upstreamModel(for model: String) -> String? {
         let raw = model.trimmingCharacters(in: .whitespacesAndNewlines)

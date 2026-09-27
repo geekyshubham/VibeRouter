@@ -288,6 +288,33 @@ class ThinkingProxy {
             }
         }
         
+        // Kiro has no executor in the bundled proxy. Claude Code calls
+        // `/v1/messages?beta=true`, which must be served here. Forwarding it
+        // makes the backend answer "unknown provider".
+        if method == "POST",
+           let route = KiroDirectProvider.httpRoute(for: rewrittenPath),
+           let model = KiroDirectProvider.modelName(in: modifiedBody),
+           KiroDirectProvider.isKiroModel(model) {
+            switch route {
+            case .countTokens:
+                let tokens = KiroDirectProvider.translateRequest(anthropicBody: modifiedBody)?.estimatedInputTokens ?? 1
+                sendJSON(["input_tokens": tokens], status: 200, to: connection)
+                return
+            case .messages:
+                guard let translated = KiroDirectProvider.translateRequest(anthropicBody: modifiedBody) else {
+                    sendJSON(
+                        ["type": "error", "error": ["type": "invalid_request_error", "message": "Could not read this Kiro request"]],
+                        status: 400,
+                        to: connection
+                    )
+                    return
+                }
+                NSLog("[ThinkingProxy] Serving %@ from Kiro directly", translated.model)
+                serveKiro(translated, connection: connection)
+                return
+            }
+        }
+
         // Route Claude requests through Vercel AI Gateway when configured
         if vercelConfig.isActive && method == "POST" && isClaudeModelRequest(body: modifiedBody) && !matchedCopilotAlias {
             NSLog("[ThinkingProxy] Routing Claude request via Vercel AI Gateway")
@@ -295,16 +322,6 @@ class ThinkingProxy {
             return
         }
         
-        // Kiro has no executor in the bundled proxy, so it is served here instead
-        // of being forwarded to a backend that would answer "unknown provider".
-        if method == "POST", rewrittenPath.hasSuffix("/v1/messages"),
-           let translated = KiroDirectProvider.translateRequest(anthropicBody: modifiedBody)
-        {
-            NSLog("[ThinkingProxy] Serving %@ from Kiro directly", translated.model)
-            serveKiro(translated, connection: connection)
-            return
-        }
-
         // The catalog is merged here so Kiro models are visible to clients even
         // though the backend cannot route them.
         if method == "GET", rewrittenPath.hasSuffix("/v1/models") {
