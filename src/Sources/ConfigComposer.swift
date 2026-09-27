@@ -271,6 +271,36 @@ enum ConfigComposer {
         return mergedRoot
     }
     
+    /// API key that marks the Kiro bridge entry in `claude-api-key`. The bundled
+    /// proxy has no Kiro executor, so it reaches Kiro through ThinkingProxy,
+    /// which serves `kiro/*` on `/v1/messages`. The backend then lists Kiro
+    /// models, routes OpenAI-format requests to them, and can fail over to and
+    /// from them.
+    static let kiroBridgeAPIKey = "viberouter-kiro"
+
+    /// Replaces the Kiro bridge entry. An empty `modelIDs` removes it. Entries
+    /// the user wrote in `claude-api-key` are kept.
+    static func settingKiroBridge(in root: [String: Any], modelIDs: [String], proxyPort: Int) -> [String: Any] {
+        var root = root
+        var entries = stringKeyedDictionaryArray(root["claude-api-key"])
+            .filter { normalizedString($0["api-key"]) != kiroBridgeAPIKey }
+        if !modelIDs.isEmpty {
+            entries.append([
+                "api-key": kiroBridgeAPIKey,
+                "base-url": "http://127.0.0.1:\(proxyPort)",
+                // Cloaking would prepend the Claude Code system prompt to every Kiro turn.
+                "cloak": ["mode": "never"],
+                "models": modelIDs.map { ["name": $0, "alias": $0] },
+            ])
+        }
+        if entries.isEmpty {
+            root.removeValue(forKey: "claude-api-key")
+        } else {
+            root["claude-api-key"] = entries
+        }
+        return root
+    }
+
     static func stringKeyedDictionary(_ value: Any) -> [String: Any]? {
         if let dictionary = value as? [String: Any] {
             return dictionary

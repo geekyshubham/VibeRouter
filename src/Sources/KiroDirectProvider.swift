@@ -244,6 +244,21 @@ enum KiroDirectProvider {
         return nil
     }
 
+    /// True when a kiro-cli login or an enabled Kiro auth file exists. Checked
+    /// without refreshing, so it is cheap enough for config composition.
+    static func hasCredentials() -> Bool {
+        if cliSocialPayload() != nil { return true }
+        let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
+        let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
+        return files.contains { file in
+            guard file.pathExtension == "json", file.lastPathComponent.hasPrefix("kiro-"),
+                  let data = try? Data(contentsOf: file),
+                  let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+            else { return false }
+            return (payload["disabled"] as? Bool) != true
+        }
+    }
+
     private static func cliSocialPayload() -> [String: Any]? {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/kiro-cli/data.sqlite3")
@@ -374,6 +389,13 @@ enum KiroDirectProvider {
                 current.toolResults = []
             }
         }
+
+        // Kiro can prune old messages again after receiving our request. If
+        // it starts that internal window on a user toolResult, Bedrock rejects
+        // the entire turn even though our original history was paired. Keep
+        // only the active tool round trip structured; older calls and results
+        // remain readable as plain transcript text across any cut point.
+        flattenHistoricalTools(&history, keepLastAssistantUses: !current.toolResults.isEmpty)
 
         // Kiro checks tool names referenced in history against the request's
         // tool list; re-add any the current turn no longer advertises.
@@ -579,6 +601,50 @@ enum KiroDirectProvider {
 
     private static func syntheticUse(for result: [String: Any]) -> [String: Any] {
         ["toolUseId": result["toolUseId"] ?? "", "name": "unknown_tool", "input": [String: Any]()]
+    }
+
+    static func flattenHistoricalTools(_ history: inout [Turn], keepLastAssistantUses: Bool) {
+        let activeAssistant = keepLastAssistantUses ? history.indices.last : nil
+        let names = Dictionary(history.flatMap { $0.toolUses }.compactMap { use -> (String, String)? in
+            guard let id = use["toolUseId"] as? String, let name = use["name"] as? String else { return nil }
+            return (id, name)
+        }, uniquingKeysWith: { first, _ in first })
+
+        for index in history.indices {
+            if history[index].role == "assistant" && index != activeAssistant {
+                let notes = history[index].toolUses.map { use -> String in
+                    let name = use["name"] as? String ?? "tool"
+                    let input = use["input"] as? [String: Any] ?? [:]
+                    let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])
+                    let arguments = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+                    return "[Called \(name): \(shortened(arguments, limit: 1_000))]"
+                }
+                if !notes.isEmpty {
+                    history[index].text = ([history[index].text] + notes)
+                        .filter { !$0.isEmpty }.joined(separator: "\n")
+                    history[index].toolUses = []
+                }
+            }
+            if history[index].role == "user" && !history[index].toolResults.isEmpty {
+                let notes = history[index].toolResults.map { result -> String in
+                    let id = result["toolUseId"] as? String ?? ""
+                    let name = names[id] ?? "tool"
+                    let content = result["content"] as? [[String: Any]] ?? []
+                    let output = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
+                    return "[\(name) result: \(shortened(output, limit: 4_000))]"
+                }
+                history[index].text = ([history[index].text] + notes)
+                    .filter { !$0.isEmpty }.joined(separator: "\n")
+                history[index].toolResults = []
+            }
+        }
+    }
+
+    private static func shortened(_ text: String, limit: Int) -> String {
+        guard text.count > limit else { return text }
+        let head = limit * 3 / 4
+        return String(text.prefix(head)) + "\n[Earlier content omitted]\n"
+            + String(text.suffix(limit - head))
     }
 
     static func toolResultText(_ raw: Any?) -> String {

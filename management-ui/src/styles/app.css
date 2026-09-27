@@ -2420,3 +2420,42 @@ a.check-item:hover {
     background: Highlight;
   }
 }
+
+/* ---------------------------------------------------------------- FALLBACK CHAIN */
+
+.chain {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.chain.dim {
+  opacity: 0.6;
+}
+.chain-step .list-row {
+  border: 1px solid var(--line);
+  background: var(--fill-1);
+}
+/* The hop between steps: shown as its own line so the order reads as a chain. */
+.chain-step + .chain-step::before {
+  content: '↓  when every account above runs out';
+  display: block;
+  padding: 6px 0 6px 22px;
+  font-size: var(--text-xs);
+  color: var(--ink-3);
+}
+.chain-add {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(200px, 2fr) auto;
+  align-items: end;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+  padding-top: var(--s-4);
+  border-top: 1px solid var(--line);
+}
+@media (max-width: 640px) {
+  .chain-add {
+    grid-template-columns: 1fr;
+  }
+}

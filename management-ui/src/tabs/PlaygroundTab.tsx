@@ -13,6 +13,7 @@ import Icon from '../lib/icons';
 import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import CopyButton from '../components/CopyButton';
+import ProviderModelPicker from '../components/ProviderModelPicker';
 
 interface ChatResponse {
   choices?: { message?: { content?: string } }[];
@@ -27,6 +28,7 @@ interface Turn {
 }
 
 const MODEL_KEY = 'vr_pg_model';
+const PROVIDER_KEY = 'vr_pg_provider';
 const SUGGESTIONS = ['Say hello in five words.', 'Which model are you?', 'Write a haiku about routers.'];
 
 export default function PlaygroundTab() {
@@ -34,11 +36,11 @@ export default function PlaygroundTab() {
   const { keys } = useAccessKeys();
   const models = useMemo(() => (routing.data?.models ?? []).filter((m) => !m.disabled).sort((a, b) => a.id.localeCompare(b.id)), [routing.data]);
 
-  const [model, setModel] = useState(() => {
+  const [pick, setPick] = useState(() => {
     try {
-      return localStorage.getItem(MODEL_KEY) ?? '';
+      return { provider: localStorage.getItem(PROVIDER_KEY) ?? '', model: localStorage.getItem(MODEL_KEY) ?? '' };
     } catch {
-      return '';
+      return { provider: '', model: '' };
     }
   });
   const [system, setSystem] = useState('');
@@ -48,7 +50,11 @@ export default function PlaygroundTab() {
   const logRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
-  const selected = models.some((m) => m.id === model) ? model : models[0]?.id ?? '';
+  // Fall back to the first model when the saved one is gone, and to that
+  // model's first provider when the saved provider no longer serves it.
+  const selectedEntry = models.find((m) => m.id === pick.model) ?? models[0];
+  const selected = selectedEntry?.id ?? '';
+  const provider = selectedEntry?.providers?.includes(pick.provider) ? pick.provider : selectedEntry?.providers?.[0] ?? '';
 
   useEffect(() => {
     logRef.current?.scrollTo({ top: logRef.current.scrollHeight, behavior: 'smooth' });
@@ -56,9 +62,10 @@ export default function PlaygroundTab() {
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
-  function pickModel(id: string) {
-    setModel(id);
+  function pickModel(nextProvider: string, id: string) {
+    setPick({ provider: nextProvider, model: id });
     try {
+      localStorage.setItem(PROVIDER_KEY, nextProvider);
       localStorage.setItem(MODEL_KEY, id);
     } catch {
       /* storage unavailable — selection just won't persist */
@@ -135,7 +142,7 @@ export default function PlaygroundTab() {
             {turns.length === 0 ? (
               <div className="chat-empty">
                 <h3>Try a model</h3>
-                <p>Pick a model on the right, then ask something. You'll see the reply, how long it took, and the tokens used.</p>
+                <p>Pick a provider and model on the right, then ask something. You'll see the reply, how long it took, and the tokens used.</p>
                 <div className="suggestions">
                   {SUGGESTIONS.map((s) => (
                     <button key={s} className="chip" onClick={() => void send(s)} disabled={!selected}>
@@ -206,22 +213,13 @@ export default function PlaygroundTab() {
 
         <aside className="glass panel stack" style={{ gap: 'var(--s-4)' }} aria-label="Request settings">
           <SectionHeader Glyph={Icon.Settings} title="Request" />
-          <div className="field">
-            <label htmlFor="pg-model">Model</label>
-            <select id="pg-model" className="inp mono" value={selected} onChange={(e) => pickModel(e.target.value)} disabled={!models.length}>
-              {models.length === 0 && <option value="">No models served</option>}
-              {models.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.id}
-                </option>
-              ))}
-            </select>
-            {selected && (
-              <span className="hint">
-                Served by {(models.find((m) => m.id === selected)?.providers ?? []).map((p) => providerMeta(p).label).join(', ') || 'no account'}
-              </span>
-            )}
-          </div>
+          <ProviderModelPicker idPrefix="pg" models={models} provider={provider} model={selected} onChange={pickModel} />
+          {(selectedEntry?.providers?.length ?? 0) > 1 && (
+            <p className="hint">
+              {selected} is also served by {selectedEntry!.providers!.filter((p) => p !== provider).map((p) => providerMeta(p).label).join(', ')}. The proxy
+              rotates across every ready account for it.
+            </p>
+          )}
           <div className="field">
             <label htmlFor="pg-system">System prompt</label>
             <textarea id="pg-system" className="inp" rows={4} placeholder="Optional" value={system} onChange={(e) => setSystem(e.target.value)} />

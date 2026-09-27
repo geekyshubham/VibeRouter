@@ -513,6 +513,21 @@ struct ConfigComposerSpec {
             expectNil(root["remote-management"], "a whitespace-only key must not compose a remote-management block", recorder: recorder)
         }
 
+        run("the Kiro bridge replaces itself and keeps user claude-api-key entries", recorder: recorder) {
+            let user: [String: Any] = ["api-key": "sk-user", "base-url": "https://example.test"]
+            let root: [String: Any] = ["claude-api-key": [user, ["api-key": ConfigComposer.kiroBridgeAPIKey, "models": []]]]
+            let added = ConfigComposer.stringKeyedDictionaryArray(
+                ConfigComposer.settingKiroBridge(in: root, modelIDs: ["kiro/auto"], proxyPort: 8317)["claude-api-key"]
+            )
+            expectEqual(added.count, 2, "user entry plus one bridge entry", recorder: recorder)
+            expectEqual(added.first?["api-key"] as? String, "sk-user", "user entry stays first", recorder: recorder)
+            expectEqual(added.last?["base-url"] as? String, "http://127.0.0.1:8317", "bridge points at ThinkingProxy", recorder: recorder)
+            expectEqual(modelAliases(in: added.last ?? [:]), ["kiro/auto"], "bridge lists Kiro models", recorder: recorder)
+            let removed = ConfigComposer.settingKiroBridge(in: ["claude-api-key": added], modelIDs: [], proxyPort: 8317)
+            expectEqual(ConfigComposer.stringKeyedDictionaryArray(removed["claude-api-key"]).count, 1, "no models removes only the bridge", recorder: recorder)
+            expectNil(ConfigComposer.settingKiroBridge(in: [:], modelIDs: [], proxyPort: 8317)["claude-api-key"], "no entries drops the key", recorder: recorder)
+        }
+
         if recorder.failures == 0 {
             print("ConfigComposerSpec: all checks passed")
             Foundation.exit(EXIT_SUCCESS)

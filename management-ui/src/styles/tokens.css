@@ -1,5 +1,5 @@
 /* Hallmark · genre: modern-minimal (glass variant, user brief) · macrostructure: Workbench (app shell)
- * theme: custom · vibe: "liquid glass over a quiet violet night" · paper oklch(14% 0.02 281) dark / oklch(96% 0.012 281) light
+ * theme: custom · vibe: "liquid glass over a quiet violet night" · paper pitch black oklch(0% 0 0) dark / oklch(96% 0.012 281) light
  * accent: oklch(56% 0.2 281) violet · display + body: Geist · data: Geist Mono · nav: N3 side-rail + N13 ⌘K · footer: none (app)
  * axes: dark+light / geometric-sans / cool
  * Hallmark · pre-emit critique: P4 H5 E4 S4 R4 V4
@@ -60,21 +60,21 @@
   --z-toast: 90;
 
   /* ---- Dark palette (default) ---- */
-  --bg: oklch(14% 0.02 281);
-  --bg-2: oklch(17.5% 0.026 281);
-  --glow-a: oklch(52% 0.19 281 / 0.30);
-  --glow-b: oklch(55% 0.12 250 / 0.18);
-  --grain-opacity: 0.05;
+  --bg: #000;
+  --bg-2: #000;
+  --glow-a: transparent;
+  --glow-b: transparent;
+  --grain-opacity: 0;
 
-  --glass: oklch(25% 0.026 281 / 0.52);
-  --glass-strong: oklch(21% 0.024 281 / 0.8);
-  --glass-solid: oklch(21% 0.022 281);
-  --glass-rim: oklch(100% 0 0 / 0.13);
+  --glass: oklch(100% 0 0 / 0.035);
+  --glass-strong: oklch(7% 0 0 / 0.92);
+  --glass-solid: oklch(9% 0 0);
+  --glass-rim: oklch(100% 0 0 / 0.1);
   --glass-edge: oklch(100% 0 0 / 0.075);
-  --glass-shine: oklch(100% 0 0 / 0.07);
-  --glass-depth: oklch(0% 0 0 / 0.22);
-  --shadow: 0 24px 60px -18px oklch(6% 0.03 281 / 0.75);
-  --shadow-sm: 0 8px 24px -10px oklch(6% 0.03 281 / 0.7);
+  --glass-shine: oklch(100% 0 0 / 0.03);
+  --glass-depth: oklch(0% 0 0 / 0.4);
+  --shadow: 0 24px 60px -18px oklch(0% 0 0 / 0.9);
+  --shadow-sm: 0 8px 24px -10px oklch(0% 0 0 / 0.9);
 
   --ink: oklch(96% 0.006 281);
   --ink-2: oklch(80% 0.014 281);
@@ -85,8 +85,8 @@
   --fill-1: oklch(100% 0 0 / 0.04);
   --fill-2: oklch(100% 0 0 / 0.07);
   --fill-3: oklch(100% 0 0 / 0.11);
-  --input: oklch(10% 0.02 281 / 0.45);
-  --scrim: oklch(8% 0.02 281 / 0.55);
+  --input: oklch(0% 0 0 / 0.6);
+  --scrim: oklch(0% 0 0 / 0.7);
 
   --accent: oklch(76% 0.13 281);
   --accent-solid: oklch(56% 0.2 281);

@@ -2,7 +2,8 @@
    ModelsTab — model routing policy:
      - which models may be served at all (disabled-models)
      - the order they are preferred in (model-priority)
-     - whether an exhausted model falls back to the next preferred one
+     - the fallback chain: when every account of the requested model is out,
+       the next model in the chain (any provider) answers instead
    All state lives in GET /routing/models; each change PUTs the full list back
    (the backend normalizes + persists to config.yaml). Changes apply
    optimistically and roll back if the write fails.
@@ -23,6 +24,7 @@ import LoadingBlock from '../components/LoadingBlock';
 import QueryError from '../components/QueryError';
 import ProviderLogo from '../components/ProviderLogo';
 import Switch from '../components/Switch';
+import ProviderModelPicker, { providersOf } from '../components/ProviderModelPicker';
 import { useToast } from '../context/ToastContext';
 
 const KEY = ['mgmt', '/routing/models'];
@@ -63,6 +65,15 @@ export default function ModelsTab() {
 
   const enabledCount = catalog.filter((m) => !m.disabled).length;
 
+  // Adder: enabled models not already in the chain. Keeps the last pick while it
+  // is still addable, otherwise falls back to the first provider and model.
+  const [add, setAdd] = useState({ provider: '', model: '' });
+  const addable = useMemo(() => catalog.filter((m) => !m.disabled && !priority.includes(m.id)), [catalog, priority]);
+  const addProviders = providersOf(addable);
+  const addProvider = addProviders.some((p) => p.id === add.provider) ? add.provider : addProviders[0]?.id ?? '';
+  const inAddProvider = addable.filter((m) => asArray<string>(m.providers).includes(addProvider)).map((m) => m.id).sort();
+  const addModel = inAddProvider.includes(add.model) ? add.model : inAddProvider[0] ?? '';
+
   /** Optimistic write: patch the cache, send, roll back + toast on failure. */
   const write = async (patch: (d: ModelRoutingResponse) => ModelRoutingResponse, send: () => Promise<unknown>, fail: string) => {
     const previous = qc.getQueryData<ModelRoutingResponse>(KEY);
@@ -83,7 +94,7 @@ export default function ModelsTab() {
     write(
       (d) => ({ ...d, 'model-priority': next, models: (d.models ?? []).map((m) => ({ ...m, prioritized: next.includes(m.id) })) }),
       () => apiClient.put('/routing/model-priority', { value: next }),
-      "Couldn't save the model order",
+      "Couldn't save the fallback chain",
     );
 
   const toggleModel = (id: string, enable: boolean) => {
@@ -110,19 +121,21 @@ export default function ModelsTab() {
     return (
       <div className={`list-row ${m.disabled ? 'dim' : ''}`}>
         <div className="row-main">
-          {inPriority ? (
-            <span className="tag accent" aria-label={`Position ${index + 1}`}>
+          {inPriority && (
+            <span className="tag accent" aria-label={`Step ${index + 1}`}>
               {index + 1}
             </span>
-          ) : (
-            <ProviderLogo provider={m.providers[0]} size={28} />
           )}
+          <ProviderLogo provider={m.providers[0]} size={28} />
           <div className="row-info">
             <div className="row-title">
               <span className="mono" style={{ fontSize: 'var(--text-sm)' }}>{m.id}</span>
             </div>
             <div className="row-meta">
-              {m.known ? m.providers.map((p) => providerMeta(p).label).join(' · ') || 'No active account' : 'No longer offered by any account — safe to remove'}
+              {m.known
+                ? (m.providers.map((p) => providerMeta(p).label).join(' · ') || 'No active account') +
+                  (inPriority ? (index === 0 ? ' · tried first' : ' · when the step above runs out') : '')
+                : 'No longer offered by any account — safe to remove'}
             </div>
           </div>
         </div>
@@ -148,8 +161,8 @@ export default function ModelsTab() {
                 </button>
                 <button
                   className="icon-btn"
-                  aria-label={`Remove ${m.id} from the fallback order`}
-                  title="Remove from order"
+                  aria-label={`Remove ${m.id} from the fallback chain`}
+                  title="Remove from chain"
                   disabled={busy}
                   onClick={() => void putPriority(priority.filter((id) => id !== m.id))}
                 >
@@ -161,10 +174,10 @@ export default function ModelsTab() {
                 className="btn btn-ghost btn-sm"
                 disabled={busy || m.disabled}
                 onClick={() => void putPriority([...priority, m.id])}
-                aria-label={`Add ${m.id} to the fallback order`}
+                aria-label={`Add ${m.id} to the fallback chain`}
               >
                 <Icon.Plus />
-                Order
+                Chain
               </button>
             )}
             {m.known && (
@@ -180,7 +193,7 @@ export default function ModelsTab() {
     <section className="view" aria-labelledby="page-title">
       <PageHeader
         title="Models"
-        sub={`${enabledCount} of ${catalog.length} models are served. Turn off the ones you never want used, and set a fallback order for when one runs out.`}
+        sub={`${enabledCount} of ${catalog.length} models are served. Turn off the ones you never want used, and chain models across providers for when one runs out.`}
       />
 
       {q.isLoading ? (
@@ -189,46 +202,53 @@ export default function ModelsTab() {
         <QueryError what="models" onRetry={() => void q.refetch()} />
       ) : (
         <>
-          <div className="glass panel">
-            <div className="setting">
-              <div className="setting-text">
-                <div className="setting-title">Fall back when a model runs out</div>
-                <div className="setting-desc">
-                  If every account for the requested model has hit its quota, answer with the next model in the order below
-                  instead of returning an error.
-                </div>
-              </div>
-              <div className="setting-ctl">
+          <section className="glass panel" aria-labelledby="chain-title">
+            <SectionHeader
+              id="chain-title"
+              Glyph={Icon.List}
+              title="Fallback chain"
+              sub={
+                failover
+                  ? 'A request uses every ready account of the model it asks for. When all of them are out, it tries this chain from the top.'
+                  : 'Off: a request that runs out of accounts returns an error. The chain below is kept for when you turn it on.'
+              }
+              actions={
                 <Switch
                   checked={failover}
-                  label="Fall back when a model runs out"
+                  label="Fall back down the chain when a model runs out"
                   disabled={busy}
                   onChange={(v) =>
                     void write((d) => ({ ...d, 'model-failover': v }), () => apiClient.patch('/routing/model-failover', { value: v }), "Couldn't change failover")
                   }
                 />
-              </div>
-            </div>
-          </div>
-
-          <section className="glass panel" aria-labelledby="order-title">
-            <SectionHeader
-              id="order-title"
-              Glyph={Icon.List}
-              title="Fallback order"
-              sub={failover ? 'Tried top to bottom when a model is exhausted' : 'Saved, but only used while fallback is on'}
+              }
             />
             {prioritized.length === 0 ? (
-              <EmptyState Glyph={Icon.List} title="No fallback order yet">
-                Use “Order” on any model below to add it. Without an order, every enabled model is served as requested.
+              <EmptyState Glyph={Icon.List} title="No fallbacks yet">
+                Pick a provider and a model below, for example Kiro’s claude-opus-5.5 first and then Codex’s gpt-5.5.
               </EmptyState>
             ) : (
-              <div className="list">
+              <ol className={`chain ${failover ? '' : 'dim'}`} aria-label="Fallback chain, tried top to bottom">
                 {prioritized.map((m, i) => (
-                  <Row key={m.id} m={m} index={i} />
+                  <li key={m.id} className="chain-step">
+                    <Row m={m} index={i} />
+                  </li>
                 ))}
-              </div>
+              </ol>
             )}
+            <form
+              className="chain-add"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (addModel) void putPriority([...priority, addModel]);
+              }}
+            >
+              <ProviderModelPicker idPrefix="chain" models={addable} provider={addProvider} model={addModel} onChange={(p, m) => setAdd({ provider: p, model: m })} />
+              <button type="submit" className="btn btn-primary" disabled={busy || !addModel}>
+                <Icon.Plus />
+                Add to chain
+              </button>
+            </form>
           </section>
 
           <section className="glass panel" aria-labelledby="all-title">

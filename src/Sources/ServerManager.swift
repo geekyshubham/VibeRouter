@@ -955,6 +955,13 @@ class ServerManager: ObservableObject {
             ),
             managedZAIProviderName: ProviderCatalog.managedZAIProviderName
         )
+
+        // Kiro is served by ThinkingProxy (8317). Listing it in the backend lets
+        // the console, the OpenAI routes, and model failover reach it.
+        let kiroModels = isProviderEnabled("kiro", baseConfigRoot: baseConfig.root, enabledProviderStates: enabledProviderStates)
+            && KiroDirectProvider.hasCredentials()
+            ? KiroDirectProvider.advertisedModelIDs : []
+        mergedRoot = ConfigComposer.settingKiroBridge(in: mergedRoot, modelIDs: kiroModels, proxyPort: 8317)
         
         let mergedConfigPath = authDir.appendingPathComponent(CustomProviderConstants.mergedConfigFilename)
         if case .success(let existingRuntimeRoot) = loadYAMLDictionary(atPath: mergedConfigPath.path) {

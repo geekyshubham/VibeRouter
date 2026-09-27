@@ -200,6 +200,45 @@ async function main() {
   record('models: search empty state', !!(await page.waitForSelector('text=No matching models', { timeout: 3000 }).catch(() => null)));
   await page.fill('input[aria-label="Search models"]', '');
 
+  // --- Models: build a cross-provider fallback chain (provider → model → add)
+  const chainSteps = () => page.locator('.chain-step').count();
+  const stepsBefore = await chainSteps();
+  const providerIds = await page.$$eval('#chain-provider option', (o) => o.map((x) => x.value));
+  record('models: chain adder lists Kiro as a provider', providerIds.includes('kiro'), providerIds.join(','));
+  if (providerIds.includes('kiro') && providerIds.includes('codex')) {
+    await page.selectOption('#chain-provider', 'kiro');
+    await page.selectOption('#chain-model', 'kiro/claude-opus-5.5');
+    await page.click('button:has-text("Add to chain")');
+    await page.waitForTimeout(800);
+    await page.selectOption('#chain-provider', 'codex');
+    await page.click('button:has-text("Add to chain")');
+    await page.waitForTimeout(800);
+    const steps = await page.$$eval('.chain-step .mono', (n) => n.map((x) => x.textContent));
+    record('models: chain keeps Kiro then Codex in order', steps[stepsBefore] === 'kiro/claude-opus-5.5' && steps.length === stepsBefore + 2, steps.join(' → '));
+    for (const id of steps.slice(stepsBefore)) {
+      await page.click(`button[aria-label="Remove ${id} from the fallback chain"]`);
+      await page.waitForTimeout(600);
+    }
+    record('models: chain steps can be removed', (await chainSteps()) === stepsBefore);
+  }
+
+  // --- Playground: provider first, then its models
+  await page.click('.rail .nav-link:has-text("Playground")');
+  await page.waitForTimeout(400);
+  if (providerIds.includes('codex')) {
+    await page.selectOption('#pg-provider', 'codex');
+    const pgModels = await page.$$eval('#pg-model option', (o) => o.map((x) => x.value));
+    record('playground: model list follows the provider', pgModels.length > 0 && pgModels.every((m) => !m.startsWith('kiro/')), pgModels.join(','));
+  } else {
+    record('playground: provider picker renders', !!(await page.$('#pg-provider')));
+  }
+
+  // --- Dark theme is pitch black
+  await page.evaluate(() => localStorage.setItem('vr_theme', 'dark'));
+  await page.reload({ waitUntil: 'networkidle' });
+  const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  record('dark: page background is pitch black', bg === 'rgb(0, 0, 0)', bg);
+
   // --- Overview: copy endpoint
   await page.click('.rail .nav-link:has-text("Overview")');
   await page.waitForTimeout(400);
