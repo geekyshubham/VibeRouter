@@ -67,6 +67,10 @@ openai-compatibility:
     base-url: https://opencode.ai/zen/go/v1
     help-text: OpenCode Go subscription models via OpenCode Zen.
     icon-system: terminal.fill
+    # OpenCode Go returns 400 MissingSessionID unless this header is present.
+    headers:
+      User-Agent: viberouter/1.0
+      x-opencode-session: viberouter
     models:
       - alias: glm-5.2
         name: glm-5.2
@@ -84,3 +88,16 @@ openai-compatibility:
         name: qwen3.7-max
       - alias: qwen3.7-plus
         name: qwen3.7-plus
+
+# ChatGPT Codex accounts reject gpt-5.4-mini, which is the image-tool host.
+# gpt-5.5 is a model this login can call, and it still drives gpt-image-2.
+gpt-image-2-base-model: gpt-5.5
+
+# Kimi K2.7 Code rejects every temperature except 1.
+payload:
+  override:
+    - models:
+        - name: kimi-k2.7-code
+          protocol: openai
+      params:
+        temperature: 1
