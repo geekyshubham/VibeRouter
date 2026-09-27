@@ -141,8 +141,22 @@ enum CursorQuotaParser {
         guard let used = usedPercent(from: object, percentKeys: percentKeys) else {
             return nil
         }
-        let remaining = number(object ?? [:], keys: ["remaining"])
-        let total = number(object ?? [:], keys: ["limit", "total"])
+        // `breakdown.total` is the whole allowance (included + bonus). `used`/`limit`
+        // on the same object are only the included bucket, so a spent 2,000 included
+        // plan reads as empty while thousands of bonus units remain.
+        let breakdownTotal = (object?["breakdown"] as? [String: Any])
+            .flatMap { number($0, keys: ["total"]) }
+        let total: Double?
+        let remaining: Double?
+        if let breakdownTotal, breakdownTotal > 0 {
+            // Percent used is not `included / breakdown.total`, so don't invent a
+            // remaining from that product. Drop the included-only 0-of-2000 pair.
+            total = breakdownTotal
+            remaining = nil
+        } else {
+            remaining = number(object ?? [:], keys: ["remaining"])
+            total = number(object ?? [:], keys: ["limit", "total"])
+        }
         return RateWindow(
             usedPercent: used,
             windowMinutes: nil,
@@ -151,7 +165,7 @@ enum CursorQuotaParser {
             label: label,
             remainingValue: remaining,
             totalValue: total,
-            unitLabel: (remaining != nil || total != nil) ? "incl." : nil,
+            unitLabel: nil,
             displayStyle: .percent
         )
     }

@@ -2811,12 +2811,13 @@ enum NativeUsageFetcher {
         let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
         if let localGrok, let token = stringValue(localGrok, keys: ["access_token", "key"]) {
             let emailsMatch: Bool = {
-                guard let accountEmail, let localEmail else { return accountEmail == nil }
+                guard let accountEmail, let localEmail else { return accountEmail == nil || accountEmail?.isEmpty == true }
                 return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
             }()
-            // Live CLI session with no email still beats a dead imported copy.
+            // A live CLI token with no email must not answer for a named account.
+            // That painted one login's usage onto every other row.
             let localLive = !isGrokCredentialExpired(localGrok, now: now)
-            if emailsMatch || (localEmail == nil && localLive) {
+            if emailsMatch {
                 appendCandidate(token, source: "grok-cli", expired: !localLive)
             }
         }
@@ -2844,10 +2845,10 @@ enum NativeUsageFetcher {
 
         let accountEmail = stringValue(payload, keys: ["email"])
         let localEmail = stringValue(local, keys: ["email"])
-        if let accountEmail, let localEmail,
-           accountEmail.caseInsensitiveCompare(localEmail) != .orderedSame
-        {
-            return false
+        if let accountEmail, !accountEmail.isEmpty {
+            guard let localEmail, !localEmail.isEmpty,
+                  accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+            else { return false }
         }
 
         let fileToken = stringValue(payload, keys: ["access_token", "key"])
@@ -3016,11 +3017,6 @@ enum NativeUsageFetcher {
                         merged["access_token"] = token
                         merged["key"] = token
                     }
-                } else {
-                    // Different identity: only copy non-identity fallbacks if fields are empty.
-                    for key in ["refresh_token"] where merged[key] == nil {
-                        if let value = local[key] { merged[key] = value }
-                    }
                 }
             }
         default:
@@ -3102,11 +3098,23 @@ enum NativeUsageFetcher {
             return false
         }
 
-        if let fileEmail = stringValue(fileFlat, keys: ["email"]),
-           let localEmail = stringValue(localFlat, keys: ["email"]),
-           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
-        {
-            return false
+        let fileEmail = stringValue(fileFlat, keys: ["email"])
+        let localEmail = stringValue(localFlat, keys: ["email"])
+        if let fileEmail, !fileEmail.isEmpty {
+            let emailsMatch = localEmail.map {
+                !$0.isEmpty && fileEmail.caseInsensitiveCompare($0) == .orderedSame
+            } ?? false
+            if !emailsMatch {
+                // Same seat with the email stored only on the file is still this account.
+                // An unidentified CLI token is not.
+                let fileAID = CodexWorkspaceCredentials.chatgptAccountID(from: fileToken)
+                    ?? stringValue(fileFlat, keys: ["account_id"])
+                let localAID = CodexWorkspaceCredentials.chatgptAccountID(from: localToken)
+                    ?? stringValue(localFlat, keys: ["account_id"])
+                let seatsMatch = fileAID != nil && localAID != nil
+                    && fileAID!.caseInsensitiveCompare(localAID!) == .orderedSame
+                if !seatsMatch { return false }
+            }
         }
 
         let fileAID = CodexWorkspaceCredentials.chatgptAccountID(from: fileToken)
@@ -3188,12 +3196,12 @@ enum NativeUsageFetcher {
             return false
         }
 
-        if let fileEmail = stringValue(fileFlat, keys: ["email"]),
-           let localEmail = stringValue(localFlat, keys: ["email"]),
-           !fileEmail.isEmpty, !localEmail.isEmpty,
-           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
-        {
-            return false
+        let fileEmail = stringValue(fileFlat, keys: ["email"])
+        let localEmail = stringValue(localFlat, keys: ["email"])
+        if let fileEmail, !fileEmail.isEmpty {
+            guard let localEmail, !localEmail.isEmpty,
+                  fileEmail.caseInsensitiveCompare(localEmail) == .orderedSame
+            else { return false }
         }
 
         let localExp = parseISO8601(localFlat["expired"] as? String)

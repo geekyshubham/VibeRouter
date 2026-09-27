@@ -42,6 +42,24 @@ final class GrokUsageSyncTests: XCTestCase {
         XCTAssertEqual(candidates.first?.token, live)
     }
 
+    func testNamedGrokAccountIgnoresCLITokenWithNoEmail() {
+        let now = Date(timeIntervalSince1970: 1_788_000_000)
+        let live = Self.jwt(exp: now.addingTimeInterval(6 * 3600))
+        let own = Self.jwt(exp: now.addingTimeInterval(6 * 3600))
+        let candidates = NativeUsageFetcher.grokBillingTokenCandidates(
+            accountPayload: [
+                "email": "other@example.com",
+                "access_token": own,
+            ],
+            localGrok: [
+                "access_token": live,
+            ],
+            now: now
+        )
+        XCTAssertEqual(candidates.map(\.source), ["auth-file"])
+        XCTAssertEqual(candidates.first?.token, own)
+    }
+
     func testDifferentGrokIdentityDoesNotStealCLIToken() {
         let now = Date(timeIntervalSince1970: 1_788_000_000)
         let live = Self.jwt(exp: now.addingTimeInterval(6 * 3600))

@@ -155,7 +155,9 @@ final class LocalUsageAttributionTests: XCTestCase {
             ]
         ]
         let windows = CursorQuotaParser.windows(from: json)
-        XCTAssertEqual(windows.first { $0.label == "Total Usage" }?.usedPercent ?? -1, 41.78, accuracy: 0.01)
+        let total = windows.first { $0.label == "Total Usage" }
+        XCTAssertEqual(total?.usedPercent ?? -1, 41.78, accuracy: 0.01)
+        XCTAssertEqual(total?.totalValue ?? -1, 14413, accuracy: 0.1, "pool is included + bonus, not the 2000 included cap")
         XCTAssertEqual(windows.first { $0.label == "Auto + Composer" }?.usedPercent ?? -1, 46.89, accuracy: 0.01)
         XCTAssertEqual(windows.first { $0.label == "API Usage" }?.usedPercent ?? -1, 7.67, accuracy: 0.01)
     }
