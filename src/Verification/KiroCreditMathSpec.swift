@@ -15,14 +15,15 @@ struct KiroCreditMathSpec {
             overageUsed: 7856.07,
             overageCap: 10000
         )
-        precondition(free.count == 3, "free plan shows total, overage, and included")
+        precondition(free.count == 2, "no 50-credit included row")
         precondition(free[0].label == "Credits")
         precondition(abs(free[0].used - 7909.89) < 0.001, "headline is total used, not the 50-credit allowance")
         precondition(abs(free[0].total - 10050) < 0.001)
         precondition(abs(free[0].used - (7909.89 + 7856.07)) > 1000, "do not add overage on top of currentUsage")
         precondition(free[1].label == "Overage")
         precondition(abs(free[1].used - 7856.07) < 0.001)
-        precondition(abs(free[2].used - 50) < 0.001, "included row is the 50-credit allowance")
+        precondition(KiroCreditMath.displayPlanName(reported: "KIRO FREE", planLimit: 50, totalUsed: 7909.89) == nil)
+        precondition(KiroCreditMath.displayPlanName(reported: "KIRO POWER", planLimit: 10000, totalUsed: 8445) == "KIRO POWER")
 
         let power = KiroCreditMath.slices(
             totalUsed: 8445.48,

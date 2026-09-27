@@ -2217,20 +2217,15 @@ enum NativeUsageFetcher {
     ) async -> ProviderUsageSnapshot {
         let email = stringValue(payload, keys: ["email"])
 
-        // `kiro-cli /usage` is the plan the CLI is logged into. The proxy account
-        // on this card can be a different login (builder-id Free, limit 50) whose
-        // real burn is currentUsage on GetUsageLimits. Never paint one onto the other.
-        async let cliProbeTask: KiroCLIUsageSnapshot? = Task.detached(priority: .userInitiated) {
+        // kiro-cli /usage is the plan. GetUsageLimits on the builder-id token
+        // reports "KIRO FREE" and a 50-credit included cap for this Power plan.
+        let cliProbe = await Task.detached(priority: .userInitiated) {
             KiroCLIUsageProbe.fetch()
         }.value
-        async let apiTask = fetchKiroLimitsAPI(payload: payload, authFile: authFile)
-        let cliProbe = await cliProbeTask
-        let apiUsage = await apiTask
         if cliProbe == nil {
-            NSLog("[Kiro] kiro-cli /usage probe returned nothing — using this account's GetUsageLimits")
+            NSLog("[Kiro] kiro-cli /usage probe returned nothing — using GetUsageLimits")
         }
-        let sameAccount = KiroCreditMath.samePlan(cliProbe?.planName, apiUsage?.planName)
-        if let cli = cliProbe, cli.hasAbsoluteCredits, apiUsage == nil || sameAccount {
+        if let cli = cliProbe, cli.hasAbsoluteCredits {
             NSLog(
                 "[Kiro] %@ → %.2f of %.0f credits (%.1f%%)",
                 cli.planName ?? "plan?", cli.creditsUsed, cli.creditsTotal, cli.creditsPercent
@@ -2282,15 +2277,8 @@ enum NativeUsageFetcher {
             )
         }
 
+        let apiUsage = await fetchKiroLimitsAPI(payload: payload, authFile: authFile)
         if let api = apiUsage, !api.windows.isEmpty {
-            if let cli = cliProbe, !sameAccount {
-                NSLog(
-                    "[Kiro] account plan %@ ≠ kiro-cli plan %@ — showing this account (%.2f credits used)",
-                    api.planName ?? "?",
-                    cli.planName ?? "?",
-                    api.totalUsed
-                )
-            }
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
@@ -2385,11 +2373,17 @@ enum NativeUsageFetcher {
             else { return .unavailable }
 
             let subscription = json["subscriptionInfo"] as? [String: Any]
-            let planName = stringValue(subscription ?? [:], keys: ["subscriptionTitle", "type"])
+            let reportedPlan = stringValue(subscription ?? [:], keys: ["subscriptionTitle", "type"])
             let breakdown = json["usageBreakdownList"] as? [[String: Any]] ?? []
             let credit = breakdown.first { stringValue($0, keys: ["resourceType"]) == "CREDIT" } ?? breakdown.first
-            let windows = mapKiroUsageBreakdownAPI(credit, planName: planName, fallbackReset: json["nextDateReset"])
             let totalUsed = credit.flatMap { doubleValue($0, keys: ["currentUsageWithPrecision", "currentUsage"]) } ?? 0
+            let planLimit = credit.flatMap { doubleValue($0, keys: ["usageLimitWithPrecision", "usageLimit"]) } ?? 0
+            let planName = KiroCreditMath.displayPlanName(
+                reported: reportedPlan,
+                planLimit: planLimit,
+                totalUsed: totalUsed
+            )
+            let windows = mapKiroUsageBreakdownAPI(credit, planName: planName, fallbackReset: json["nextDateReset"])
             return .value(KiroAPIUsage(planName: planName, totalUsed: totalUsed, windows: windows))
         } catch {
             return .unavailable

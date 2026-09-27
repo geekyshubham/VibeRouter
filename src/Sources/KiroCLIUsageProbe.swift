@@ -343,11 +343,18 @@ enum KiroCreditMath {
         if overCap > 0, overUsed > 0 || smallPlanUnderOverage {
             out.append(Slice(label: "Overage", used: overUsed, total: max(overCap, overUsed)))
         }
-        if smallPlanUnderOverage {
-            let included = min(plan, max(0, used - overUsed))
-            out.append(Slice(label: "Included in plan", used: included, total: plan))
-        }
+        // Do not emit the 50-credit "included" row. It is exhausted as soon as
+        // real usage starts, and the card then reads as a used-up Free plan.
         return out
+    }
+
+    /// GetUsageLimits labels some Power subscriptions "KIRO FREE" with a 50-credit
+    /// included cap while `currentUsage` is already thousands. That title is not the plan.
+    static func displayPlanName(reported: String?, planLimit: Double, totalUsed: Double) -> String? {
+        if planKey(reported) == "FREE", planLimit > 0, planLimit <= 200, totalUsed > planLimit {
+            return nil
+        }
+        return reported
     }
 
     /// True when both names are the same Kiro tier. A CLI Power login must not
