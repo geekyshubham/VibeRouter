@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 /// Serves Kiro-backed models directly, because the bundled proxy has no Kiro
 /// executor and upstream CLIProxyAPI does not ship one either.
@@ -176,8 +177,18 @@ enum KiroDirectProvider {
 
     // MARK: - Credentials
 
-    /// Newest non-disabled Kiro auth file, refreshed when the token has expired.
+    /// The kiro-cli social login is the Power subscription. The builder-id file
+    /// in ~/.cli-proxy-api can be a different, already-limited account.
     static func accessToken() async -> String? {
+        if let token = cliSocialAccessToken() { return token }
+        if cliSocialPayload() != nil, refreshCLISession(), let token = cliSocialAccessToken() {
+            return token
+        }
+        return await authFileAccessToken()
+    }
+
+    /// Newest non-disabled Kiro auth file, refreshed when the token has expired.
+    private static func authFileAccessToken() async -> String? {
         let directory = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cli-proxy-api")
         guard let files = try? FileManager.default.contentsOfDirectory(
@@ -210,6 +221,51 @@ enum KiroDirectProvider {
             }
         }
         return nil
+    }
+
+    private static func cliSocialPayload() -> [String: Any]? {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/kiro-cli/data.sqlite3")
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return nil }
+        defer { sqlite3_close(db) }
+        var stmt: OpaquePointer?
+        let sql = "SELECT value FROM auth_kv WHERE key = 'kirocli:social:token' LIMIT 1"
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW, let cString = sqlite3_column_text(stmt, 0) else { return nil }
+        let raw = String(cString: cString)
+        guard let data = raw.data(using: .utf8),
+              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return payload
+    }
+
+    private static func cliSocialAccessToken() -> String? {
+        guard let payload = cliSocialPayload(),
+              let token = payload["access_token"] as? String, !token.isEmpty,
+              !isExpired(payload)
+        else { return nil }
+        return token
+    }
+
+    /// Lets kiro-cli refresh its own social token and write it back. We do not
+    /// rotate that refresh token ourselves.
+    private static func refreshCLISession() -> Bool {
+        guard let binary = resolveKiroCLI() else { return false }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: binary)
+        proc.arguments = ["chat", "--list-models", "--format", "json"]
+        proc.standardOutput = Pipe()
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return false }
+        let deadline = Date().addingTimeInterval(20)
+        while proc.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if proc.isRunning { proc.terminate(); return false }
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
     }
 
     private static func isExpired(_ payload: [String: Any]) -> Bool {
@@ -283,12 +339,16 @@ enum KiroDirectProvider {
             currentTurn.toolResults = dangling.toolResults + current.toolResults
         }
 
-        let conversationState: [String: Any] = [
+        var conversationState: [String: Any] = [
             "chatTriggerType": "MANUAL",
             "conversationId": UUID().uuidString,
             "currentMessage": ["userInputMessage": userInputMessage(currentTurn, model: model, tools: tools)],
             "history": history,
         ]
+        let effortFields = modelRequestFields(from: root, model: model)
+        if !effortFields.isEmpty {
+            conversationState["__effort"] = effortFields
+        }
 
         let promptChars = turns.reduce(0) { $0 + $1.text.utf8.count } + systemText.utf8.count
         return TranslatedRequest(
@@ -297,6 +357,54 @@ enum KiroDirectProvider {
             stream: stream,
             estimatedInputTokens: max(1, promptChars / 4)
         )
+    }
+
+    /// Claude Code sends `output_config.effort` (and adaptive thinking) on the
+    /// Messages body. Kiro reads that as `additionalModelRequestFields`, and
+    /// only some models accept it.
+    static func modelRequestFields(from root: [String: Any], model: String) -> [String: Any] {
+        guard acceptsEffort(model) else { return [:] }
+        var fields: [String: Any] = [:]
+        if let output = root["output_config"] as? [String: Any],
+           let effort = clampedEffort(output["effort"] as? String, model: model) {
+            fields["output_config"] = ["effort": effort]
+        }
+        if let thinking = root["thinking"] as? [String: Any],
+           (thinking["type"] as? String)?.lowercased() == "adaptive" {
+            var block: [String: Any] = ["type": "adaptive"]
+            if let display = (thinking["display"] as? String)?.lowercased(),
+               display == "summarized" || display == "omitted" {
+                block["display"] = display
+            }
+            fields["thinking"] = block
+        }
+        return fields
+    }
+
+    static func acceptsEffort(_ model: String) -> Bool {
+        let id = model.lowercased()
+        if id == "auto" || id.contains("haiku") || id.hasPrefix("gpt-")
+            || id.hasPrefix("glm") || id.hasPrefix("qwen")
+            || id.hasPrefix("deepseek") || id.hasPrefix("minimax") {
+            return false
+        }
+        return id.contains("opus-5") || id.contains("opus-4-8") || id.contains("opus-4-7")
+            || id.contains("opus-4-6") || id.contains("sonnet-5") || id.contains("sonnet-4-6")
+    }
+
+    /// Opus/Sonnet 4.6 have no `xhigh`; the next step those models accept is `max`.
+    static func clampedEffort(_ raw: String?, model: String) -> String? {
+        guard var effort = raw?.lowercased().trimmingCharacters(in: .whitespacesAndNewlines),
+              !effort.isEmpty
+        else { return nil }
+        if effort == "x-high" || effort == "extra-high" || effort == "extrahigh" { effort = "xhigh" }
+        let noXHigh = model.lowercased().contains("opus-4-6") || model.lowercased().contains("sonnet-4-6")
+        let allowed: Set<String> = noXHigh
+            ? ["low", "medium", "high", "max"]
+            : ["low", "medium", "high", "xhigh", "max"]
+        if allowed.contains(effort) { return effort }
+        if effort == "xhigh", allowed.contains("max") { return "max" }
+        return nil
     }
 
     struct Turn {
@@ -621,12 +729,29 @@ enum KiroDirectProvider {
         guard let token = await accessToken() else {
             return .failure(status: 401, message: "No usable Kiro credentials — add a Kiro account in VibeRouter")
         }
-        guard let url = URL(string: endpoint),
-              let body = try? JSONSerialization.data(withJSONObject: ["conversationState": conversationState])
-        else {
+        var state = conversationState
+        let effort = state.removeValue(forKey: "__effort") as? [String: Any]
+        var payload: [String: Any] = ["conversationState": state]
+        if let effort, !effort.isEmpty {
+            payload["additionalModelRequestFields"] = effort
+        }
+        guard let url = URL(string: endpoint) else {
             return .failure(status: 500, message: "Could not build the Kiro request")
         }
+        let first = await postKiro(url: url, token: token, payload: payload)
+        if case .failure(_, let message) = first,
+           payload["additionalModelRequestFields"] != nil,
+           message.contains("additionalModelRequestFields") {
+            payload.removeValue(forKey: "additionalModelRequestFields")
+            return await postKiro(url: url, token: token, payload: payload)
+        }
+        return first
+    }
 
+    private static func postKiro(url: URL, token: String, payload: [String: Any]) async -> CallResult {
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
+            return .failure(status: 500, message: "Could not build the Kiro request")
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 600
@@ -634,7 +759,6 @@ enum KiroDirectProvider {
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/x-amz-json-1.0", forHTTPHeaderField: "Content-Type")
         request.setValue("aws-sdk-rust/kiro", forHTTPHeaderField: "User-Agent")
-
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
@@ -642,7 +766,10 @@ enum KiroDirectProvider {
             }
             guard (200...299).contains(http.statusCode) else {
                 let text = String(data: data, encoding: .utf8) ?? "Kiro request failed"
-                return .failure(status: http.statusCode, message: text)
+                let friendly = text.contains("MONTHLY_REQUEST_COUNT")
+                    ? "Kiro monthly request limit reached on this login"
+                    : text
+                return .failure(status: http.statusCode, message: friendly)
             }
             return .success(assemble(frames: decodeFrames(data)))
         } catch {
