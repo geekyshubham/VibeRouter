@@ -72,6 +72,8 @@ openai-compatibility:
       User-Agent: viberouter/1.0
       x-opencode-session: viberouter
     models:
+      - alias: glm-5.3-flash
+        name: glm-5.3-flash
       - alias: glm-5.2
         name: glm-5.2
       - alias: glm-5.1
