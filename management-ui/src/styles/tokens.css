@@ -1,0 +1,187 @@
+/* Hallmark · genre: modern-minimal (glass variant, user brief) · macrostructure: Workbench (app shell)
+ * theme: custom · vibe: "liquid glass over a quiet violet night" · paper oklch(14% 0.02 281) dark / oklch(96% 0.012 281) light
+ * accent: oklch(56% 0.2 281) violet · display + body: Geist · data: Geist Mono · nav: N3 side-rail + N13 ⌘K · footer: none (app)
+ * axes: dark+light / geometric-sans / cool
+ * Hallmark · pre-emit critique: P4 H5 E4 S4 R4 V4
+ *
+ * Every color, radius, duration and font in the console routes through this file.
+ * Dark is the default palette; [data-theme="light"] redefines the same names. */
+
+:root {
+  color-scheme: dark;
+
+  /* Type */
+  --font: 'Geist', -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
+  --mono: 'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, monospace;
+  --text-xs: 11.5px;
+  --text-sm: 12.5px;
+  --text-md: 13.5px;
+  --text-lg: 15px;
+  --text-xl: 18px;
+  --text-2xl: 22px;
+  --text-3xl: 28px;
+  --text-hero: 34px;
+
+  /* Space (4-pt) */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+  --s-10: 40px;
+
+  /* Radii — nested radius = outer − padding, so rows sit concentric in panels */
+  --r-panel: 20px;
+  --r-card: 14px;
+  --r-ctl: 10px;
+  --r-sm: 7px;
+  --r-pill: 999px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 200ms;
+  --dur-long: 360ms;
+
+  /* Glass physics */
+  --blur: 22px;
+  --blur-chrome: 30px;
+  --saturate: 170%;
+
+  /* Layers */
+  --z-side: 20;
+  --z-bar: 30;
+  --z-scrim: 40;
+  --z-drawer: 50;
+  --z-toast: 90;
+
+  /* ---- Dark palette (default) ---- */
+  --bg: oklch(14% 0.02 281);
+  --bg-2: oklch(17.5% 0.026 281);
+  --glow-a: oklch(52% 0.19 281 / 0.30);
+  --glow-b: oklch(55% 0.12 250 / 0.18);
+  --grain-opacity: 0.05;
+
+  --glass: oklch(25% 0.026 281 / 0.52);
+  --glass-strong: oklch(21% 0.024 281 / 0.8);
+  --glass-solid: oklch(21% 0.022 281);
+  --glass-rim: oklch(100% 0 0 / 0.13);
+  --glass-edge: oklch(100% 0 0 / 0.075);
+  --glass-shine: oklch(100% 0 0 / 0.07);
+  --glass-depth: oklch(0% 0 0 / 0.22);
+  --shadow: 0 24px 60px -18px oklch(6% 0.03 281 / 0.75);
+  --shadow-sm: 0 8px 24px -10px oklch(6% 0.03 281 / 0.7);
+
+  --ink: oklch(96% 0.006 281);
+  --ink-2: oklch(80% 0.014 281);
+  --ink-3: oklch(68% 0.018 281);
+  --ink-4: oklch(55% 0.02 281);
+  --line: oklch(100% 0 0 / 0.08);
+  --line-strong: oklch(100% 0 0 / 0.16);
+  --fill-1: oklch(100% 0 0 / 0.04);
+  --fill-2: oklch(100% 0 0 / 0.07);
+  --fill-3: oklch(100% 0 0 / 0.11);
+  --input: oklch(10% 0.02 281 / 0.45);
+  --scrim: oklch(8% 0.02 281 / 0.55);
+
+  --accent: oklch(76% 0.13 281);
+  --accent-solid: oklch(56% 0.2 281);
+  --accent-solid-hover: oklch(59% 0.2 281);
+  --accent-soft: oklch(70% 0.15 281 / 0.17);
+  --accent-line: oklch(74% 0.14 281 / 0.5);
+  --on-accent: oklch(99% 0.004 281);
+  --focus: oklch(78% 0.14 281);
+
+  --ok: oklch(78% 0.15 160);
+  --ok-soft: oklch(78% 0.15 160 / 0.14);
+  --warn: oklch(83% 0.14 80);
+  --warn-soft: oklch(83% 0.14 80 / 0.14);
+  --bad: oklch(72% 0.16 22);
+  --bad-soft: oklch(72% 0.16 22 / 0.14);
+  --bad-solid: oklch(55% 0.19 25);
+
+  /* Chart series (validated: scripts/validate_palette.js, both modes) */
+  --chart-ok: oklch(66% 0.15 281);
+  --chart-bad: oklch(66% 0.17 25);
+  --chart-grid: oklch(100% 0 0 / 0.07);
+  --chart-bar: oklch(66% 0.15 281);
+  --chart-track: oklch(100% 0 0 / 0.06);
+
+  /* Provider tints (brand identity only; never used for text) */
+  --p-claude: oklch(70% 0.13 51);
+  --p-codex: oklch(66% 0.13 164);
+  --p-gemini: oklch(63% 0.18 260);
+  --p-copilot: oklch(60% 0.2 276);
+  --p-antigravity: oklch(64% 0.2 293);
+  --p-kimi: oklch(67% 0.16 268);
+  --p-kiro: oklch(71% 0.18 42);
+  --p-grok: oklch(86% 0.014 286);
+  --p-qwen: oklch(58% 0.22 288);
+  --p-zai: oklch(70% 0.12 177);
+  --p-cursor: oklch(83% 0.156 87);
+  --p-codebuddy: oklch(63% 0.18 252);
+  --p-gitlab: oklch(62% 0.187 31);
+  --p-kilo: oklch(72% 0.146 150);
+  --p-compat: oklch(72% 0.08 220);
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg: oklch(96.5% 0.012 281);
+  --bg-2: oklch(93.5% 0.02 281);
+  --glow-a: oklch(80% 0.11 281 / 0.55);
+  --glow-b: oklch(86% 0.07 245 / 0.55);
+  --grain-opacity: 0.035;
+
+  --glass: oklch(99.5% 0.004 281 / 0.6);
+  --glass-strong: oklch(99% 0.004 281 / 0.84);
+  --glass-solid: oklch(98.5% 0.005 281);
+  --glass-rim: oklch(100% 0 0 / 0.95);
+  --glass-edge: oklch(40% 0.04 281 / 0.12);
+  --glass-shine: oklch(100% 0 0 / 0.55);
+  --glass-depth: oklch(40% 0.05 281 / 0.06);
+  --shadow: 0 24px 56px -20px oklch(40% 0.08 281 / 0.28);
+  --shadow-sm: 0 8px 22px -12px oklch(40% 0.08 281 / 0.3);
+
+  --ink: oklch(21% 0.02 281);
+  --ink-2: oklch(39% 0.02 281);
+  --ink-3: oklch(48% 0.02 281);
+  --ink-4: oklch(60% 0.02 281);
+  --line: oklch(35% 0.03 281 / 0.1);
+  --line-strong: oklch(35% 0.03 281 / 0.19);
+  --fill-1: oklch(35% 0.05 281 / 0.045);
+  --fill-2: oklch(35% 0.05 281 / 0.075);
+  --fill-3: oklch(35% 0.05 281 / 0.11);
+  --input: oklch(100% 0 0 / 0.72);
+  --scrim: oklch(30% 0.04 281 / 0.28);
+
+  --accent: oklch(49% 0.2 281);
+  --accent-solid: oklch(52% 0.21 281);
+  --accent-solid-hover: oklch(48% 0.21 281);
+  --accent-soft: oklch(55% 0.2 281 / 0.11);
+  --accent-line: oklch(52% 0.2 281 / 0.38);
+  --on-accent: oklch(99% 0.004 281);
+  --focus: oklch(52% 0.21 281);
+
+  --ok: oklch(49% 0.13 158);
+  --ok-soft: oklch(55% 0.13 158 / 0.13);
+  --warn: oklch(50% 0.13 65);
+  --warn-soft: oklch(70% 0.14 75 / 0.18);
+  --bad: oklch(52% 0.19 25);
+  --bad-soft: oklch(58% 0.19 25 / 0.11);
+  --bad-solid: oklch(52% 0.19 25);
+
+  --chart-ok: oklch(55% 0.19 281);
+  --chart-bad: oklch(60% 0.19 25);
+  --chart-grid: oklch(35% 0.03 281 / 0.09);
+  --chart-bar: oklch(55% 0.19 281);
+  --chart-track: oklch(35% 0.05 281 / 0.08);
+
+  --p-grok: oklch(45% 0.02 286);
+  --p-cursor: oklch(70% 0.15 80);
+}

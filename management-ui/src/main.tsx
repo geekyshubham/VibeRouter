@@ -1,8 +1,8 @@
 /* ============================================================================
    main — React root. Loads the global stylesheet once, then wraps <App/> in the
-   provider stack: QueryClientProvider → OnlineProvider → ToastProvider →
-   AuthProvider → App. (AuthProvider depends on OnlineProvider; ToastProvider
-   supplies the toast element.)
+   provider stack: Theme → QueryClient → Online → Toast → Confirm → Palette →
+   Auth → App. (AuthProvider depends on OnlineProvider; Toast/Confirm render
+   their own overlays.)
    ========================================================================== */
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
@@ -13,6 +13,8 @@ import './styles/app.css';
 import App from './App';
 import { OnlineProvider } from './context/OnlineContext';
 import { ToastProvider } from './context/ToastContext';
+import { ConfirmProvider } from './context/ConfirmContext';
+import { PaletteProvider } from './context/PaletteContext';
 import { AuthProvider } from './context/AuthContext';
 import { ThemeProvider } from './lib/theme';
 
@@ -35,9 +37,13 @@ createRoot(rootEl).render(
       <QueryClientProvider client={queryClient}>
         <OnlineProvider>
           <ToastProvider>
-            <AuthProvider>
-              <App />
-            </AuthProvider>
+            <ConfirmProvider>
+              <PaletteProvider>
+                <AuthProvider>
+                  <App />
+                </AuthProvider>
+              </PaletteProvider>
+            </ConfirmProvider>
           </ToastProvider>
         </OnlineProvider>
       </QueryClientProvider>

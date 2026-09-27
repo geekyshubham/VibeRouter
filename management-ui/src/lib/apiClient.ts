@@ -14,11 +14,15 @@
 
 /** Base URL detection.
  *  - DEV: '' → use the Vite dev proxy (same-origin), avoids CORS.
- *  - Served same-origin from the backend on :8318 → location.origin.
- *  - Otherwise → VITE_BACKEND_BASE, defaulting to the local backend. */
+ *  - Served over http(s) → location.origin. The console is always served by the
+ *    backend it manages (/management.html on :8318, or through the :8317 proxy,
+ *    which forwards management paths), so same-origin is the only correct target.
+ *    Hard-coding :8318 here would send an isolated test instance's writes to the
+ *    live backend.
+ *  - Otherwise (file://) → VITE_BACKEND_BASE, defaulting to the local backend. */
 export const BASE: string = import.meta.env.DEV
   ? ''
-  : location.protocol === 'http:' && location.port === '8318'
+  : /^https?:$/.test(location.protocol)
     ? location.origin
     : (import.meta.env.VITE_BACKEND_BASE ?? 'http://127.0.0.1:8318');
 
@@ -29,6 +33,22 @@ export function hostLabel(): string {
   const raw = BASE || (import.meta.env.VITE_BACKEND_BASE ?? '');
   const stripped = raw.replace(/^https?:\/\//, '');
   return stripped || '127.0.0.1:8318';
+}
+
+/** The endpoints a client (Claude Code, Factory, Cursor…) should point at.
+ *  Clients talk to the thinking proxy on :8317, which fronts this backend (:8318)
+ *  and adds the thinking/Kiro handling, so :8318 is swapped for :8317. */
+export function clientEndpoints(): { anthropic: string; openai: string } {
+  let url: URL;
+  try {
+    url = new URL(BASE || 'http://127.0.0.1:8318');
+  } catch {
+    url = new URL('http://127.0.0.1:8318');
+  }
+  if (url.port === '8318') url.port = '8317';
+  const host = url.hostname === '127.0.0.1' ? 'localhost' : url.hostname;
+  const root = `${url.protocol}//${host}${url.port ? `:${url.port}` : ''}`;
+  return { anthropic: root, openai: `${root}/v1` };
 }
 
 /* ---------------------------------------------------------------- NORMALIZE */

@@ -17,6 +17,11 @@ export function timeAgo(iso: string | undefined | null): string {
   return `${days}d ago`;
 }
 
+/** "1 account" / "3 accounts". */
+export function plural(n: number, one: string, many = `${one}s`): string {
+  return `${num(n)} ${n === 1 ? one : many}`;
+}
+
 /** Human byte size. */
 export function bytes(n: number | undefined | null): string {
   if (!n || n < 0) return '0 B';

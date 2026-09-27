@@ -1,7 +1,5 @@
-/* ============================================================================
-   EmptyState — centered bubble + title + copy for empty collections (.empty).
-   This is what renders instead of a crash when a list comes back null/[].
-   ========================================================================== */
+/* EmptyState — icon + title + guidance + optional action, shown in place of an
+   empty list so the next step is always visible. */
 import type { ComponentType, ReactNode, SVGProps } from 'react';
 
 interface Props {
@@ -14,7 +12,7 @@ interface Props {
 export default function EmptyState({ Glyph, title, children, action }: Props) {
   return (
     <div className="empty">
-      <div className="bubble">
+      <div className="empty-icon" aria-hidden>
         <Glyph />
       </div>
       <h3>{title}</h3>

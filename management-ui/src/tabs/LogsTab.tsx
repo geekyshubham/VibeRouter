@@ -1,186 +1,196 @@
 /* ============================================================================
-   LogsTab — recent request log lines with search and level filtering. The
-   backend returns {"error":"logging to file disabled"} when file logging is
-   off, and a logs array otherwise; we detect the error envelope and render a
-   notice + toggle instead of calling .map on a non-array.
+   LogsTab — the proxy's log file, newest first, with level filters, search
+   highlighting, live follow, and clear. The backend returns
+   {"error":"logging to file disabled"} when file logging is off; that case
+   renders a one-click enable instead of an empty table.
+   Line format (global_logger.go): [YYYY-MM-DD HH:MM:SS] [reqid] [level] [file:line] msg
    ========================================================================== */
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import { useManagementQuery } from '../lib/useManagementQuery';
 import apiClient, { asArray, errorMessageOf } from '../lib/apiClient';
-import type { BackendConfig, LogLine } from '../lib/types';
-import { timeAgo } from '../lib/format';
+import type { BackendConfig } from '../lib/types';
+import { num } from '../lib/format';
 import Icon from '../lib/icons';
 import PageHeader from '../components/PageHeader';
-import SectionHeader from '../components/SectionHeader';
 import EmptyState from '../components/EmptyState';
 import LoadingBlock from '../components/LoadingBlock';
+import Switch from '../components/Switch';
 import { useToast } from '../context/ToastContext';
+import { useConfirm } from '../context/ConfirmContext';
 
-function normalizeLogs(data: unknown): LogLine[] {
-  // Backend (GetLogs) returns {lines: string[], line-count, latest-timestamp}
-  // when logging is on. Also tolerate a bare array or {logs:[...]}.
-  const raw: unknown =
-    Array.isArray(data)
-      ? data
-      : data && typeof data === 'object'
-        ? ((data as Record<string, unknown>).lines ?? (data as Record<string, unknown>).logs)
-        : undefined;
-
-  const arr = asArray<unknown>(raw);
-  return arr.map((item): LogLine => {
-    if (typeof item === 'string') return { message: item };
-    if (item && typeof item === 'object') return item as LogLine;
-    return { message: String(item) };
-  });
+interface ParsedLine {
+  raw: string;
+  time: string;
+  date: string;
+  level: 'info' | 'warn' | 'error' | 'debug' | 'other';
+  message: string;
 }
 
-function levelOf(line: LogLine): string {
-  return (line.level ?? '').toString().toLowerCase() || 'info';
+const LINE = /^\[(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})\]\s+\[[^\]]*\]\s+\[\s*([a-z]+)\s*\]\s+(?:\[[^\]]+:\d+\]\s+)?(.*)$/i;
+const LEVELS = [
+  { id: 'all', label: 'All' },
+  { id: 'error', label: 'Errors' },
+  { id: 'warn', label: 'Warnings' },
+  { id: 'info', label: 'Info' },
+  { id: 'debug', label: 'Debug' },
+] as const;
+const LIMIT = 500;
+
+function parse(raw: string): ParsedLine {
+  const m = LINE.exec(raw);
+  if (!m) return { raw, time: '', date: '', level: 'other', message: raw };
+  const lvl = m[3].toLowerCase();
+  const level = lvl.startsWith('err') || lvl === 'fatal' || lvl === 'panic' ? 'error' : lvl.startsWith('warn') ? 'warn' : lvl === 'debug' || lvl === 'trace' ? 'debug' : 'info';
+  return { raw, date: m[1], time: m[2], level, message: m[4] };
+}
+
+function linesOf(data: unknown): string[] {
+  // GetLogs returns {lines: string[]}; tolerate a bare array or {logs:[...]}.
+  const raw = Array.isArray(data)
+    ? data
+    : data && typeof data === 'object'
+      ? ((data as Record<string, unknown>).lines ?? (data as Record<string, unknown>).logs)
+      : undefined;
+  return asArray<unknown>(raw).map((l) => (typeof l === 'string' ? l : JSON.stringify(l)));
+}
+
+function highlight(text: string, needle: string): ReactNode {
+  if (!needle) return text;
+  const i = text.toLowerCase().indexOf(needle);
+  if (i < 0) return text;
+  return (
+    <>
+      {text.slice(0, i)}
+      <mark>{text.slice(i, i + needle.length)}</mark>
+      {text.slice(i + needle.length)}
+    </>
+  );
 }
 
 export default function LogsTab() {
   const qc = useQueryClient();
   const { toast } = useToast();
+  const confirm = useConfirm();
   const cfg = useManagementQuery<BackendConfig>('/config');
   const loggingOn = Boolean(cfg.data?.['logging-to-file']);
-  const [filter, setFilter] = useState('');
-  const [level, setLevel] = useState('all');
+  const [search, setSearch] = useState('');
+  const [level, setLevel] = useState<(typeof LEVELS)[number]['id']>('all');
   const [follow, setFollow] = useState(true);
 
-  const logsQ = useManagementQuery<unknown>('/logs', {
-    enabled: loggingOn && follow,
-    refetchInterval: follow && loggingOn ? 5000 : undefined,
+  const logsQ = useManagementQuery<unknown>(`/logs?limit=${LIMIT}`, {
+    enabled: loggingOn,
+    refetchInterval: follow && loggingOn ? 4000 : undefined,
   });
 
   const disabledMsg = errorMessageOf(logsQ.data);
-  const allLines = useMemo(() => normalizeLogs(logsQ.data), [logsQ.data]);
+  const parsed = useMemo(() => linesOf(logsQ.data).map(parse).reverse(), [logsQ.data]);
+  const needle = search.trim().toLowerCase();
+  const counts = useMemo(() => {
+    const c = { all: parsed.length, error: 0, warn: 0, info: 0, debug: 0 } as Record<string, number>;
+    parsed.forEach((l) => l.level in c && c[l.level]++);
+    return c;
+  }, [parsed]);
+  const shown = parsed.filter((l) => (level === 'all' || l.level === level) && (!needle || l.raw.toLowerCase().includes(needle)));
 
-  const lines = useMemo(() => {
-    const needle = filter.trim().toLowerCase();
-    return allLines
-      .filter((l) => level === 'all' || levelOf(l) === level)
-      .filter(
-        (l) =>
-          !needle ||
-          `${l.message ?? ''} ${l.model ?? ''} ${l.status ?? ''}`.toLowerCase().includes(needle),
-      );
-  }, [allLines, filter, level]);
-
-  async function toggleLogging(next: boolean) {
+  async function setLogging(next: boolean) {
     try {
       await apiClient.patch('/logging-to-file', { value: next });
       await qc.invalidateQueries({ queryKey: ['mgmt', '/config'] });
-      await qc.invalidateQueries({ queryKey: ['mgmt', '/logs'] });
-      toast(next ? 'File logging enabled' : 'File logging disabled', 'ok');
+      toast(next ? 'File logging on' : 'File logging off', 'ok');
     } catch {
-      toast('Could not change logging', 'bad');
+      toast("Couldn't change file logging", 'bad');
     }
   }
 
+  async function clear() {
+    const ok = await confirm({ title: 'Clear all log files?', body: 'The current log is emptied and rotated logs are deleted.', confirmLabel: 'Clear logs', danger: true });
+    if (!ok) return;
+    try {
+      await apiClient.del('/logs');
+      await qc.invalidateQueries({ queryKey: ['mgmt', `/logs?limit=${LIMIT}`] });
+      toast('Logs cleared', 'ok');
+    } catch {
+      toast("Couldn't clear the logs", 'bad');
+    }
+  }
+
+  const off = !cfg.isLoading && (!loggingOn || disabledMsg);
+
   return (
-    <section className="view">
+    <section className="view" aria-labelledby="page-title">
       <PageHeader
         title="Logs"
-        sub="Recent calls proxied through VibeRouter."
-        trail={
-          <>
-            <label className="search">
-              <Icon.Search />
-              <input
-                className="inp"
-                placeholder="Search logs…"
-                value={filter}
-                onChange={(e) => setFilter(e.target.value)}
-                aria-label="Search logs"
-              />
-            </label>
-            <select
-              className="inp"
-              style={{ width: 'auto' }}
-              value={level}
-              onChange={(e) => setLevel(e.target.value)}
-              aria-label="Filter by level"
-            >
-              <option value="all">All levels</option>
-              <option value="info">Info</option>
-              <option value="warning">Warning</option>
-              <option value="error">Error</option>
-              <option value="debug">Debug</option>
-            </select>
-            <div className="row">
-              <span className="small">Follow</span>
-              <button
-                className={`sw ${follow ? 'on' : ''}`}
-                role="switch"
-                aria-checked={follow}
-                aria-label="Toggle live refresh"
-                onClick={() => setFollow((f) => !f)}
-              />
-            </div>
-          </>
+        sub="What the proxy has been doing, newest first."
+        actions={
+          !off && (
+            <>
+              <label className="row small" style={{ gap: 'var(--s-2)' }}>
+                <Switch checked={follow} onChange={setFollow} label="Follow new lines" />
+                Follow
+              </label>
+              <button className="btn btn-glass" onClick={() => void clear()}>
+                <Icon.Trash />
+                Clear
+              </button>
+            </>
+          )
         }
       />
 
-      <div className="glass-panel card">
+      <div className="glass panel">
         {cfg.isLoading ? (
-          <LoadingBlock rows={4} />
-        ) : !loggingOn || disabledMsg ? (
-          <div>
-            <SectionHeader Glyph={Icon.List} title="Request logs" sub="File logging is off" />
-            <EmptyState
-              Glyph={Icon.List}
-              title="File logging is off"
-              action={
-                <button className="btn btn-primary" onClick={() => toggleLogging(true)}>
-                  <Icon.Power />
-                  <span>Enable logging</span>
-                </button>
-              }
-            >
-              {disabledMsg ?? 'Turn on file logging to capture request lines here.'}
-            </EmptyState>
-          </div>
-        ) : logsQ.isLoading ? (
-          <LoadingBlock rows={4} />
-        ) : lines.length === 0 ? (
-          <EmptyState Glyph={Icon.List} title={allLines.length === 0 ? 'No log lines yet' : 'No matches'}>
-            {allLines.length === 0
-              ? 'Logging is on, but nothing has been recorded yet. Make a request through the proxy.'
-              : `Nothing matches “${filter || level}”.`}
+          <LoadingBlock rows={6} height={28} />
+        ) : off ? (
+          <EmptyState
+            Glyph={Icon.Terminal}
+            title="File logging is off"
+            action={
+              <button className="btn btn-primary" onClick={() => void setLogging(true)}>
+                <Icon.Power />
+                Turn on logging
+              </button>
+            }
+          >
+            Turn it on to keep a log of proxy activity on disk and read it here. You can switch it off again in Settings.
           </EmptyState>
         ) : (
-          <table className="tbl">
-            <thead>
-              <tr>
-                <th>Time</th>
-                <th>Level</th>
-                <th>Model</th>
-                <th>Status</th>
-                <th>Message</th>
-              </tr>
-            </thead>
-            <tbody>
-              {lines.slice(0, 200).map((l, i) => {
-                const lvl = levelOf(l);
-                return (
-                  <tr key={i}>
-                    <td className="mono">{timeAgo(l.time || l.timestamp)}</td>
-                    <td>
-                      <span
-                        className={`pill ${lvl.includes('err') ? 'bad' : lvl.includes('warn') ? 'warn' : 'mut'}`}
-                      >
-                        {l.level ?? 'info'}
-                      </span>
-                    </td>
-                    <td className="mono">{l.model ?? '—'}</td>
-                    <td>{l.status ?? '—'}</td>
-                    <td>{l.message ?? '—'}</td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+          <>
+            <div className="toolbar">
+              <label className="search">
+                <Icon.Search />
+                <input className="inp" placeholder="Search logs" value={search} onChange={(e) => setSearch(e.target.value)} aria-label="Search logs" />
+              </label>
+              <div className="chips" role="group" aria-label="Filter by level">
+                {LEVELS.map((l) => (
+                  <button key={l.id} className="chip" aria-pressed={level === l.id} onClick={() => setLevel(l.id)}>
+                    {l.label}
+                    <span className="n">{num(counts[l.id] ?? 0)}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+            {logsQ.isLoading ? (
+              <LoadingBlock rows={8} height={24} />
+            ) : shown.length === 0 ? (
+              <EmptyState Glyph={Icon.Terminal} title={parsed.length ? 'No matching lines' : 'Nothing logged yet'}>
+                {parsed.length ? 'Try another level or search.' : 'Lines appear here as soon as the proxy handles a request.'}
+              </EmptyState>
+            ) : (
+              <div className="log-list" role="log" aria-live="off" aria-label="Log lines">
+                {shown.map((l, i) => (
+                  <div className="log-line" key={`${l.raw}-${i}`}>
+                    <span className="log-time" title={l.date}>{l.time || '—'}</span>
+                    <span className={`log-lvl ${l.level}`}>{l.level === 'other' ? '' : l.level}</span>
+                    <span className="log-msg">{highlight(l.message, needle)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="hint" style={{ marginTop: 'var(--s-2)' }}>
+              Showing the latest {num(Math.min(parsed.length, LIMIT))} lines{follow ? ' · refreshing every 4 seconds' : ''}.
+            </p>
+          </>
         )}
       </div>
     </section>

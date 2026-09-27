@@ -1,34 +1,27 @@
-/* ============================================================================
-   SectionHeader — the chip + title + subtitle + trailing-actions row that opens
-   every panel section (.sec-head / .sec-chip / .sec-titles / .sec-trail).
-   ========================================================================== */
+/* SectionHeader — icon + title + subtitle + actions row that opens a panel. */
 import type { ComponentType, ReactNode, SVGProps } from 'react';
 
 interface Props {
   Glyph: ComponentType<SVGProps<SVGSVGElement>>;
   title: string;
-  sub?: string;
-  tint?: string;
-  trail?: ReactNode;
+  sub?: ReactNode;
+  actions?: ReactNode;
+  id?: string;
 }
 
-export default function SectionHeader({ Glyph, title, sub, tint, trail }: Props) {
+export default function SectionHeader({ Glyph, title, sub, actions, id }: Props) {
   return (
     <div className="sec-head">
-      <div
-        className="sec-chip"
-        style={{
-          background: tint ? `color-mix(in srgb, ${tint} 18%, transparent)` : 'var(--accent-soft)',
-          color: tint ?? 'var(--accent)',
-        }}
-      >
+      <div className="sec-icon" aria-hidden>
         <Glyph />
       </div>
       <div className="sec-titles">
-        <div className="sec-title">{title}</div>
+        <h2 className="sec-title" id={id}>
+          {title}
+        </h2>
         {sub && <div className="sec-sub">{sub}</div>}
       </div>
-      {trail && <div className="sec-trail">{trail}</div>}
+      {actions && <div className="sec-actions">{actions}</div>}
     </div>
   );
 }

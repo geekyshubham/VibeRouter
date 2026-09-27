@@ -1,8 +1,6 @@
 /* ============================================================================
-   App — the auth gate switch. While the boot probe runs we show a minimal
-   splash; unauthenticated → <LoginGate/>; else the routed console.
-   The favicon (branded VibeRouter glyph on the accent chip) is a static
-   <link> in index.html so it renders before React mounts.
+   App — the auth gate switch. A short splash while the boot probe runs, the
+   LoginGate when a key is needed, otherwise the routed console.
    ========================================================================== */
 import { RouterProvider } from 'react-router-dom';
 import { useAuth } from './context/AuthContext';
@@ -15,18 +13,20 @@ export default function App() {
 
   if (booting) {
     return (
-      <div className="gate">
-        <div className="gate-card glass-panel" aria-busy="true">
-          <div className="gate-logo">
-            <BrandMark />
+      <div className="gate" aria-busy="true">
+        <div className="backdrop" aria-hidden />
+        <div className="gate-card glass" style={{ alignItems: 'center', textAlign: 'center' }}>
+          <div className="brand-mark">
+            <BrandMark size={28} />
           </div>
-          <p className="lede">Connecting…</p>
+          <p className="lede" style={{ margin: 0 }}>
+            Connecting to the proxy…
+          </p>
         </div>
       </div>
     );
   }
 
   if (!authenticated) return <LoginGate />;
-
   return <RouterProvider router={router} />;
 }

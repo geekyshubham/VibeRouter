@@ -1,9 +1,7 @@
-/* ============================================================================
-   LoadingBlock — shimmer skeleton rows (.skel) shown while a query is settling.
-   ========================================================================== */
-export default function LoadingBlock({ rows = 3, height = 48 }: { rows?: number; height?: number }) {
+/* LoadingBlock — shimmer rows sized like the content they stand in for. */
+export default function LoadingBlock({ rows = 3, height = 52 }: { rows?: number; height?: number }) {
   return (
-    <div className="stack" aria-busy="true" aria-live="polite">
+    <div className="stack" aria-busy="true" aria-label="Loading">
       {Array.from({ length: rows }).map((_, i) => (
         <div key={i} className="skel" style={{ height }} />
       ))}

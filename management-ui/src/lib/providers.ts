@@ -29,6 +29,12 @@ const META: Record<string, ProviderMeta> = {
   kilo: { key: 'kilo', label: 'Kilo', tintVar: '--p-kilo', short: 'Kl' },
   vertex: { key: 'vertex', label: 'Vertex AI', tintVar: '--p-gemini', short: 'V' },
   'opencode-go': { key: 'opencode-go', label: 'OpenCode Go', tintVar: '--p-codex', short: 'OC' },
+  // Ids the backend reports that name a provider above under another spelling.
+  'github-copilot': { key: 'copilot', label: 'GitHub Copilot', tintVar: '--p-copilot', short: 'Co' },
+  xai: { key: 'grok', label: 'xAI Grok', tintVar: '--p-grok', short: 'x' },
+  openai: { key: 'codex', label: 'OpenAI', tintVar: '--p-codex', short: 'O' },
+  'openai-compat': { key: 'openai-compat', label: 'OpenAI-compatible', tintVar: '--p-compat', short: 'OC' },
+  unknown: { key: 'unknown', label: 'Other', tintVar: '--accent', short: '•' },
 };
 
 const FALLBACK: ProviderMeta = {

@@ -1,129 +1,119 @@
 /* ============================================================================
-   Sidebar — the console's navigation rail (replaces the old top-bar + pill
-   tabs). Brand + connection state, grouped nav with live counts, and a footer
-   with the theme control. NavLink drives the active route.
+   Sidebar — the glass navigation rail. Brand + host, a ⌘K search trigger,
+   grouped destinations with live counts, and a footer with connection state,
+   the theme switch, and (when a key is in use) Lock. On narrow screens the
+   same rail slides in as a drawer.
    ========================================================================== */
 import { NavLink } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import apiClient from '../../lib/apiClient';
-import { useTheme, type ThemeChoice } from '../../lib/theme';
 import { hostLabel } from '../../lib/apiClient';
+import { useTheme, type ThemeChoice } from '../../lib/theme';
 import { useOnline } from '../../context/OnlineContext';
 import { useAuth } from '../../context/AuthContext';
+import { usePalette } from '../../context/PaletteContext';
+import { useAuthFiles, useRouting } from '../../lib/useConsoleData';
+import { accountState } from '../../lib/health';
+import { NAV_GROUPS } from '../../lib/nav';
 import { BrandMark } from '../BrandMark';
 import Icon from '../../lib/icons';
-import type { AuthFile, ModelRoutingResponse } from '../../lib/types';
 
-interface NavItem {
-  to: string;
-  label: string;
-  Glyph: typeof Icon.Gauge;
-  count?: number | string;
-}
+const THEMES: { id: ThemeChoice; label: string; Glyph: typeof Icon.Sun }[] = [
+  { id: 'light', label: 'Light', Glyph: Icon.Sun },
+  { id: 'dark', label: 'Dark', Glyph: Icon.Moon },
+  { id: 'system', label: 'Auto', Glyph: Icon.Monitor },
+];
 
-export default function Sidebar() {
+const isMac = typeof navigator !== 'undefined' && /Mac|iPhone|iPad/.test(navigator.platform);
+
+export function Brand() {
   const { online } = useOnline();
-  const { authRequired, logout } = useAuth();
-  const { choice, setChoice } = useTheme();
-
-  // Live counts for the rail badges — cheap, cached, refetch on window focus.
-  const accounts = useQuery({
-    queryKey: ['mgmt', '/auth-files'],
-    queryFn: () => apiClient.get<{ files: AuthFile[] | null }>('/auth-files'),
-    refetchInterval: 30_000,
-  });
-  const models = useQuery({
-    queryKey: ['mgmt', '/routing/models'],
-    queryFn: () => apiClient.get<ModelRoutingResponse>('/routing/models'),
-    refetchInterval: 30_000,
-  });
-
-  const accountCount = (accounts.data?.files ?? []).length;
-  const modelCount = (models.data?.models ?? []).filter((m) => !m.disabled).length;
-
-  const groups: { label: string; items: NavItem[] }[] = [
-    {
-      label: 'Console',
-      items: [
-        { to: '/overview', label: 'Overview', Glyph: Icon.Gauge },
-        { to: '/playground', label: 'Playground', Glyph: Icon.Play },
-      ],
-    },
-    {
-      label: 'Manage',
-      items: [
-        { to: '/accounts', label: 'Accounts', Glyph: Icon.Users, count: accountCount || undefined },
-        { to: '/models', label: 'Models', Glyph: Icon.Boxes, count: modelCount || undefined },
-        { to: '/keys', label: 'Keys', Glyph: Icon.Key },
-      ],
-    },
-    {
-      label: 'Observability',
-      items: [
-        { to: '/logs', label: 'Logs', Glyph: Icon.List },
-        { to: '/config', label: 'Config', Glyph: Icon.Settings },
-      ],
-    },
-  ];
-
-  const themeOptions: { id: ThemeChoice; label: string; Glyph: typeof Icon.Sun }[] = [
-    { id: 'system', label: 'System theme', Glyph: Icon.Monitor },
-    { id: 'dark', label: 'Dark theme', Glyph: Icon.Moon },
-    { id: 'light', label: 'Light theme', Glyph: Icon.Sun },
-  ];
-
   return (
-    <aside className="side">
-      <div className="side-brand">
-        <div className="brand-mark">
-          <BrandMark />
-        </div>
-        <div>
-          <div className="name">VibeRouter</div>
-          <div className="host">
-            <span className={`dot ${online ? 'ok pulse' : 'bad'}`} />
-            <span>{hostLabel()}</span>
-          </div>
+    <div className="brand">
+      <div className="brand-mark">
+        <BrandMark />
+      </div>
+      <div style={{ minWidth: 0 }}>
+        <div className="brand-name">VibeRouter</div>
+        <div className="brand-host">
+          <span className={`dot ${online ? 'ok' : 'bad'}`} aria-hidden />
+          <span>{hostLabel()}</span>
         </div>
       </div>
+    </div>
+  );
+}
 
-      {groups.map((group) => (
-        <nav className="side-group" key={group.label} aria-label={group.label}>
-          <div className="side-label">{group.label}</div>
-          {group.items.map(({ to, label, Glyph, count }) => (
-            <NavLink key={to} to={to} className="side-link">
-              <Glyph />
-              <span>{label}</span>
-              {count != null && <span className="count">{count}</span>}
-            </NavLink>
-          ))}
+export function ThemeSwitch() {
+  const { choice, setChoice } = useTheme();
+  return (
+    <div className="seg" role="radiogroup" aria-label="Appearance">
+      {THEMES.map(({ id, label, Glyph }) => (
+        <button key={id} role="radio" aria-checked={choice === id} onClick={() => setChoice(id)} title={`${label} theme`}>
+          <Glyph />
+          <span>{label}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export default function Sidebar({ open, onNavigate }: { open: boolean; onNavigate: () => void }) {
+  const { online } = useOnline();
+  const { authRequired, logout } = useAuth();
+  const { setOpen } = usePalette();
+  const { files } = useAuthFiles();
+  const routing = useRouting();
+
+  const issues = files.filter((f) => accountState(f) === 'issue').length;
+  const models = (routing.data?.models ?? []).filter((m) => !m.disabled).length;
+
+  const badge: Record<string, { n: number; warn?: boolean } | undefined> = {
+    '/accounts': files.length ? { n: issues || files.length, warn: issues > 0 } : undefined,
+    '/models': models ? { n: models } : undefined,
+  };
+
+  return (
+    <aside className="rail" id="rail" data-open={open} aria-label="Main navigation">
+      <Brand />
+
+      <button className="search-trigger" onClick={() => setOpen(true)} aria-keyshortcuts="Meta+K Control+K">
+        <Icon.Search />
+        <span>Search or jump to…</span>
+        <span className="kbd">{isMac ? '⌘' : 'Ctrl'} K</span>
+      </button>
+
+      {NAV_GROUPS.map((group) => (
+        <nav className="nav-group" key={group.label} aria-label={group.label}>
+          <div className="nav-label">{group.label}</div>
+          {group.items.map(({ to, label, Glyph }) => {
+            const b = badge[to];
+            return (
+              <NavLink key={to} to={to} className="nav-link" onClick={onNavigate}>
+                <Glyph />
+                <span>{label}</span>
+                {b && (
+                  <span
+                    className={`nav-count ${b.warn ? 'warn' : ''}`}
+                    aria-label={b.warn ? `${b.n} need attention` : `${b.n} total`}
+                  >
+                    {b.n}
+                  </span>
+                )}
+              </NavLink>
+            );
+          })}
         </nav>
       ))}
 
-      <div className="side-foot">
-        <div className="theme-seg" role="radiogroup" aria-label="Color scheme">
-          {themeOptions.map(({ id, label, Glyph }) => (
-            <button
-              key={id}
-              className={choice === id ? 'on' : ''}
-              role="radio"
-              aria-checked={choice === id}
-              aria-label={label}
-              title={label}
-              onClick={() => setChoice(id)}
-            >
-              <Glyph />
-            </button>
-          ))}
+      <div className="rail-foot">
+        <div className="status-line" role="status">
+          <span className={`dot ${online ? 'ok live' : 'bad'}`} aria-hidden />
+          <span>{online ? 'Proxy running' : 'Proxy unreachable'}</span>
         </div>
-        <div className="side-status">
-          <span className={`dot ${online ? 'ok pulse' : 'bad'}`} />
-          <span>{online ? 'Proxy live' : 'Backend offline'}</span>
-        </div>
+        <ThemeSwitch />
         {authRequired && (
-          <button className="btn btn-ghost btn-sm" onClick={logout} title="Sign out of the console">
+          <button className="btn btn-ghost btn-sm btn-block" onClick={logout} style={{ justifyContent: 'flex-start' }}>
             <Icon.Lock />
-            <span>Lock console</span>
+            Lock console
           </button>
         )}
       </div>

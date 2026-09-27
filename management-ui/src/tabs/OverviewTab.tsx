@@ -1,206 +1,256 @@
 /* ============================================================================
-   OverviewTab — the health hero: is the proxy serving, what is it serving, and
-   how busy has it been. Combines the account inventory (health + per-account
-   request sparklines from recent_requests), the served-model count from the
-   routing catalog, today's usage totals, and the day breakdown.
+   OverviewTab — the home screen, arranged by what an operator asks first:
+     1. Is it working, and where do I point my tools?   (hero + endpoints)
+     2. What's the headline?                           (KPI tiles → deep links)
+     3. What's left to set up?                         (setup checklist, hides when done)
+     4. Is traffic flowing?                            (recent request activity)
+     5. What did it cost?                              (usage by day)
    ========================================================================== */
+import { Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { Link } from 'react-router-dom';
+import { clientEndpoints } from '../lib/apiClient';
 import { useManagementQuery } from '../lib/useManagementQuery';
-import { pluckArray } from '../lib/apiClient';
-import type { AuthFile, BackendConfig, ModelRoutingResponse } from '../lib/types';
-import { num, usd, tokens as fmtTokens, todayKey } from '../lib/format';
+import { useAccessKeys, useAuthFiles, useRouting } from '../lib/useConsoleData';
+import { accountState } from '../lib/health';
+import { num, plural, todayKey, tokens, usd } from '../lib/format';
+import type { UsageDailyResponse } from '../lib/types';
+import { useOnline } from '../context/OnlineContext';
 import Icon from '../lib/icons';
-import PageHeader from '../components/PageHeader';
 import SectionHeader from '../components/SectionHeader';
 import LoadingBlock from '../components/LoadingBlock';
-import Sparkline from '../components/Sparkline';
+import CopyButton from '../components/CopyButton';
+import ActivityChart from '../components/ActivityChart';
 import UsageByDatePanel from '../components/UsageByDatePanel';
-import UsageDayPicker from '../components/UsageDayPicker';
-import { providerTint } from '../lib/providers';
 
-interface StatProps {
+function Kpi({
+  to,
+  Glyph,
+  label,
+  value,
+  sub,
+  tone,
+}: {
+  to: string;
   Glyph: typeof Icon.Users;
   label: string;
   value: string;
-  sub?: string;
-  subOk?: boolean;
-}
-
-function Stat({ Glyph, label, value, sub, subOk }: StatProps) {
+  sub: string;
+  tone?: 'ok' | 'warn';
+}) {
   return (
-    <div className="stat">
-      <div className="lbl">
+    <Link to={to} className="kpi glass">
+      <div className="kpi-lbl">
         <Glyph />
         <span>{label}</span>
+        <Icon.ArrowRight className="go" />
       </div>
-      <div className="val">{value}</div>
-      {sub && <div className={`sub ${subOk === false ? 'bad' : subOk ? 'ok' : ''}`}>{sub}</div>}
-    </div>
-  );
-}
-
-/** One OAuth account row: provider logo, health pill, activity sparkline. */
-function AccountRow({ file }: { file: AuthFile }) {
-  const healthy = !file.disabled && !file.unavailable && file.status?.toLowerCase() !== 'error';
-  return (
-    <div className="lrow">
-      <span className="swatch" style={{ background: providerTint(file.provider || file.type) }} />
-      <div className="info">
-        <div className="n">{file.label || file.name}</div>
-        <div className="m">{file.name}</div>
+      <div className="kpi-val">{value}</div>
+      <div className={`kpi-sub ${tone ?? ''}`}>
+        {tone === 'warn' && <Icon.Alert />}
+        {tone === 'ok' && <Icon.Check />}
+        <span>{sub}</span>
       </div>
-      <Sparkline values={file.recent_requests} />
-      <span className={`pill ${file.disabled ? 'mut' : healthy ? 'ok' : 'warn'}`}>
-        <span className={`dot ${file.disabled ? '' : healthy ? 'ok' : 'warn'}`} />
-        {file.disabled ? 'Disabled' : healthy ? 'Healthy' : file.status || 'Degraded'}
-      </span>
-    </div>
+    </Link>
   );
 }
 
 export default function OverviewTab() {
   const qc = useQueryClient();
-  const cfg = useManagementQuery<BackendConfig>('/config');
-  const authFiles = useManagementQuery<{ files: AuthFile[] | null }>('/auth-files');
-  const routing = useManagementQuery<ModelRoutingResponse>('/routing/models');
-  const dayUsage = useManagementQuery<{
-    totalTokens: number;
-    totalCostUSD: number;
-    totalRequests: number;
-  }>(`/usage-daily?date=${todayKey()}`);
+  const navigate = useNavigate();
+  const { online } = useOnline();
+  const { files, isLoading: filesLoading } = useAuthFiles();
+  const routing = useRouting();
+  const { keys } = useAccessKeys();
+  const today = useManagementQuery<UsageDailyResponse>(`/usage-daily?date=${todayKey()}`);
+  const ep = clientEndpoints();
 
-  if (cfg.isLoading || authFiles.isLoading || routing.isLoading) {
-    return (
-      <section className="view">
-        <LoadingBlock rows={2} height={92} />
-      </section>
-    );
-  }
-
-  const files = pluckArray<AuthFile>(authFiles.data, 'files');
-  const healthy = files.filter((f) => !f.disabled && !f.unavailable && f.status?.toLowerCase() !== 'error');
-  const degraded = files.filter((f) => !f.disabled && (f.unavailable || f.status?.toLowerCase() === 'error'));
+  const active = files.filter((f) => accountState(f) === 'active');
+  const issues = files.filter((f) => accountState(f) === 'issue');
   const models = (routing.data?.models ?? []).filter((m) => !m.disabled);
-  const apiKeys = pluckArray<string>(cfg.data, 'api-keys');
+  const providers = new Set(active.map((f) => f.provider || f.type).filter(Boolean));
 
-  const activeProviders = new Set(
-    files
-      .filter((f) => !f.disabled)
-      .map((f) => f.provider || f.type || '')
-      .filter(Boolean),
-  );
+  const steps = [
+    {
+      done: files.length > 0,
+      title: 'Sign in to a provider',
+      desc: 'Add Claude, Codex, Gemini, Copilot and more from the VibeRouter menu bar.',
+      to: '/accounts',
+    },
+    {
+      done: models.length > 0,
+      title: 'Check which models are served',
+      desc: models.length ? `${plural(models.length, 'model')} available` : 'Models appear once an account is signed in.',
+      to: '/models',
+    },
+    {
+      done: keys.length > 0,
+      title: 'Require an access key',
+      desc: 'Optional on localhost. Needed if anything else on your network can reach the proxy.',
+      to: '/keys?new=1',
+    },
+  ];
+  const setupDone = steps.every((s) => s.done);
 
-  async function refreshAll() {
-    await qc.invalidateQueries();
-  }
+  const healthy = online && issues.length === 0;
+  const headline = !online
+    ? 'The proxy is not responding'
+    : files.length === 0
+      ? 'Ready — add an account to start routing'
+      : issues.length
+        ? `${plural(issues.length, 'account')} need${issues.length === 1 ? 's' : ''} attention`
+        : `Routing ${plural(models.length, 'model')} across ${plural(providers.size, 'provider')}`;
 
   return (
-    <section className="view">
-      <PageHeader
-        title="Overview"
-        sub="What the proxy is serving right now, and how busy it has been."
-        trail={
-          <>
-            <UsageDayPicker />
-            <button className="btn btn-soft btn-sm" onClick={refreshAll}>
-              <Icon.Refresh />
-              <span>Refresh</span>
+    <section className="view" aria-labelledby="page-title">
+      <h1 id="page-title" className="sr-only">
+        Overview
+      </h1>
+
+      <div className="hero glass">
+        <div>
+          <div className={`hero-state ${healthy ? '' : 'warn'}`}>
+            <span className={`dot ${healthy ? 'ok live' : 'warn'}`} aria-hidden />
+            {online ? (healthy ? 'All systems normal' : 'Running with issues') : 'Offline'}
+          </div>
+          <h2 className="hero-title">{headline}</h2>
+          <p className="hero-sub">
+            Point Claude Code, Factory, Cursor, or any OpenAI-compatible tool at the endpoint on the right. VibeRouter
+            picks a signed-in account for every request.
+          </p>
+          <div className="hero-actions">
+            <button className="btn btn-primary" onClick={() => navigate('/playground')}>
+              <Icon.Send />
+              Send a test request
             </button>
-          </>
-        }
-      />
-
-      <div className="grid g-stats">
-        <Stat
-          Glyph={Icon.Zap}
-          label="Proxy status"
-          value="Live"
-          sub="management API responding"
-          subOk
-        />
-        <Stat
-          Glyph={Icon.Users}
-          label="Accounts"
-          value={num(files.length)}
-          sub={
-            degraded.length > 0
-              ? `${healthy.length} healthy · ${degraded.length} degraded`
-              : `${healthy.length} healthy`
-          }
-          subOk={healthy.length > 0 && degraded.length === 0}
-        />
-        <Stat
-          Glyph={Icon.Boxes}
-          label="Models served"
-          value={num(models.length)}
-          sub={`${activeProviders.size} provider${activeProviders.size === 1 ? '' : 's'} connected`}
-          subOk={models.length > 0}
-        />
-        <Stat
-          Glyph={Icon.Key}
-          label="Access keys"
-          value={num(apiKeys.length)}
-          sub={apiKeys.length ? 'auth required' : 'open on localhost'}
-          subOk={apiKeys.length > 0}
-        />
-      </div>
-
-      <div className="grid g-2">
-        <div className="glass-panel card">
-          <SectionHeader
-            Glyph={Icon.Activity}
-            title="Usage today"
-            sub={dayUsage.data ? undefined : 'loading…'}
-            trail={
-              <span className="pill accent">
-                <Icon.Clock />
-                {dayUsage.data ? `${num(dayUsage.data.totalRequests)} requests` : '—'}
-              </span>
-            }
-          />
-          {dayUsage.data ? (
-            <div className="uday-stats" style={{ borderBottom: 'none', paddingBottom: 0 }}>
-              <div className="uday-stat">
-                <div className="uday-stat-lbl">Tokens</div>
-                <div className="uday-stat-val">{fmtTokens(dayUsage.data.totalTokens)}</div>
-              </div>
-              <div className="uday-stat">
-                <div className="uday-stat-lbl">Spend</div>
-                <div className="uday-stat-val accent">{usd(dayUsage.data.totalCostUSD)}</div>
-              </div>
-              <div className="uday-stat">
-                <div className="uday-stat-lbl">Requests</div>
-                <div className="uday-stat-val">{num(dayUsage.data.totalRequests)}</div>
-              </div>
-            </div>
-          ) : (
-            <LoadingBlock rows={1} height={40} />
-          )}
+            {issues.length > 0 ? (
+              <button className="btn btn-glass" onClick={() => navigate('/accounts?state=issue')}>
+                <Icon.Alert />
+                Review accounts
+              </button>
+            ) : (
+              <button className="btn btn-glass" onClick={() => void qc.invalidateQueries()}>
+                <Icon.Refresh />
+                Refresh
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="glass-panel card">
-          <SectionHeader
+        <div className="endpoint-card" aria-label="Client endpoints">
+          <div className="label">Point your tools here</div>
+          <div className="endpoint-row">
+            <span className="lbl">Anthropic</span>
+            <code title={ep.anthropic}>{ep.anthropic}</code>
+            <CopyButton value={ep.anthropic} label="Copy Anthropic base URL" toastText="Base URL copied" />
+          </div>
+          <div className="endpoint-row">
+            <span className="lbl">OpenAI</span>
+            <code title={ep.openai}>{ep.openai}</code>
+            <CopyButton value={ep.openai} label="Copy OpenAI base URL" toastText="Base URL copied" />
+          </div>
+          <div className="endpoint-row">
+            <span className="lbl">API key</span>
+            <code>{keys.length ? 'one of your access keys' : 'any value works'}</code>
+            <Link to="/keys" className="icon-btn" aria-label="Manage access keys" title="Manage access keys">
+              <Icon.ChevronRight />
+            </Link>
+          </div>
+        </div>
+      </div>
+
+      {filesLoading || routing.isLoading ? (
+        <div className="grid g-kpi">
+          {[0, 1, 2, 3].map((i) => (
+            <div key={i} className="skel" style={{ height: 124, borderRadius: 'var(--r-card)' }} />
+          ))}
+        </div>
+      ) : (
+        <div className="grid g-kpi">
+          <Kpi
+            to="/accounts"
             Glyph={Icon.Users}
-            title="Account health"
-            sub="Live request activity, last few minutes"
-            trail={
+            label="Accounts"
+            value={num(files.length)}
+            sub={issues.length ? `${num(issues.length)} need attention` : files.length ? `${num(active.length)} active` : 'None signed in'}
+            tone={issues.length ? 'warn' : active.length ? 'ok' : undefined}
+          />
+          <Kpi
+            to="/models"
+            Glyph={Icon.Boxes}
+            label="Models served"
+            value={num(models.length)}
+            sub={`${plural(providers.size, 'provider')}`}
+          />
+          <Kpi
+            to="/overview#usage-title"
+            Glyph={Icon.Activity}
+            label="Spend today"
+            value={today.data ? usd(today.data.totalCostUSD) : '—'}
+            sub={today.data ? `${tokens(today.data.totalTokens)} tokens` : 'Loading…'}
+          />
+          <Kpi
+            to="/keys"
+            Glyph={Icon.Shield}
+            label="Access"
+            value={keys.length ? 'Key required' : 'Open'}
+            sub={keys.length ? plural(keys.length, 'access key') : 'Local clients need no key'}
+            tone={keys.length ? 'ok' : undefined}
+          />
+        </div>
+      )}
+
+      <div className={`grid ${setupDone ? '' : 'g-2'}`}>
+        <section className="glass panel" aria-labelledby="activity-title">
+          <SectionHeader
+            id="activity-title"
+            Glyph={Icon.Zap}
+            title="Live traffic"
+            sub="All accounts, 10-minute windows"
+            actions={
               <Link to="/accounts" className="btn btn-ghost btn-sm">
-                <span>Manage</span>
-                <Icon.ChevronDown style={{ transform: 'rotate(-90deg)' }} />
+                By account
+                <Icon.ArrowRight />
               </Link>
             }
           />
-          {files.length === 0 ? (
-            <p className="small">No accounts yet — add one from the VibeRouter menu bar.</p>
+          {filesLoading ? (
+            <LoadingBlock rows={1} height={150} />
+          ) : files.length ? (
+            <ActivityChart files={files} />
           ) : (
-            <div className="stack-sm">
-              {files.slice(0, 6).map((f) => (
-                <AccountRow key={f.name} file={f} />
+            <p className="small">Traffic shows up here once an account is signed in.</p>
+          )}
+        </section>
+
+        {!setupDone && (
+          <section className="glass panel" aria-labelledby="setup-title">
+            <SectionHeader
+              id="setup-title"
+              Glyph={Icon.Wand}
+              title="Get set up"
+              sub={`${steps.filter((s) => s.done).length} of ${steps.length} done`}
+            />
+            <div className="checklist">
+              {steps.map((s) => (
+                <Link key={s.title} to={s.to} className={`check-item ${s.done ? 'done' : 'todo'}`}>
+                  <span className="check-mark" aria-hidden>
+                    {s.done ? <Icon.Check /> : <Icon.ArrowRight />}
+                  </span>
+                  <span className="check-text">
+                    <span className="check-title">
+                      {s.title}
+                      <span className="sr-only">{s.done ? ' (done)' : ' (to do)'}</span>
+                    </span>
+                    <span className="check-desc" style={{ display: 'block' }}>
+                      {s.desc}
+                    </span>
+                  </span>
+                  <Icon.ChevronRight />
+                </Link>
               ))}
             </div>
-          )}
-        </div>
+          </section>
+        )}
       </div>
 
       <UsageByDatePanel />

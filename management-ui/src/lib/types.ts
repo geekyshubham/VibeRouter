@@ -4,6 +4,14 @@
    as null; consumers normalize via asArray()/pluckArray().
    ========================================================================== */
 
+/** One 10-minute request window from an auth file's recent_requests. */
+export interface RecentRequestBucket {
+  /** "HH:MM-HH:MM", server local time. */
+  time: string;
+  success: number;
+  failed: number;
+}
+
 /** One OAuth token / auth file under ~/.cli-proxy-api (GET /auth-files → files[]). */
 export interface AuthFile {
   auth_index: string;
@@ -16,7 +24,8 @@ export interface AuthFile {
   name: string;
   path: string;
   provider: string;
-  recent_requests?: number[] | null;
+  /** Oldest → newest. Older backends sent bare counts. */
+  recent_requests?: (RecentRequestBucket | number)[] | null;
   runtime_only: boolean;
   size: number;
   source: string;
@@ -66,6 +75,7 @@ export interface BackendConfig {
   'vertex-api-key': string[] | null;
   'openai-compatibility': CompatProvider[] | null;
   'quota-exceeded'?: { 'switch-project'?: boolean; 'switch-preview-model'?: boolean };
+  routing?: { strategy?: string };
   [key: string]: unknown;
 }
 

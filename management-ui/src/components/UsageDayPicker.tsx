@@ -1,48 +1,54 @@
 /* ============================================================================
-   UsageDayPicker — the "which day am I looking at" control in the TopBar.
-
-   A native <input type="date"> rather than a date-picker dependency: the console
-   ships as a single embedded HTML file, so every added library inflates the
-   binary, and the native control already gives us a calendar, keyboard entry, and
-   locale-correct display for free.
-
-   Bounds come from the usage response itself (earliestDay .. today). Days before
-   the first recorded one hold no data by definition, so offering them would only
-   produce confusing empty readouts.
+   UsageDayPicker — step through recorded days (‹ date ›) or pick one from the
+   native calendar. Native <input type="date"> keeps the single-file build
+   free of a date-picker dependency. Bounds come from the usage response
+   (earliestDay .. today), so the control never offers a day with no history.
    ========================================================================== */
 import { useUsageDay } from '../context/UsageDayContext';
 import { useUsageDaily } from '../lib/useUsageDaily';
 import { todayKey } from '../lib/format';
 import Icon from '../lib/icons';
 
+/** Shift a local YYYY-MM-DD key by whole days without touching UTC. */
+function shiftDay(key: string, delta: number): string {
+  const [y, m, d] = key.split('-').map(Number);
+  const date = new Date(y, m - 1, d + delta);
+  return `${date.getFullYear()}-${`${date.getMonth() + 1}`.padStart(2, '0')}-${`${date.getDate()}`.padStart(2, '0')}`;
+}
+
 export default function UsageDayPicker() {
   const { day, setDay, resetToToday, isToday } = useUsageDay();
-  // Shares its cache entry with the Overview breakdown (same query path), so this
-  // does not add a request — it just reads the bounds off the same response.
   const usage = useUsageDaily(day);
-
   const today = todayKey();
   const earliest = usage.data?.earliestDay;
+  const min = earliest && earliest < today ? earliest : undefined;
 
   return (
-    <div className="day-pick">
-      <label className="day-pick-lbl" htmlFor="usage-day">
-        <Icon.Activity />
-        <span>Usage on</span>
-      </label>
-      <input
-        id="usage-day"
-        className="inp day-pick-inp mono"
-        type="date"
-        value={day}
-        // Clamp to recorded history so the calendar cannot wander into days that
-        // are empty by construction.
-        min={earliest && earliest < today ? earliest : undefined}
-        max={today}
-        onChange={(e) => setDay(e.target.value)}
-      />
+    <div className="row">
+      <div className="day-nav" role="group" aria-label="Usage day">
+        <button
+          className="icon-btn"
+          aria-label="Previous day"
+          disabled={Boolean(min && day <= min)}
+          onClick={() => setDay(shiftDay(day, -1))}
+        >
+          <Icon.ChevronDown style={{ transform: 'rotate(90deg)' }} />
+        </button>
+        <input
+          className="inp mono"
+          type="date"
+          value={day}
+          min={min}
+          max={today}
+          onChange={(e) => setDay(e.target.value)}
+          aria-label="Pick a day"
+        />
+        <button className="icon-btn" aria-label="Next day" disabled={day >= today} onClick={() => setDay(shiftDay(day, 1))}>
+          <Icon.ChevronRight />
+        </button>
+      </div>
       {!isToday && (
-        <button className="btn btn-ghost btn-sm" onClick={resetToToday} title="Jump back to today">
+        <button className="btn btn-ghost btn-sm" onClick={resetToToday}>
           Today
         </button>
       )}

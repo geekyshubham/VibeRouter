@@ -1,25 +1,30 @@
 /* ============================================================================
-   run-ui-tests.mjs — real frontend UI tests for the VibeRouter management panel.
+   run-ui-tests.mjs — real frontend UI tests for the VibeRouter console.
 
-   Drives the ACTUAL served page in headless Chromium (Playwright):
-     - loads http://127.0.0.1:<port>/management.html from an isolated backend
-     - captures ALL console errors / page errors (catches crashes like o.filter)
+   Drives the ACTUAL served page in headless Chromium (Playwright) against an
+   isolated backend (never the live :8318 instance):
      - logs in with the management key
-     - clicks through every tab, asserts content renders + no crash
-     - exercises interactive controls and asserts visible feedback (toasts)
-     - screenshots each tab to uitest/shots/
+     - visits every page in dark and light themes, asserts render + no crash
+     - exercises the main flows: ⌘K palette, theme switch, add/remove access
+       key (with the confirm dialog), account toggle + Undo, settings toggle,
+       logs enable, models filter
+     - checks no horizontal overflow at 320 / 375 / 414 / 768 px
+     - screenshots to uitest/shots/
 
    Usage: node run-ui-tests.mjs <port> <key>
-   The caller is responsible for starting/stopping the isolated backend.
    ============================================================================ */
 import { chromium } from 'playwright';
 import { mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-const PORT = process.argv[2] || '8450';
-const KEY = process.argv[3] || 'viberouter-admin';
+const PORT = process.argv[2] || '8451';
+const KEY = process.argv[3] || 'ui-test-key';
 const BASE = `http://127.0.0.1:${PORT}`;
+if (PORT === '8318') {
+  console.error('Refusing to run mutating UI tests against the live backend (:8318). Use smoke-readonly.mjs.');
+  process.exit(2);
+}
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SHOTS = join(HERE, 'shots');
 mkdirSync(SHOTS, { recursive: true });
@@ -30,157 +35,211 @@ function record(name, ok, detail = '') {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? ' — ' + detail : ''}`);
 }
 
-const consoleErrors = [];
-const pageErrors = [];
+const PAGES = [
+  ['overview', 'Overview'],
+  ['playground', 'Playground'],
+  ['accounts', 'Accounts'],
+  ['models', 'Models'],
+  ['keys', 'API keys'],
+  ['logs', 'Logs'],
+  ['settings', 'Settings'],
+];
+
+async function waitToast(page, text) {
+  const loc = text ? page.locator('.toast', { hasText: text }) : page.locator('.toast');
+  return loc.first().waitFor({ timeout: 5000 }).then(() => true).catch(() => false);
+}
 
 async function main() {
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1200, height: 900 } });
+  const ctx = await browser.newContext({ viewport: { width: 1360, height: 900 } });
+  await ctx.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: BASE });
+  const page = await ctx.newPage();
 
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text());
-  });
-  page.on('pageerror', (err) => pageErrors.push(String(err)));
-
-  // Record every non-2xx response with its method+URL so we can tell an EXPECTED
-  // 400 (e.g. GET /logs when file-logging is off) from a real contract bug.
+  const pageErrors = [];
+  const consoleErrors = [];
   const httpFailures = [];
-  page.on('response', (resp) => {
-    const s = resp.status();
-    if (s >= 400) httpFailures.push(`${resp.request().method()} ${new URL(resp.url()).pathname} → ${s}`);
+  page.on('pageerror', (err) => pageErrors.push(String(err)));
+  page.on('console', (msg) => msg.type() === 'error' && consoleErrors.push(msg.text()));
+  page.on('response', (r) => {
+    if (r.status() >= 400) httpFailures.push(`${r.request().method()} ${new URL(r.url()).pathname} → ${r.status()}`);
   });
 
-  // --- Load ---
-  await page.goto(`${BASE}/management.html`, { waitUntil: 'networkidle', timeout: 15000 });
+  // --- Load + login
+  await page.goto(`${BASE}/management.html`, { waitUntil: 'networkidle' });
   record('page loads', true, await page.title());
-
-  // --- Favicon present ---
   const favicon = await page.getAttribute('link[rel="icon"]', 'href').catch(() => null);
-  record('favicon set (glyph)', !!favicon && favicon.startsWith('data:image/png'), favicon ? 'data URI' : 'missing');
+  record('favicon set (glyph)', !!favicon && favicon.startsWith('data:image/png'));
 
-  // --- Login gate ---
-  await page.waitForSelector('.gate-card, .shell', { timeout: 8000 });
-  const onGate = await page.$('.gate-card');
-  if (onGate) {
+  await page.waitForSelector('.gate-card, .app', { timeout: 8000 });
+  if (await page.$('#mgmt-key')) {
+    await page.fill('#mgmt-key', 'wrong-key');
+    await page.click('button:has-text("Unlock console")');
+    const err = await page.waitForSelector('.gate-err:not(:empty)', { timeout: 5000 }).catch(() => null);
+    record('login: wrong key shows inline error', !!err, err ? await err.textContent() : '');
     await page.fill('#mgmt-key', KEY);
     await page.click('button:has-text("Unlock console")');
-    await page.waitForSelector('.shell', { timeout: 8000 });
-    record('login with key', true, 'reached console');
-  } else {
-    record('login with key', true, 'already authenticated');
   }
+  await page.waitForSelector('.app', { timeout: 8000 });
+  record('login with key', true);
+  record('rail brand glyph', !!(await page.$('.rail .brand-mark img')));
 
-  // --- Brand mark in topbar ---
-  const brand = await page.$('.topbar .brand-mark img');
-  record('topbar brand glyph', !!brand);
-
-  // --- Tabs: click each, assert a view renders, screenshot ---
-  const tabs = ['Overview', 'Accounts', 'Keys', 'Logs', 'Config'];
-  for (const tab of tabs) {
-    const before = consoleErrors.length + pageErrors.length;
-    await page.click(`.tab:has-text("${tab}")`);
-    await page.waitForTimeout(700);
-    const view = await page.$('.view');
-    const after = consoleErrors.length + pageErrors.length;
-    const noCrash = after === before;
-    record(`tab: ${tab} renders`, !!view && noCrash, noCrash ? '' : 'console/page error during render');
-    await page.screenshot({ path: join(SHOTS, `tab-${tab.toLowerCase()}.png`) });
-  }
-
-  // --- Provider icons are real images (consistency with Swift app) ---
-  await page.click('.tab:has-text("Config")');
-  await page.waitForTimeout(600);
-  const provImgs = await page.$$eval('.plogo img', (imgs) => imgs.length);
-  record('provider icons render as images', provImgs > 0, `${provImgs} <img> logos`);
-
-  // --- Interactive: toggle a Config switch, assert toast feedback ---
-  const sw = await page.$('.cfg-row .sw');
-  if (sw) {
-    await sw.click();
-    const toast = await page.waitForSelector('.toast', { timeout: 4000 }).catch(() => null);
-    record('config toggle → toast feedback', !!toast, toast ? await toast.textContent() : 'no toast');
-    // toggle back
-    await page.waitForTimeout(500);
-    await sw.click().catch(() => {});
-    await page.waitForTimeout(500);
-  } else {
-    record('config toggle → toast feedback', false, 'no switch found');
-  }
-
-  // --- Interactive: Keys tab, add a proxy key, assert it appears + toast ---
-  await page.click('.tab:has-text("Keys")');
-  await page.waitForTimeout(600);
-  const keyInput = await page.$('input[placeholder="New access key…"]');
-  if (keyInput) {
-    await keyInput.fill('ui-test-key');
-    await page.click('button:has-text("Add")');
-    const toast = await page.waitForSelector('.toast', { timeout: 4000 }).catch(() => null);
-    await page.waitForTimeout(600);
-    const rows = await page.$$eval('.lrow', (els) => els.length);
-    record('keys: add key → toast + row', !!toast && rows > 0, `${rows} rows`);
-    // clean up: delete it
-    const del = await page.$('.lrow .btn-danger');
-    if (del) {
-      await del.click();
+  // --- Every page, both themes
+  for (const theme of ['dark', 'light']) {
+    await page.evaluate((t) => localStorage.setItem('vr_theme', t), theme);
+    await page.reload({ waitUntil: 'networkidle' });
+    await page.waitForSelector('.app');
+    const applied = await page.evaluate(() => document.documentElement.dataset.theme);
+    record(`theme ${theme} applied`, applied === theme, applied);
+    for (const [path, label] of PAGES) {
+      const before = pageErrors.length;
+      await page.click(`.rail .nav-link:has-text("${label}")`);
+      await page.waitForURL(`**#/${path}**`);
       await page.waitForTimeout(500);
+      const view = await page.$('.view');
+      record(`${theme}: ${label} renders`, !!view && pageErrors.length === before);
+      await page.screenshot({ path: join(SHOTS, `${theme}-${path}.png`), fullPage: true });
+    }
+  }
+
+  // --- Provider icons are real images
+  await page.click('.rail .nav-link:has-text("Accounts")');
+  await page.waitForTimeout(500);
+  const imgs = await page.$$eval('.plogo img', (i) => i.length);
+  record('provider logos render as images', imgs > 0, `${imgs} logos`);
+
+  // --- Account toggle → optimistic + Undo
+  const sw = page.locator('.list-row .switch').first();
+  if (await sw.count()) {
+    const before = await sw.getAttribute('aria-checked');
+    await sw.click();
+    const flipped = (await sw.getAttribute('aria-checked')) !== before;
+    const hasUndo = await page.locator('.toast button:has-text("Undo")').first().waitFor({ timeout: 4000 }).then(() => true).catch(() => false);
+    record('accounts: toggle flips immediately + offers Undo', flipped && hasUndo);
+    if (hasUndo) {
+      await page.click('.toast button:has-text("Undo")');
+      await page.waitForTimeout(1200);
+      record('accounts: Undo restores state', (await sw.getAttribute('aria-checked')) === before);
     }
   } else {
-    record('keys: add key → toast + row', false, 'no key input');
+    record('accounts: toggle flips immediately + offers Undo', false, 'no account rows');
   }
 
-  // --- Accounts tab refresh gives feedback ---
-  await page.click('.tab:has-text("Accounts")');
+  // --- Accounts filter chip → URL state
+  await page.click('.chip:has-text("Active")');
+  record('accounts: filter chip sets ?state=', page.url().includes('state=active'));
+
+  // --- ⌘K palette → navigate
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+k' : 'Control+k');
+  const palette = await page.waitForSelector('.cmdk', { timeout: 3000 }).catch(() => null);
+  record('palette opens with ⌘K', !!palette);
+  if (palette) {
+    await page.keyboard.type('settings');
+    await page.keyboard.press('Enter');
+    const went = await page.waitForURL('**#/settings', { timeout: 4000 }).then(() => true).catch(() => false);
+    record('palette navigates by search + Enter', went);
+    await page.waitForSelector('button[role="switch"][aria-label="Debug output"]', { timeout: 6000 });
+  }
+
+  // --- Settings toggle → toast
+  const debug = page.locator('button[role="switch"][aria-label="Debug output"]');
+  const debugBefore = await debug.getAttribute('aria-checked');
+  await debug.click();
+  record('settings: toggle → toast', await waitToast(page, 'Debug output'));
+  await page.waitForTimeout(400);
+  await debug.click();
+  await page.waitForTimeout(600);
+  record('settings: toggle round-trips', (await debug.getAttribute('aria-checked')) === debugBefore);
+
+  // --- Theme switch in rail
+  await page.click('.rail .seg button:has-text("Dark")');
+  const t1 = await page.evaluate(() => document.documentElement.dataset.theme);
+  await page.click('.rail .seg button:has-text("Light")');
+  const t2 = await page.evaluate(() => document.documentElement.dataset.theme);
+  record('rail theme switch flips palette', t1 === 'dark' && t2 === 'light');
+
+  // --- Keys: generate + add, then remove through the confirm dialog
+  await page.click('.rail .nav-link:has-text("API keys")');
+  await page.waitForTimeout(400);
+  await page.click('button:has-text("Generate")');
+  const generated = await page.inputValue('#new-key');
+  record('keys: Generate fills a strong key', /^vr-[A-Za-z0-9_-]{30,}$/.test(generated), generated.slice(0, 6) + '…');
+  await page.click('button:has-text("Add key")');
+  const added = await waitToast(page, 'Key added');
   await page.waitForTimeout(500);
-  const refreshBtn = await page.$('button:has-text("Refresh")');
-  if (refreshBtn) {
-    await refreshBtn.click();
-    const toast = await page.waitForSelector('.toast', { timeout: 4000 }).catch(() => null);
-    record('accounts: refresh → toast feedback', !!toast);
-  } else {
-    record('accounts: refresh → toast feedback', false, 'no refresh button');
+  const rows = await page.locator('section[aria-labelledby="access-title"] .list-row').count();
+  record('keys: add → toast + row', added && rows > 0, `${rows} rows`);
+  await page.locator('section[aria-labelledby="access-title"] .list-row .icon-btn.danger').first().click();
+  const dialog = await page.waitForSelector('[role="alertdialog"]', { timeout: 3000 }).catch(() => null);
+  record('keys: remove asks for confirmation', !!dialog);
+  if (dialog) {
+    await page.keyboard.press('Escape');
+    record('keys: Esc cancels the dialog', !(await page.$('[role="alertdialog"]')));
+    await page.locator('section[aria-labelledby="access-title"] .list-row .icon-btn.danger').first().click();
+    await page.click('[role="alertdialog"] button:has-text("Remove key")');
+    record('keys: confirmed remove → toast', await waitToast(page, 'Key removed'));
   }
 
-  // --- Logs tab: enable logging via the empty-state button, assert feedback ---
-  await page.click('.tab:has-text("Logs")');
-  await page.waitForTimeout(500);
-  const enableBtn = await page.$('button:has-text("Enable logging")');
-  if (enableBtn) {
-    await enableBtn.click();
-    const toast = await page.waitForSelector('.toast', { timeout: 4000 }).catch(() => null);
-    record('logs: enable logging → toast', !!toast);
+  // --- Logs: enable from the empty state
+  await page.click('.rail .nav-link:has-text("Logs")');
+  await page.waitForTimeout(400);
+  const enable = await page.$('button:has-text("Turn on logging")');
+  if (enable) {
+    await enable.click();
+    record('logs: enable → toast', await waitToast(page, 'File logging on'));
+    await page.waitForSelector('.log-list, .empty', { timeout: 6000 }).catch(() => {});
+    record('logs: renders after enabling', !!(await page.$('.toolbar')));
   } else {
-    // logging may already be on; assert the log table or empty state shows without crash
-    const shown = await page.$('.tbl, .empty');
-    record('logs: renders (table/empty)', !!shown, 'logging already enabled');
+    record('logs: renders', !!(await page.$('.log-list, .empty')), 'logging already on');
   }
 
-  // --- HTTP failures: distinguish EXPECTED from real ---
-  // GET /logs legitimately returns 400 when file-logging is off — the UI renders
-  // an empty state for it. Any OTHER >=400 is a real contract/UX bug.
-  const unexpected = httpFailures.filter((f) => !/^GET \/v0\/management\/logs → 400$/.test(f));
-  record(
-    'no UNEXPECTED http failures',
-    unexpected.length === 0,
-    unexpected.length ? unexpected.slice(0, 5).join(' | ') : `clean (${httpFailures.length} expected)`,
-  );
+  // --- Models: provider filter + search
+  await page.click('.rail .nav-link:has-text("Models")');
+  await page.waitForTimeout(400);
+  await page.fill('input[aria-label="Search models"]', 'zzz-no-such-model');
+  record('models: search empty state', !!(await page.waitForSelector('text=No matching models', { timeout: 3000 }).catch(() => null)));
+  await page.fill('input[aria-label="Search models"]', '');
 
-  // --- Crash gate: uncaught page errors are the real regression signal ---
-  record(
-    'no uncaught page errors (o.filter regression)',
-    pageErrors.length === 0,
-    pageErrors.slice(0, 3).join(' | ') || 'clean',
-  );
+  // --- Overview: copy endpoint
+  await page.click('.rail .nav-link:has-text("Overview")');
+  await page.waitForTimeout(400);
+  await page.click('button[aria-label="Copy Anthropic base URL"]');
+  const clip = await page.evaluate(() => navigator.clipboard.readText()).catch(() => '');
+  record('overview: copy base URL', /^https?:\/\/.+/.test(clip), clip);
 
-  // Informational: console errors (browser logs generic text for handled 400s too).
+  // --- Mobile widths: no horizontal scroll, drawer nav works
+  for (const w of [320, 375, 414, 768]) {
+    await page.setViewportSize({ width: w, height: 800 });
+    for (const [path] of PAGES) {
+      await page.goto(`${BASE}/management.html#/${path}`, { waitUntil: 'networkidle' });
+      await page.waitForTimeout(250);
+      const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+      if (overflow > 1) record(`mobile ${w}px: ${path} fits`, false, `${overflow}px overflow`);
+    }
+    record(`mobile ${w}px: no horizontal overflow`, true);
+    if (w === 375) {
+      await page.goto(`${BASE}/management.html#/overview`, { waitUntil: 'networkidle' });
+      await page.screenshot({ path: join(SHOTS, 'mobile-overview.png'), fullPage: true });
+      await page.click('button[aria-label="Open navigation"]');
+      await page.waitForTimeout(450);
+      await page.screenshot({ path: join(SHOTS, 'mobile-drawer.png') });
+      await page.click('.rail .nav-link:has-text("Models")');
+      await page.waitForURL('**#/models');
+      await page.waitForTimeout(450);
+      const closed = await page.evaluate(() => document.querySelector('.rail')?.getAttribute('data-open'));
+      record('mobile: drawer navigates and closes', closed === 'false');
+    }
+  }
+
+  // --- Error accounting
+  const expected = [/^GET \/v0\/management\/logs(\?.*)? → 400$/, /→ 401$/];
+  const unexpected = httpFailures.filter((f) => !expected.some((re) => re.test(f)));
+  record('no unexpected HTTP failures', unexpected.length === 0, unexpected.slice(0, 5).join(' | ') || `clean (${httpFailures.length} expected)`);
+  record('no uncaught page errors', pageErrors.length === 0, pageErrors.slice(0, 3).join(' | ') || 'clean');
   const realConsole = consoleErrors.filter((e) => !/Failed to load resource/.test(e));
-  record(
-    'no unhandled console errors',
-    realConsole.length === 0,
-    realConsole.slice(0, 3).join(' | ') || `clean (${consoleErrors.length} resource-load logs, all handled)`,
-  );
+  record('no unhandled console errors', realConsole.length === 0, realConsole.slice(0, 3).join(' | ') || 'clean');
 
   await browser.close();
-
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length) {
@@ -188,7 +247,6 @@ async function main() {
     failed.forEach((f) => console.log(`  - ${f.name}: ${f.detail}`));
     process.exit(1);
   }
-  process.exit(0);
 }
 
 main().catch((err) => {

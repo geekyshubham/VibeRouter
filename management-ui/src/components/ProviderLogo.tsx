@@ -1,12 +1,10 @@
 /* ============================================================================
-   ProviderLogo — brand badge for a provider (.plogo). Uses the SAME icon-*.png
-   assets the Swift menu bar app ships, so icons are consistent across the
-   management console and the native app. Providers without a shipped icon fall
-   back to tinted initials.
+   ProviderLogo — brand badge for a provider (.plogo). Uses the same icon-*.png
+   assets the Swift menu bar app ships, so the console and the native app show
+   the same marks. Providers without a shipped icon get tinted initials.
    ========================================================================== */
 import { providerMeta } from '../lib/providers';
 
-// The brand PNGs shared with the Swift app (src/Sources/Resources/icon-*.png).
 import iconAntigravity from '../assets/providers/icon-antigravity.png';
 import iconClaude from '../assets/providers/icon-claude.png';
 import iconCodex from '../assets/providers/icon-codex.png';
@@ -32,46 +30,30 @@ const ICONS: Record<string, string> = {
   'opencode-go': iconCodex,
 };
 
-export default function ProviderLogo({ provider, size = 30 }: { provider: string; size?: number }) {
+export default function ProviderLogo({ provider, size = 32 }: { provider: string | undefined | null; size?: number }) {
   const meta = providerMeta(provider);
   const tint = `var(${meta.tintVar})`;
   const iconSrc = ICONS[meta.key];
+  const style = {
+    width: size,
+    height: size,
+    background: `color-mix(in oklch, ${tint} 20%, transparent)`,
+    color: tint,
+  };
 
-  if (iconSrc) {
-    return (
-      <div
-        className="plogo"
-        style={{
-          width: size,
-          height: size,
-          background: `color-mix(in srgb, ${tint} 18%, transparent)`,
-        }}
-        title={meta.label}
-      >
+  return (
+    <div className="plogo" style={style} title={meta.label} aria-hidden>
+      {iconSrc ? (
         <img
           src={iconSrc}
-          alt={meta.label}
-          width={Math.round(size * 0.62)}
-          height={Math.round(size * 0.62)}
+          alt=""
+          width={Math.round(size * 0.6)}
+          height={Math.round(size * 0.6)}
           style={{ objectFit: 'contain', display: 'block' }}
         />
-      </div>
-    );
-  }
-
-  // Fallback: tinted initials for providers without a shipped icon.
-  return (
-    <div
-      className="plogo"
-      style={{
-        width: size,
-        height: size,
-        background: `color-mix(in srgb, ${tint} 22%, transparent)`,
-        color: tint,
-      }}
-      title={meta.label}
-    >
-      {meta.short}
+      ) : (
+        meta.short
+      )}
     </div>
   );
 }
