@@ -252,7 +252,7 @@ enum LocalKiroCredits {
 
         let sessionState = json["session_state"] as? [String: Any]
         let modelInfo = (sessionState?["rts_model_state"] as? [String: Any])?["model_info"] as? [String: Any]
-        let model = (modelInfo?["model_id"] as? String)
+        let sessionModel = (modelInfo?["model_id"] as? String)
             ?? (modelInfo?["model_name"] as? String)
             ?? "kiro"
 
@@ -268,6 +268,7 @@ enum LocalKiroCredits {
         for turn in turns {
             let credits = sumCredits(turn["metering_usage"])
             guard credits > 0 else { continue }
+            let model = turnModel(turn["model"]) ?? sessionModel
             let tsDay = resolveTurnDayKey(endTimestamp: turn["end_timestamp"] as? String, fallbackDayKey: fallbackDay)
             dayCredits[tsDay, default: 0] += credits
             var models = dayModels[tsDay] ?? [:]
@@ -282,6 +283,14 @@ enum LocalKiroCredits {
         fileCache[path] = (mtime, size, dayCredits, dayModels)
         cacheLock.unlock()
         return (dayCredits, dayModels)
+    }
+
+    /// Per-turn `model` wins. A session can switch to Claude Opus 5.5 mid-way;
+    /// filing every turn under `rts_model_state` hides that model's credits.
+    private static func turnModel(_ raw: Any?) -> String? {
+        guard let name = raw as? String else { return nil }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private static func sumCredits(_ raw: Any?) -> Double {

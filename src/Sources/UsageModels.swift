@@ -71,7 +71,8 @@ struct RateWindow: Codable, Equatable {
             if let remaining = remainingValue {
                 let unit = unitLabel ?? "credits"
                 if let total = totalValue, total > 0 {
-                    return "\(formatAmount(remaining)) / \(formatAmount(total)) \(unit)"
+                    let used = max(0, total - remaining)
+                    return "\(formatAmount(used)) used of \(formatAmount(total)) · \(formatAmount(remaining)) left"
                 }
                 return "\(formatAmount(remaining)) \(unit) left"
             }
@@ -86,16 +87,15 @@ struct RateWindow: Codable, Equatable {
     }
 
     private func formatAmount(_ value: Double) -> String {
-        if value >= 1000 {
-            let formatter = NumberFormatter()
-            formatter.numberStyle = .decimal
-            formatter.maximumFractionDigits = value.rounded() == value ? 0 : 1
-            return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.0f", value)
-        }
-        if value.rounded() == value {
-            return String(format: "%.0f", value)
-        }
-        return String(format: "%.1f", value)
+        let whole = abs(value.rounded() - value) < 0.001
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.numberStyle = .decimal
+        // Kiro Power burns fractional credits out of 10,000 — keep 1,154.25, not 1,154.3.
+        let digits = whole ? 0 : 2
+        formatter.minimumFractionDigits = digits
+        formatter.maximumFractionDigits = digits
+        return formatter.string(from: NSNumber(value: value)) ?? String(format: "%.2f", value)
     }
 }
 

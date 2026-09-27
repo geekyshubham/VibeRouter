@@ -310,3 +310,61 @@ enum KiroCLIUsageProbe {
         return nil
     }
 }
+
+/// Credit windows for one Kiro account's `GetUsageLimits` payload.
+///
+/// `currentUsage` already includes overage. Adding `currentOverages` on top
+/// reports ~15,766 when the account has used ~7,910, and the 50-credit included
+/// allowance is what a free-plan card shows if that total is dropped.
+enum KiroCreditMath {
+    struct Slice: Equatable {
+        let label: String
+        let used: Double
+        let total: Double
+    }
+
+    static func slices(
+        totalUsed: Double,
+        planLimit: Double,
+        overageUsed: Double,
+        overageCap: Double
+    ) -> [Slice] {
+        let used = max(0, totalUsed)
+        let plan = max(0, planLimit)
+        let overUsed = max(0, overageUsed)
+        let overCap = max(0, overageCap)
+        // Free is 50 included under a 10,000 overage cap. Power's plan limit is
+        // already the 10,000 pool, so adding the cap again would show 20,000.
+        let smallPlanUnderOverage = plan > 0 && overCap > plan
+        let ceiling = smallPlanUnderOverage ? plan + overCap : max(plan, overCap)
+        guard ceiling > 0 || used > 0 else { return [] }
+
+        var out = [Slice(label: "Credits", used: used, total: max(ceiling, used))]
+        if overCap > 0, overUsed > 0 || smallPlanUnderOverage {
+            out.append(Slice(label: "Overage", used: overUsed, total: max(overCap, overUsed)))
+        }
+        if smallPlanUnderOverage {
+            let included = min(plan, max(0, used - overUsed))
+            out.append(Slice(label: "Included in plan", used: included, total: plan))
+        }
+        return out
+    }
+
+    /// True when both names are the same Kiro tier. A CLI Power login must not
+    /// replace a builder-id Free account (or the reverse) on the same card.
+    static func samePlan(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let a = planKey(lhs), let b = planKey(rhs) else { return false }
+        return a == b
+    }
+
+    static func planKey(_ raw: String?) -> String? {
+        guard let raw else { return nil }
+        let drop: Set<String> = ["KIRO", "Q", "DEVELOPER", "STANDALONE"]
+        let parts = raw.uppercased()
+            .split { !$0.isLetter && !$0.isNumber }
+            .map(String.init)
+            .filter { !drop.contains($0) }
+        let key = parts.joined(separator: " ")
+        return key.isEmpty ? nil : key
+    }
+}

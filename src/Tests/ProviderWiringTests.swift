@@ -469,6 +469,18 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertEqual(CloudCodeModelFamily.classify(modelID: "gemini-2.5-flash-lite"), .geminiFlash)
     }
 
+    func testKiroPowerCreditsShowUsedAndRemaining() {
+        let window = RateWindow(
+            usedPercent: 0.0498,
+            label: "KIRO POWER credits",
+            remainingValue: 9_995.02,
+            totalValue: 10_000,
+            unitLabel: "credits",
+            displayStyle: .creditsRemaining
+        )
+        XCTAssertEqual(window.primaryMetricText, "4.98 used of 10,000 · 9,995.02 left")
+    }
+
     func testRateWindowDisplayTitlePrefersLabel() {
         let labeled = RateWindow(usedPercent: 10, windowMinutes: 300, label: "5-hour")
         XCTAssertEqual(labeled.displayTitle, "5-hour")

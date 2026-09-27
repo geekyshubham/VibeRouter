@@ -209,7 +209,9 @@ struct ProviderUsageCardView: View {
         } else {
             parts.append("\(active) active · \(accounts.count) total")
         }
-        if pressure > 0 {
+        if let credits = firstCreditMetric() {
+            parts.append(credits)
+        } else if pressure > 0 {
             if showsRemainingPrimary {
                 parts.append("peak \(Int((100 - pressure).rounded()))% left")
             } else {
@@ -221,6 +223,22 @@ struct ProviderUsageCardView: View {
 
     private var peakUsedAcrossAccounts: Double {
         accounts.map { peakUsed($0) }.max() ?? 0
+    }
+
+    /// Absolute used/remaining line for credit plans (Kiro Power). Percent rounds
+    /// 4.98 / 10,000 down to 0%, which hides the numbers.
+    private func firstCreditMetric() -> String? {
+        for account in accounts {
+            if let text = creditMetric(for: account) { return text }
+        }
+        return nil
+    }
+
+    private func creditMetric(for account: AuthAccount) -> String? {
+        let windows = usageForAccount(account)?.windows ?? []
+        return windows.first {
+            $0.displayStyle == .creditsRemaining && ($0.totalValue ?? 0) > 0
+        }?.primaryMetricText
     }
 
     @ViewBuilder
@@ -392,11 +410,21 @@ struct ProviderUsageCardView: View {
                         costPill(label: "30d", volume: cost.last30DaysTokens, unit: cost.volumeUnit, usd: cost.last30DaysCostUSD)
                     }
                 }
-                if let top = cost.models.first {
+                let listed = Array(cost.models.prefix(6))
+                if listed.count == 1, let top = listed.first {
                     Text("Top model: \(top.model) · \(formatVolume(top.totalTokens, unit: top.volumeUnit))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                } else if !listed.isEmpty {
+                    VStack(alignment: .leading, spacing: 1) {
+                        ForEach(Array(listed.enumerated()), id: \.offset) { _, model in
+                            Text("\(model.model) · \(formatVolume(model.totalTokens, unit: model.volumeUnit))")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
                 }
             }
             .padding(.top, 2)
@@ -444,6 +472,7 @@ struct ProviderUsageCardView: View {
     private func compactUsageSummary(for account: AuthAccount) -> String? {
         if account.isExpired { return "expired" }
         if account.isDisabled { return "off" }
+        if let credits = creditMetric(for: account) { return credits }
         let used = peakUsed(account)
         if used <= 0 {
             if usageForAccount(account)?.isRefreshing == true { return "…" }
@@ -623,6 +652,12 @@ private struct AccountUsageBlock: View {
         } else if usage?.isRefreshing == true || isWaking {
             ProgressView()
                 .controlSize(.mini)
+        } else if let credits = creditMetric {
+            Text(credits)
+                .font(.caption2.monospacedDigit().weight(.bold))
+                .foregroundStyle(MenuBarDesign.usageTint(remainingPercent: 100 - (peakUsed ?? 0)))
+                .lineLimit(1)
+                .help(credits)
         } else if let used = peakUsed {
             Text(peakBadgeLabel(used: used))
                 .font(.caption2.monospacedDigit().weight(.bold))
@@ -631,6 +666,13 @@ private struct AccountUsageBlock: View {
                     ? "Lowest remaining window (Cockpit-style)"
                     : "Peak window usage")
         }
+    }
+
+    private var creditMetric: String? {
+        let windows = (usage?.windows ?? []) + (usage?.subAccounts.flatMap(\.windows) ?? [])
+        return windows.first {
+            $0.displayStyle == .creditsRemaining && ($0.totalValue ?? 0) > 0
+        }?.primaryMetricText
     }
 
     private var compactOneLiner: String? {
@@ -1115,6 +1157,7 @@ private struct AccountUsageBlock: View {
                                         usedPercent: window.usedPercent,
                                         resetText: resetText(for: window),
                                         tint: tint,
+                                        metricText: quotaMetric(window),
                                         showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
                                     )
                                 }
@@ -1148,6 +1191,7 @@ private struct AccountUsageBlock: View {
                             usedPercent: window.usedPercent,
                             resetText: resetText(for: window),
                             tint: tint,
+                            metricText: quotaMetric(window),
                             showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
                         )
                     }
@@ -1168,6 +1212,11 @@ private struct AccountUsageBlock: View {
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
+    }
+
+    private func quotaMetric(_ window: RateWindow) -> String? {
+        guard window.displayStyle == .creditsRemaining, (window.totalValue ?? 0) > 0 else { return nil }
+        return window.primaryMetricText
     }
 
     private func quotaTitle(_ window: RateWindow, index: Int) -> String {

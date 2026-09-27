@@ -1199,7 +1199,7 @@ enum VibeRouterCLI {
         guard !snapshots.isEmpty else { return "No local usage history found." }
         var lines = ["\(pad("PROVIDER", 18)) \(pad("SESSION", 16)) \(pad("\(days)-DAY VOLUME", 18)) EST. COST"]
         for row in snapshots.sorted(by: { $0.last30DaysTokens > $1.last30DaysTokens }) {
-            lines.append("\(pad(row.providerID, 18)) \(pad(formatNumber(row.sessionTokens) + " " + row.volumeUnit.rawValue, 16)) \(pad(formatNumber(row.last30DaysTokens) + " " + row.volumeUnit.rawValue, 18)) \(money(row.last30DaysCostUSD))")
+            lines.append("\(pad(row.providerID, 18)) \(pad(UsageNumberFormatter.volume(row.sessionTokens, unit: row.volumeUnit), 16)) \(pad(UsageNumberFormatter.volume(row.last30DaysTokens, unit: row.volumeUnit), 18)) \(money(row.last30DaysCostUSD))")
         }
         return lines.joined(separator: "\n")
     }
