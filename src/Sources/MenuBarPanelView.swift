@@ -78,9 +78,9 @@ struct MenuBarPanelView: View {
             Task {
                 // Force a local cost rescan when Analytics is empty so a failed prior pass
                 // (or launching a stale app binary) does not stick on "No local usage history".
-                if usageStore.analytics == nil {
-                    usageStore.invalidateCostScanThrottle()
-                }
+                // Opening the panel should pick up sessions written since the last scan.
+                // The 15-minute throttle otherwise left 8.2B / $5.3K on screen after new use.
+                usageStore.invalidateCostScanThrottle()
                 await usageStore.refreshVisibleProviders(
                     from: ServiceType.allCases,
                     accounts: authManager.serviceAccounts.mapValues { $0.accounts }
@@ -321,22 +321,27 @@ struct MenuBarPanelView: View {
     }
 
     private func overviewPulse(_ analytics: AnalyticsOverview) -> some View {
-        HStack(spacing: DS.Space.lg) {
+        let today = usageStore.dailySummary
+        let todayModel = today.modelsByCost.first?.usage.model
+        let monthModel = analytics.topModels.first?.model
+        return HStack(spacing: DS.Space.lg) {
             pulseStat(
                 icon: "chart.line.uptrend.xyaxis",
                 label: "30-day volume",
                 value: formatTokens(analytics.totalTokens30d),
+                detail: "today \(formatTokens(today.totalTokens))",
                 valueColor: .primary
             )
-            Divider().frame(height: 30)
+            Divider().frame(height: 36)
             pulseStat(
                 icon: "dollarsign.circle",
                 label: "Est. API $",
-                value: UsageNumberFormatter.usd(analytics.totalCostUSD30d),
+                value: pulseDollars(analytics.totalCostUSD30d),
+                detail: "today \(pulseDollars(today.totalCostUSD))",
                 valueColor: MenuBarDesign.accent
             )
-            if let top = analytics.topModels.first {
-                Divider().frame(height: 30)
+            if let shown = todayModel ?? monthModel {
+                Divider().frame(height: 36)
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 4) {
                         Image(systemName: "star.fill")
@@ -346,10 +351,16 @@ struct MenuBarPanelView: View {
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
-                    Text(top.model)
+                    Text(shown)
                         .font(.caption.weight(.semibold))
                         .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+                        .minimumScaleFactor(0.7)
+                    if let monthModel, shown != monthModel {
+                        Text("30d \(monthModel)")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -358,7 +369,21 @@ struct MenuBarPanelView: View {
         .cardSurface(tint: MenuBarDesign.accent)
     }
 
-    private func pulseStat(icon: String, label: String, value: String, valueColor: Color) -> some View {
+    /// Full dollars below $100k. "$5.3K" hid every new session until the next hundred dollars.
+    private func pulseDollars(_ value: Double) -> String {
+        let magnitude = abs(value)
+        if magnitude >= 100_000 { return UsageNumberFormatter.usd(value) }
+        let sign = value < 0 ? "-" : ""
+        let formatter = NumberFormatter()
+        formatter.locale = Locale(identifier: "en_US")
+        formatter.numberStyle = .decimal
+        formatter.minimumFractionDigits = 2
+        formatter.maximumFractionDigits = 2
+        let digits = formatter.string(from: NSNumber(value: magnitude)) ?? String(format: "%.2f", magnitude)
+        return "\(sign)$\(digits)"
+    }
+
+    private func pulseStat(icon: String, label: String, value: String, detail: String, valueColor: Color) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Image(systemName: icon)
@@ -373,6 +398,14 @@ struct MenuBarPanelView: View {
                 .foregroundStyle(valueColor)
                 .monospacedDigit()
                 .contentTransition(.numericText())
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            Text(detail)
+                .font(.system(size: 9, design: .rounded))
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }

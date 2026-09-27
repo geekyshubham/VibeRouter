@@ -40,10 +40,12 @@ final class UsageStore: ObservableObject {
         lastCostScanAt = nil
     }
 
-    /// Cheap freshness probe: newest mtime among local-usage roots *and one level of
-    /// children*. Nested trees (e.g. `~/.grok/sessions/<project>/<id>/signals.json`) do not
-    /// always bump the grandparent dir mtime, so a root-only probe missed Grok/Kiro flushes.
-    /// ponytail: shallow walk capped at 400 entries — deep trees wait for the throttle window.
+    /// Newest mtime under the local-usage roots. A parent directory's mtime does not
+    /// move when an existing session file is rewritten, and Kiro keeps thousands of
+    /// session files in one folder — a short listing missed the file that just changed
+    /// and the 30-day card stayed on the previous scan.
+    /// ponytail: walk at most three levels and 80k entries. If the cap trips, report
+    /// "now" so the next refresh rescans instead of skipping.
     private func newestLocalUsageActivity() -> Date? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let roots = [
@@ -57,23 +59,26 @@ final class UsageStore: ObservableObject {
         ]
         let fm = FileManager.default
         var newest: Date?
-        var budget = 400
-        for rel in roots {
-            let url = home.appendingPathComponent(rel)
+        var budget = 80_000
+        func consider(_ url: URL, depth: Int) {
+            guard budget > 0 else { return }
+            budget -= 1
             if let m = modificationDate(at: url), newest == nil || m > newest! { newest = m }
-            guard budget > 0,
+            guard depth < 3 else { return }
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue,
                   let kids = try? fm.contentsOfDirectory(
                       at: url,
-                      includingPropertiesForKeys: [.contentModificationDateKey],
+                      includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
                       options: [.skipsHiddenFiles]
                   )
-            else { continue }
-            for kid in kids {
-                guard budget > 0 else { break }
-                budget -= 1
-                if let m = modificationDate(at: kid), newest == nil || m > newest! { newest = m }
-            }
+            else { return }
+            for kid in kids { consider(kid, depth: depth + 1) }
         }
+        for rel in roots {
+            consider(home.appendingPathComponent(rel), depth: 0)
+        }
+        if budget == 0 { return Date() }
         return newest
     }
 
