@@ -14,25 +14,164 @@ enum KiroDirectProvider {
     static let endpoint = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
     static let modelPrefix = "kiro/"
 
-    /// Model IDs this account can actually reach. Anything else is rejected
-    /// upstream with INVALID_MODEL_ID, so the list is deliberately not wider.
-    static let upstreamModelIDs = [
-        "auto",
-        "claude-sonnet-4.5",
-        "claude-sonnet-4",
-        "claude-haiku-4.5",
+    struct CatalogModel: Equatable {
+        let id: String
+        let blurb: String
+    }
+
+    /// Used when `kiro-cli chat --list-models` is unavailable. Kept in the
+    /// same order the CLI prints, so the picker matches Kiro.
+    static let fallbackModels: [CatalogModel] = [
+        CatalogModel(id: "auto", blurb: "Kiro picks the model"),
+        CatalogModel(id: "claude-opus-5.5", blurb: "Claude Opus 5.5"),
+        CatalogModel(id: "claude-opus-5", blurb: "Claude Opus 5"),
+        CatalogModel(id: "claude-sonnet-5", blurb: "Claude Sonnet 5"),
+        CatalogModel(id: "claude-opus-4.8", blurb: "Claude Opus 4.8"),
+        CatalogModel(id: "gpt-5.6-sol", blurb: "GPT 5.6 Sol"),
+        CatalogModel(id: "gpt-5.6-terra", blurb: "GPT 5.6 Terra"),
+        CatalogModel(id: "gpt-5.6-luna", blurb: "GPT 5.6 Luna"),
+        CatalogModel(id: "claude-opus-4.7", blurb: "Claude Opus 4.7"),
+        CatalogModel(id: "claude-opus-4.6", blurb: "Claude Opus 4.6"),
+        CatalogModel(id: "claude-sonnet-4.6", blurb: "Claude Sonnet 4.6"),
+        CatalogModel(id: "claude-opus-4.5", blurb: "Claude Opus 4.5"),
+        CatalogModel(id: "claude-sonnet-4.5", blurb: "Claude Sonnet 4.5"),
+        CatalogModel(id: "claude-sonnet-4", blurb: "Claude Sonnet 4"),
+        CatalogModel(id: "claude-haiku-4.5", blurb: "Claude Haiku 4.5"),
+        CatalogModel(id: "deepseek-3.2", blurb: "DeepSeek 3.2"),
+        CatalogModel(id: "minimax-m2.5", blurb: "MiniMax M2.5"),
+        CatalogModel(id: "minimax-m2.1", blurb: "MiniMax M2.1"),
+        CatalogModel(id: "glm-5", blurb: "GLM-5"),
+        CatalogModel(id: "qwen3-coder-next", blurb: "Qwen3 Coder Next"),
     ]
 
-    static var advertisedModelIDs: [String] { upstreamModelIDs.map { modelPrefix + $0 } }
+    /// Bare IDs the first executor accepted. New models are `kiro/<id>` only,
+    /// so a plain `claude-opus-4-8` still belongs to whatever provider serves it.
+    private static let legacyBareIDs: Set<String> = [
+        "auto", "claude-sonnet-4.5", "claude-sonnet-4", "claude-haiku-4.5",
+    ]
+
+    private static let catalogLock = NSLock()
+    private static var catalogCache: (at: Date, ttl: TimeInterval, models: [CatalogModel])?
+
+    /// Live `kiro-cli --list-models` when it answers, otherwise `fallbackModels`.
+    static func catalog() -> [CatalogModel] {
+        catalogLock.lock()
+        if let catalogCache, Date().timeIntervalSince(catalogCache.at) < catalogCache.ttl {
+            let models = catalogCache.models
+            catalogLock.unlock()
+            return models
+        }
+        catalogLock.unlock()
+        if let live = fetchCLIModels(), !live.isEmpty {
+            storeCatalog(live, ttl: 600)
+            return live
+        }
+        storeCatalog(fallbackModels, ttl: 60)
+        return fallbackModels
+    }
+
+    static func parseListModelsJSON(_ data: Data) -> [CatalogModel] {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rows = root["models"] as? [[String: Any]]
+        else { return [] }
+        var seen = Set<String>()
+        var models: [CatalogModel] = []
+        for row in rows {
+            guard let id = row["model_id"] as? String ?? row["modelId"] as? String,
+                  isSafeModelID(id), seen.insert(id).inserted
+            else { continue }
+            let blurb = (row["description"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            models.append(CatalogModel(id: id, blurb: blurb.isEmpty ? id : blurb))
+        }
+        return models
+    }
+
+    static var advertisedModelIDs: [String] { catalog().map { modelPrefix + $0.id } }
+
+    /// Picker title. Claude Code shows this instead of the raw id.
+    static func pickerLabel(forUpstreamID id: String) -> String {
+        "[VibeRouter] Kiro · \(prettyModelName(id))"
+    }
+
+    static func catalogEntry(for model: CatalogModel) -> [String: Any] {
+        [
+            "id": modelPrefix + model.id,
+            "object": "model",
+            "type": "model",
+            "owned_by": "viberouter",
+            "display_name": pickerLabel(forUpstreamID: model.id),
+            "description": "Kiro via VibeRouter — \(model.blurb)",
+        ]
+    }
 
     static func isKiroModel(_ model: String) -> Bool {
         upstreamModel(for: model) != nil
     }
 
-    /// Accepts `kiro/claude-sonnet-4.5` and the bare `claude-sonnet-4.5`.
+    /// `kiro/claude-opus-5.5` and the original bare Sonnet/Haiku/auto IDs.
     static func upstreamModel(for model: String) -> String? {
-        let trimmed = model.hasPrefix(modelPrefix) ? String(model.dropFirst(modelPrefix.count)) : model
-        return upstreamModelIDs.contains(trimmed) ? trimmed : nil
+        let raw = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        if raw.hasPrefix(modelPrefix) {
+            let id = String(raw.dropFirst(modelPrefix.count))
+            return isSafeModelID(id) ? id : nil
+        }
+        return legacyBareIDs.contains(raw) ? raw : nil
+    }
+
+    static func isSafeModelID(_ id: String) -> Bool {
+        guard !id.isEmpty, id.count <= 80, !id.contains("/"), !id.contains(" ") else { return false }
+        return id.unicodeScalars.allSatisfy { scalar in
+            CharacterSet.alphanumerics.contains(scalar) || scalar == "." || scalar == "_" || scalar == "-"
+        }
+    }
+
+    private static func prettyModelName(_ id: String) -> String {
+        id.split(separator: "-").map { part in
+            guard let first = part.first else { return "" }
+            if first.isNumber { return String(part) }
+            return first.uppercased() + part.dropFirst()
+        }.joined(separator: " ")
+    }
+
+    private static func storeCatalog(_ models: [CatalogModel], ttl: TimeInterval) {
+        catalogLock.lock()
+        catalogCache = (Date(), ttl, models)
+        catalogLock.unlock()
+    }
+
+    private static func fetchCLIModels() -> [CatalogModel]? {
+        let binary = resolveKiroCLI()
+        guard let binary else { return nil }
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: binary)
+        proc.arguments = ["chat", "--list-models", "--format", "json"]
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        do { try proc.run() } catch { return nil }
+        let deadline = Date().addingTimeInterval(12)
+        while proc.isRunning, Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.05)
+        }
+        if proc.isRunning {
+            proc.terminate()
+            return nil
+        }
+        proc.waitUntilExit()
+        let data = out.fileHandleForReading.readDataToEndOfFile()
+        let models = parseListModelsJSON(data)
+        return models.isEmpty ? nil : models
+    }
+
+    private static func resolveKiroCLI() -> String? {
+        let fm = FileManager.default
+        let candidates = [
+            "/opt/homebrew/bin/kiro-cli",
+            "/usr/local/bin/kiro-cli",
+            fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/kiro-cli").path,
+        ]
+        return candidates.first { fm.isExecutableFile(atPath: $0) }
     }
 
     // MARK: - Credentials

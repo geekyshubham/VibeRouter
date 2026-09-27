@@ -362,12 +362,33 @@ class ThinkingProxy {
                     models = list
                 }
             }
+            models = models.map(Self.tagVibeRouterModel)
             let existing = Set(models.compactMap { $0["id"] as? String })
-            for id in KiroDirectProvider.advertisedModelIDs where !existing.contains(id) {
-                models.append(["id": id, "object": "model", "owned_by": "kiro"])
+            for model in KiroDirectProvider.catalog() {
+                let entry = KiroDirectProvider.catalogEntry(for: model)
+                guard let id = entry["id"] as? String, !existing.contains(id) else { continue }
+                models.append(entry)
             }
-            self.sendJSON(["object": "list", "data": models], status: 200, to: connection)
+            var payload: [String: Any] = ["object": "list", "data": models, "has_more": false]
+            if let first = models.first?["id"] as? String { payload["first_id"] = first }
+            if let last = models.last?["id"] as? String { payload["last_id"] = last }
+            self.sendJSON(payload, status: 200, to: connection)
         }
+    }
+
+    /// Claude Code's `/model` picker shows `display_name` and `description`.
+    /// Without a description the row just says "From gateway".
+    private static func tagVibeRouterModel(_ entry: [String: Any]) -> [String: Any] {
+        var entry = entry
+        guard let id = entry["id"] as? String, !id.isEmpty else { return entry }
+        if (entry["display_name"] as? String)?.isEmpty != false {
+            entry["display_name"] = "[VibeRouter] \(id)"
+        }
+        if (entry["description"] as? String)?.isEmpty != false {
+            entry["description"] = "via VibeRouter"
+        }
+        if entry["type"] == nil { entry["type"] = "model" }
+        return entry
     }
 
     private func sendJSON(_ object: [String: Any], status: Int, to connection: NWConnection) {

@@ -163,24 +163,53 @@ enum CLIHarnessAutoconfigure {
 
         let url = claudeDir.appendingPathComponent("settings.viberouter.json")
         try backupIfNeeded(url)
-        let kiroModel = resolveLiveKiroModel(port: proxyPort) ?? "kiro/claude-sonnet-4.5"
+        let kiro = KiroDirectProvider.catalog()
+        func kiroID(_ match: (String) -> Bool, fallback: String) -> String {
+            if let id = kiro.first(where: { match($0.id) })?.id { return "kiro/\(id)" }
+            return fallback
+        }
+        let opus = kiroID({ $0.contains("opus") }, fallback: "kiro/claude-opus-5.5")
+        let sonnet = kiroID({ $0.contains("sonnet") }, fallback: "kiro/claude-sonnet-4.5")
+        let haiku = kiroID({ $0.contains("haiku") }, fallback: sonnet)
+        let main = kiro.contains(where: { $0.id == "claude-opus-5.5" }) ? "kiro/claude-opus-5.5" : opus
+        var options: [[String: Any]] = kiro.map { model in
+            [
+                "model": "kiro/\(model.id)",
+                "label": KiroDirectProvider.pickerLabel(forUpstreamID: model.id),
+                "description": "Kiro via VibeRouter",
+            ]
+        }
+        let kiroIDs = Set(options.compactMap { $0["model"] as? String })
+        for id in fetchProxyModelIDs(port: proxyPort) where !kiroIDs.contains(id) && !id.hasPrefix("kiro/") {
+            options.append([
+                "model": id,
+                "label": "[VibeRouter] \(id)",
+                "description": "via VibeRouter",
+            ])
+        }
         let root: [String: Any] = [
             "env": [
                 "ANTHROPIC_BASE_URL": baseURL,
                 "ANTHROPIC_API_KEY": apiKey,
                 "ANTHROPIC_AUTH_TOKEN": apiKey,
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": kiroModel,
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "[VibeRouter] \(kiroModel)",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": kiroModel,
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "[VibeRouter] \(kiroModel)",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "kiro/claude-haiku-4.5",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "[VibeRouter] kiro/claude-haiku-4.5",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "Kiro via VibeRouter — not Anthropic Cloud",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "[VibeRouter] \(opus)",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "Kiro via VibeRouter",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "[VibeRouter] \(sonnet)",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "Kiro via VibeRouter",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "[VibeRouter] \(haiku)",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "Kiro via VibeRouter",
             ],
-            "model": kiroModel,
+            "model": main,
+            // This file is passed with --settings, which is allowed to set the picker.
+            // Only these rows, each labeled [VibeRouter], so the lineup is the proxy.
+            "modelPicker": [
+                "replaceBuiltInOptions": true,
+                "options": options,
+            ],
         ]
         try writeJSON(root, to: url)
         try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
@@ -236,6 +265,14 @@ enum CLIHarnessAutoconfigure {
         """
         try contents.write(to: script, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let localBin = home.appendingPathComponent(".local/bin")
+        try? FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
+        let link = localBin.appendingPathComponent("claude-viberouter")
+        if FileManager.default.fileExists(atPath: link.path) {
+            try? FileManager.default.removeItem(at: link)
+        }
+        try? FileManager.default.copyItem(at: script, to: link)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: link.path)
     }
 
     private static func configureCodex(baseURL: String, apiKey: String) throws {
