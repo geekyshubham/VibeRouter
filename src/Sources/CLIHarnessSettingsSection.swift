@@ -76,7 +76,7 @@ struct CLIHarnessSettingsSection: View {
         } header: {
             Text("CLI tools → proxy")
         } footer: {
-            Text("Writes proxy config into each tool (Claude Code: settings.viberouter.json + claude-viberouter, leaving your subscription on `claude`). Backup: *.viberouter-bak.")
+            Text("Writes proxy config into each tool (Claude Code: settings.viberouter.json + claude-viberouter, with separate session settings so `claude` keeps your subscription). Backup: *.viberouter-bak.")
                 .font(.caption2)
         }
         .onAppear {

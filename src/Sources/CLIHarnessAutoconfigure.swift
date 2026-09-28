@@ -47,7 +47,7 @@ struct CLIHarness: Identifiable, Equatable {
         var notes: String {
             switch self {
             case .claudeCode:
-                return "Writes ~/.claude/settings.viberouter.json + ~/bin/claude-viberouter (keeps subscription in settings.json)"
+                return "Writes ~/.claude/settings.viberouter.json + ~/bin/claude-viberouter (isolates proxy sessions in ~/.claude-viberouter)"
             case .codex:
                 return "Adds a VibeRouter model_provider in ~/.codex/config.toml"
             case .openCode:
@@ -156,10 +156,10 @@ enum CLIHarnessAutoconfigure {
         let claudeDir = home.appendingPathComponent(".claude")
         try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
 
-        // Never rewrite ~/.claude/settings.json — that hijacks the Anthropic
-        // OAuth subscription and can violate ToS. Proxy config lives in a sidecar
-        // file launched via `claude-viberouter`, matching the claude-kiro pattern.
-        try stripProxyEnvFromMainClaudeSettings(in: claudeDir)
+        // Clean up settings left by older installs and by Claude Code's /model
+        // command. Proxy sessions get their own config directory below so later
+        // model changes cannot be persisted into the native subscription.
+        try stripProxySettingsFromMainClaudeSettings(in: claudeDir)
 
         let url = claudeDir.appendingPathComponent("settings.viberouter.json")
         try backupIfNeeded(url)
@@ -215,13 +215,14 @@ enum CLIHarnessAutoconfigure {
         try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
     }
 
-    /// Removes proxy env keys from the main Claude Code settings so `claude`
-    /// keeps talking to api.anthropic.com with the user's subscription.
-    private static func stripProxyEnvFromMainClaudeSettings(in claudeDir: URL) throws {
+    /// Removes proxy settings that may have been persisted by an older launcher.
+    /// Keep native model choices and unrelated Claude preferences intact.
+    static func stripProxySettingsFromMainClaudeSettings(in claudeDir: URL) throws {
         let main = claudeDir.appendingPathComponent("settings.json")
         guard FileManager.default.fileExists(atPath: main.path) else { return }
         var root = try readJSONForMerge(main)
-        guard var env = root["env"] as? [String: Any] else { return }
+        var env = root["env"] as? [String: Any] ?? [:]
+        let oldRoot = root
         let proxyKeys = [
             "ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY",
@@ -235,6 +236,25 @@ enum CLIHarnessAutoconfigure {
         } else {
             root["env"] = env
         }
+        if let model = root["model"] as? String,
+           model.hasPrefix("kiro/") || model.hasPrefix("[Kiro]") {
+            let backup = URL(fileURLWithPath: main.path + backupSuffix)
+            let previous = (try? readJSONForMerge(backup))?["model"] as? String
+            if let previous, !previous.hasPrefix("kiro/"), !previous.hasPrefix("[Kiro]") {
+                root["model"] = previous
+            } else {
+                root.removeValue(forKey: "model")
+            }
+        }
+        if root["modelPicker"] != nil {
+            let picker = root["modelPicker"] as? [String: Any]
+            let options = picker?["options"] as? [[String: Any]] ?? []
+            if options.contains(where: { ($0["model"] as? String)?.hasPrefix("kiro/") == true }) {
+                root.removeValue(forKey: "modelPicker")
+            }
+        }
+        guard !NSDictionary(dictionary: root).isEqual(to: oldRoot) else { return }
+        try backupIfNeeded(main)
         try writeJSON(root, to: main)
     }
 
@@ -258,6 +278,10 @@ enum CLIHarnessAutoconfigure {
           echo "VibeRouter is not running. Start VibeRouter.app first." >&2
           exit 1
         fi
+        # Claude Code saves /model choices in its config directory. Keep proxy
+        # selections separate from the native `claude` subscription.
+        export CLAUDE_CONFIG_DIR="$HOME/.claude-viberouter"
+        mkdir -p "$CLAUDE_CONFIG_DIR"
         unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
         export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
         echo "Starting Claude Code via VibeRouter (\(baseURL)). Anthropic subscription: claude"
@@ -716,4 +740,3 @@ enum CLIHarnessAutoconfigure {
         }
     }
 }
-
