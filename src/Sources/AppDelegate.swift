@@ -85,7 +85,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         RemotePricingCatalog.bootstrap()
         // Load persisted per-day usage before the first scan, so the date pickers can show
         // history immediately instead of looking empty until a scan lands.
-        UsageDailyStore.bootstrap()
+        UsageDailyStore.bootstrap(historyDays: AppSettings.shared.analyticsHistoryDays)
         usageStore.refreshDailySummary()
         usageStore.startAutoRefresh()
         // Keep OAuth access tokens fresh (refresh ~15 minutes before expiry).

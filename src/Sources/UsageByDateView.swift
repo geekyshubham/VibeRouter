@@ -135,7 +135,7 @@ struct UsageByDateView: View {
             stat(
                 icon: "number",
                 label: "Tokens",
-                value: UsageNumberFormatter.tokens(summary.totalTokens),
+                value: UsageNumberFormatter.tokens(summary.totalTokens, estimated: summary.totalEstimatedTokens),
                 tint: .primary
             )
             Divider().frame(height: 28)

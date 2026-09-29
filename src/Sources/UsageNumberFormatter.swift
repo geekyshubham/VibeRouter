@@ -49,6 +49,19 @@ enum UsageNumberFormatter {
         }
     }
 
+    /// Exact tokens with estimates alongside, never summed: "1.2M +3.4M est".
+    static func tokens(_ exact: Int, estimated: Int) -> String {
+        guard estimated > 0 else { return tokens(exact) }
+        let estimate = volume(estimated, unit: .estimatedTokens)
+        return exact > 0 ? "\(tokens(exact)) +\(estimate)" : estimate
+    }
+
+    /// Cost with estimate-only cost alongside: "$12.40 +$3.10 est".
+    static func usd(_ exact: Double, estimated: Double) -> String {
+        guard estimated >= 0.005 else { return usd(exact) }
+        return "\(usd(exact)) +\(usd(estimated)) est"
+    }
+
     /// Kiro plan credits, stored as millicredits for sub-credit precision.
     /// Keeps two decimals below 1 credit so a fractional spend never shows as "0".
     static func credits(millicredits: Int) -> String {

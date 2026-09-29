@@ -55,18 +55,30 @@ struct AnalyticsDashboardView: View {
             StatTile(
                 label: "30-day volume",
                 value: formatTokens(overview.totalTokens30d),
-                sublabel: settings.showCostEstimates ? formatUSD(overview.totalCostUSD30d) : nil,
+                sublabel: totalsSublabel(cost: overview.totalCostUSD30d, estimatedCost: overview.estimatedCostUSD30d, estimated: overview.estimatedTokens30d),
                 systemImage: "calendar",
                 tint: MenuBarDesign.accent
             )
             StatTile(
                 label: "Today",
                 value: formatTokens(overview.totalTokensSession),
-                sublabel: settings.showCostEstimates ? formatUSD(overview.totalCostUSDSession) : nil,
+                sublabel: totalsSublabel(cost: overview.totalCostUSDSession, estimatedCost: overview.estimatedCostUSDSession, estimated: overview.estimatedTokensSession),
                 systemImage: "sun.max.fill",
                 tint: MenuBarDesign.accent
             )
         }
+    }
+
+    /// Estimated tokens are never folded into the exact total; they ride alongside it.
+    private func totalsSublabel(cost: Double, estimatedCost: Double, estimated: Int) -> String? {
+        Self.totalsSublabel(cost: settings.showCostEstimates ? cost : nil, estimatedCost: estimatedCost, estimated: estimated)
+    }
+
+    static func totalsSublabel(cost: Double?, estimatedCost: Double, estimated: Int) -> String? {
+        var parts: [String] = []
+        if let cost { parts.append(UsageNumberFormatter.usd(cost, estimated: estimatedCost)) }
+        if estimated > 0 { parts.append("+" + UsageNumberFormatter.volume(estimated, unit: .estimatedTokens)) }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     private func providerSection(_ overview: AnalyticsOverview) -> some View {
@@ -156,56 +168,88 @@ struct AnalyticsDashboardView: View {
             Text("Most used models")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-            ForEach(overview.topModels.prefix(compact ? 5 : 10)) { model in
-                HStack(alignment: .firstTextBaseline) {
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text(model.model)
-                            .font(.caption.weight(.medium))
-                            .lineLimit(1)
-                        Text(modelDetailLine(model))
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                        if settings.showCostEstimates {
-                            Text(rateLabel(for: model))
-                                .font(.caption2)
-                                .foregroundStyle(.tertiary)
-                                .lineLimit(1)
-                        }
-                    }
-                    Spacer()
-                    VStack(alignment: .trailing, spacing: 1) {
-                        Text(formatVolume(model.totalTokens, unit: model.volumeUnit))
-                            .font(.caption.monospacedDigit().weight(.semibold))
-                        if settings.showCostEstimates {
-                            Text(formatUSD(model.estimatedCostUSD))
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+            ForEach(Array(overview.topModels.prefix(compact ? 5 : 10).enumerated()), id: \.offset) { _, model in
+                modelRow(model)
+            }
+            if !overview.topEstimatedModels.isEmpty {
+                Text("Estimated volume")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, 4)
+                ForEach(Array(overview.topEstimatedModels.prefix(compact ? 3 : 6).enumerated()), id: \.offset) { _, model in
+                    modelRow(model)
                 }
-                .padding(.vertical, 2)
             }
         }
         .padding(10)
         .cardSurface(tint: MenuBarDesign.accent)
     }
 
-    private func modelDetailLine(_ model: ModelTokenUsage) -> String {
+    private func modelRow(_ model: ModelTokenUsage) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(model.model)
+                    .font(.caption.weight(.medium))
+                    .lineLimit(1)
+                Text(Self.modelDetailLine(model, format: formatTokens))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                if settings.showCostEstimates, let rate = Self.rateLabel(for: model) {
+                    Text(rate)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(formatVolume(model.totalTokens, unit: model.volumeUnit))
+                    .font(.caption.monospacedDigit().weight(.semibold))
+                if settings.showCostEstimates {
+                    Text(formatUSD(model.estimatedCostUSD))
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.vertical, 2)
+    }
+
+    /// Estimated rows name how they were estimated; a zero request count is omitted, not shown as "0 msg".
+    static func modelDetailLine(_ model: ModelTokenUsage, format: (Int) -> String) -> String {
         switch model.volumeUnit {
         case .credits:
             return "\(model.requestCount) req · credits (local sessions)"
         case .estimatedTokens:
-            return "\(model.requestCount) msg · est. tokens (chars÷4)"
+            var parts: [String] = []
+            if model.requestCount > 0 {
+                let noun = LocalKiroCredits.isProxyEstimateRow(model.model) ? "req, credits not recorded" : "req"
+                parts.append("\(model.requestCount) \(noun)")
+            }
+            parts.append(model.estimateBasis ?? "est. tokens")
+            return parts.joined(separator: " · ")
         case .tokens:
-            return "\(model.requestCount) req · \(formatTokens(model.inputTokens)) in / \(formatTokens(model.outputTokens)) out"
+            return tokenBreakdownLine(model, format: format)
         }
     }
 
-    private func rateLabel(for model: ModelTokenUsage) -> String {
+    /// Uncached input, cache read, cache write, output — the same split for every provider.
+    static func tokenBreakdownLine(_ model: ModelTokenUsage, format: (Int) -> String) -> String {
+        var parts = ["\(model.requestCount) req", "\(format(model.inputTokens)) in"]
+        if model.cacheReadTokens > 0 { parts.append("\(format(model.cacheReadTokens)) cache read") }
+        if model.cacheWriteTokens > 0 { parts.append("\(format(model.cacheWriteTokens)) cache write") }
+        parts.append("\(format(model.outputTokens)) out")
+        return parts.joined(separator: " · ")
+    }
+
+    /// Nil for estimate rows that carry no cost, so no list price sits beside a $0 figure.
+    static func rateLabel(for model: ModelTokenUsage) -> String? {
+        if TokenPricingCatalog.isUnpriced(model.model) { return "unpriced — model unknown" }
         switch model.volumeUnit {
         case .credits:
-            return String(format: "credits × $%.2f (API-eq.)", TokenPricingCatalog.kiroUSDPerCredit)
+            return "credits × overage rate (est.)"
         case .estimatedTokens:
+            guard model.estimatedCostUSD > 0 else { return nil }
             return "est. volume · " + TokenPricingCatalog.rate(forModel: model.model).listPriceLabel
         case .tokens:
             return TokenPricingCatalog.rate(forModel: model.model).listPriceLabel
@@ -227,8 +271,8 @@ struct AnalyticsDashboardView: View {
 
     private var footnote: some View {
         Text(settings.showCostEstimates
-            ? "Token totals exclude Kiro credits. Models priced from list rates (CodexBar tables). Kiro analytics = local session credits × $0.04 (API-eq.); quota bar uses `kiro-cli /usage` separately. Not your invoice."
-            : "Token-like volume from CLI logs (Kiro credits listed separately). Kiro quota uses `kiro-cli /usage` (billing period), not the rolling window.")
+            ? "Token totals are exact tokens only; estimated tokens and Kiro credits are listed separately. Models priced from list rates (CodexBar tables). Kiro analytics = local session credits × $0.04 overage rate (est.); quota bar uses Kiro GetUsageLimits per login. Not your invoice."
+            : "Exact token volume from CLI logs; estimated tokens and Kiro credits are listed separately. Kiro quota uses Kiro GetUsageLimits per login (billing period), not the rolling window.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)

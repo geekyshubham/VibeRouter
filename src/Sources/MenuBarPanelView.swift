@@ -198,7 +198,7 @@ struct MenuBarPanelView: View {
 
     @ViewBuilder
     private var overviewContent: some View {
-        if let analytics = usageStore.analytics, analytics.totalTokens30d > 0 {
+        if let analytics = usageStore.analytics, analytics.totalTokens30d > 0 || analytics.estimatedTokens30d > 0 {
             overviewPulse(analytics)
         }
 
@@ -328,8 +328,10 @@ struct MenuBarPanelView: View {
             pulseStat(
                 icon: "chart.line.uptrend.xyaxis",
                 label: "30-day volume",
-                value: formatTokens(analytics.totalTokens30d),
-                detail: "today \(formatTokens(today.totalTokens))",
+                value: analytics.totalTokens30d > 0
+                    ? formatTokens(analytics.totalTokens30d)
+                    : UsageNumberFormatter.volume(analytics.estimatedTokens30d, unit: .estimatedTokens),
+                detail: "today \(UsageNumberFormatter.tokens(today.totalTokens, estimated: today.totalEstimatedTokens))",
                 valueColor: .primary
             )
             Divider().frame(height: 36)
@@ -337,7 +339,9 @@ struct MenuBarPanelView: View {
                 icon: "dollarsign.circle",
                 label: "Est. API $",
                 value: pulseDollars(analytics.totalCostUSD30d),
-                detail: "today \(pulseDollars(today.totalCostUSD))",
+                detail: analytics.estimatedCostUSD30d >= 0.005
+                    ? "today \(pulseDollars(today.totalCostUSD)) · +\(UsageNumberFormatter.usd(analytics.estimatedCostUSD30d)) est"
+                    : "today \(pulseDollars(today.totalCostUSD))",
                 valueColor: MenuBarDesign.accent
             )
             if let shown = todayModel ?? monthModel {

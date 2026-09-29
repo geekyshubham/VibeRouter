@@ -1,5 +1,11 @@
 import Foundation
 
+func analyticsCutoffStart(now: Date, historyDays: Int) -> Date {
+    let lookback = max(0, historyDays - 1)
+    let cutoffDate = Calendar.current.date(byAdding: .day, value: -lookback, to: now) ?? now
+    return Calendar.current.startOfDay(for: cutoffDate)
+}
+
 /// Date-indexed usage types shared by the menu bar panel and the management console.
 ///
 /// Why a separate day model at all: every local aggregator already buckets by
@@ -54,9 +60,11 @@ struct UsageDayKey: Hashable, Codable, Comparable, CustomStringConvertible {
 /// One model's usage on one day for one provider.
 struct DailyModelUsage: Codable, Equatable {
     let model: String
+    /// Uncached input only; cache reads and writes are reported separately.
     var inputTokens: Int
     var outputTokens: Int
     var cacheReadTokens: Int
+    var cacheWriteTokens: Int = 0
     /// Volume in `volumeUnit` (tokens, millicredits, or estimated tokens).
     var totalVolume: Int
     var estimatedCostUSD: Double
@@ -67,17 +75,33 @@ struct DailyModelUsage: Codable, Equatable {
         inputTokens += other.inputTokens
         outputTokens += other.outputTokens
         cacheReadTokens += other.cacheReadTokens
+        cacheWriteTokens += other.cacheWriteTokens
         totalVolume += other.totalVolume
         estimatedCostUSD += other.estimatedCostUSD
         requestCount += other.requestCount
     }
 }
 
+extension DailyModelUsage {
+    /// Rows written before `cacheWriteTokens` existed decode with 0.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        model = try container.decode(String.self, forKey: .model)
+        inputTokens = try container.decode(Int.self, forKey: .inputTokens)
+        outputTokens = try container.decode(Int.self, forKey: .outputTokens)
+        cacheReadTokens = try container.decode(Int.self, forKey: .cacheReadTokens)
+        cacheWriteTokens = try container.decodeIfPresent(Int.self, forKey: .cacheWriteTokens) ?? 0
+        totalVolume = try container.decode(Int.self, forKey: .totalVolume)
+        estimatedCostUSD = try container.decode(Double.self, forKey: .estimatedCostUSD)
+        requestCount = try container.decode(Int.self, forKey: .requestCount)
+        volumeUnit = try container.decode(UsageVolumeUnit.self, forKey: .volumeUnit)
+    }
+}
+
 /// How precisely a provider's usage can be attributed to a specific calendar day.
 ///
-/// Not cosmetic: Grok pins a whole session's estimate to its last-activity day
-/// ("multi-day split would need per-turn updates.jsonl sums" — LocalUsageAggregators),
-/// and Copilot's file cache keeps only `days: [Int: Int]` with no model dimension.
+/// Not cosmetic: Grok sessions without usage.json pin a whole session's estimate to its
+/// last-activity day, and Copilot JetBrains transcripts have no per-model split.
 /// Presenting those as exact per-day figures next to Codex/Claude would be dishonest.
 enum DailyUsageFidelity: String, Codable, Equatable {
     /// Per-event timestamps bucketed per day, with a real per-model split.
@@ -86,6 +110,10 @@ enum DailyUsageFidelity: String, Codable, Equatable {
     case dayTotalsOnly
     /// A whole session's volume attributed to a single day; multi-day sessions smear.
     case sessionApproximate
+    /// Some source logs could not be read, so the day may be understated.
+    case partial
+    /// Written by an older build whose source logs are gone, so it cannot be re-verified.
+    case legacy
 
     var isApproximate: Bool { self != .exact }
 
@@ -95,8 +123,28 @@ enum DailyUsageFidelity: String, Codable, Equatable {
         case .exact: return nil
         case .dayTotalsOnly: return "day total only — no per-model split"
         case .sessionApproximate: return "approximate — whole sessions land on one day"
+        case .partial: return "partial — some session logs could not be read"
+        case .legacy: return "from an older build, unverified"
         }
     }
+}
+
+/// Day range a provider's scan fully covers, plus the source files it read (path -> mtime).
+/// Inside the range the scan is authoritative: stored days it did not report had no usage.
+struct DailyScanCoverage: Equatable {
+    let from: UsageDayKey
+    let through: UsageDayKey
+    var sources: [String: Double] = [:]
+}
+
+/// One provider's result from one scan sweep. `coverage` is nil when the scan failed or
+/// cannot prove completeness, in which case its rows only replace, never delete.
+struct ProviderDailyScan: Equatable {
+    let providerID: String
+    let days: [UsageDayKey: DailyProviderUsage]
+    let coverage: DailyScanCoverage?
+
+    var isAuthoritative: Bool { coverage != nil }
 }
 
 /// One provider's usage on one day.
@@ -106,12 +154,20 @@ struct DailyProviderUsage: Codable, Equatable {
     let volumeUnit: UsageVolumeUnit
     let fidelity: DailyUsageFidelity
 
-    var totalVolume: Int { models.reduce(0) { $0 + $1.totalVolume } }
+    /// Sums only rows in the provider's own unit: no estimates in exact tokens, no tokens in millicredits.
+    var totalVolume: Int {
+        models.filter { $0.volumeUnit == volumeUnit }.reduce(0) { $0 + $1.totalVolume }
+    }
     var totalCostUSD: Double { models.reduce(0) { $0 + $1.estimatedCostUSD } }
     var requestCount: Int { models.reduce(0) { $0 + $1.requestCount } }
 
-    /// Volume that may be summed into a cross-provider token total.
-    var tokenLikeVolume: Int { volumeUnit.aggregatesAsTokens ? totalVolume : 0 }
+    /// Exact tokens that may be summed into a cross-provider token total.
+    var tokenLikeVolume: Int { volumeUnit == .tokens ? totalVolume : 0 }
+
+    /// Estimated tokens from any row, whatever the provider's unit (Kiro, Grok, Cursor, Copilot).
+    var estimatedTokenVolume: Int {
+        models.filter { $0.volumeUnit == .estimatedTokens }.reduce(0) { $0 + $1.totalVolume }
+    }
 }
 
 /// Everything the UI needs to answer "what did I use on this date".
@@ -119,9 +175,12 @@ struct DailyUsageSummary: Codable, Equatable {
     let day: UsageDayKey
     let providers: [DailyProviderUsage]
 
-    /// Sum of token-like volume only. Kiro millicredits are deliberately excluded —
+    /// Sum of exact tokens only. Kiro millicredits are deliberately excluded —
     /// adding them to tokens would inflate the total by ~1000× per credit.
     var totalTokens: Int { providers.reduce(0) { $0 + $1.tokenLikeVolume } }
+
+    /// Estimated tokens, shown beside `totalTokens` as "+N est", never added to it.
+    var totalEstimatedTokens: Int { providers.reduce(0) { $0 + $1.estimatedTokenVolume } }
 
     /// Costs are commensurable across every unit, so this total is always meaningful.
     var totalCostUSD: Double { providers.reduce(0) { $0 + $1.totalCostUSD } }
@@ -134,7 +193,7 @@ struct DailyUsageSummary: Codable, Equatable {
     ///
     /// Cost is the ONLY defensible basis for "which provider did I use most": ranking
     /// Kiro's millicredits against Codex's tokens compares unlike units, and every
-    /// aggregator populates `estimatedCostUSD` (Kiro as credits × $0.04 API-equivalent).
+    /// aggregator populates `estimatedCostUSD` (Kiro as credits × the $0.04 overage rate, an estimate).
     /// Ties break on volume within a unit, then provider ID for a stable order.
     var providersByCost: [DailyProviderUsage] {
         providers

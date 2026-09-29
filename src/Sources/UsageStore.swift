@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 
 final class UsageStore: ObservableObject {
@@ -26,6 +27,31 @@ final class UsageStore: ObservableObject {
     private var refreshGeneration: UInt64 = 0
     /// Native IDE switcher — used to auto-failover Antigravity after a quota refresh.
     weak var nativeSession: NativeSessionManager?
+    private var observers: [NSObjectProtocol] = []
+    private var settingsSubscriptions: Set<AnyCancellable> = []
+    /// One full-history rebuild attempt per launch; a failed one is retried next launch.
+    private var fullRescanAttempted: Set<String> = []
+
+    init() {
+        // Cached per-file costs and day buckets depend on the price table and the timezone.
+        observers.append(NotificationCenter.default.addObserver(
+            forName: .NSSystemTimeZoneDidChange,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            LocalTokenCostScanner.invalidateFileCache()
+            self?.invalidateCostScanThrottle()
+        })
+        AppSettings.shared.$autoUpdatePricing
+            .dropFirst()
+            .removeDuplicates()
+            .sink { [weak self] _ in self?.invalidateCostScanThrottle() }
+            .store(in: &settingsSubscriptions)
+    }
+
+    deinit {
+        observers.forEach(NotificationCenter.default.removeObserver)
+    }
 
     func configure(accountsProvider: @escaping () -> [ServiceType: [AuthAccount]]) {
         self.accountsProvider = accountsProvider
@@ -336,10 +362,23 @@ final class UsageStore: ObservableObject {
                 }
 
                 let daily = await Task.detached(priority: .utility) {
-                    LocalTokenCostScanner.allProviderDailyUsage(historyDays: historyDays)
+                    LocalTokenCostScanner.allProviderDailyScans(historyDays: historyDays)
                 }.value
                 guard !Task.isCancelled else { return }
-                UsageDailyStore.record(providers: daily)
+                UsageDailyStore.record(scans: daily)
+
+                let pendingRebuild = await MainActor.run { () -> Set<String> in
+                    let pending = UsageDailyStore.pendingFullRescanProviders().subtracting(self.fullRescanAttempted)
+                    self.fullRescanAttempted.formUnion(pending)
+                    return pending
+                }
+                if !pendingRebuild.isEmpty {
+                    let rebuilt = await Task.detached(priority: .utility) {
+                        LocalTokenCostScanner.fullHistoryDailyScans(providers: pendingRebuild)
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    UsageDailyStore.recordFullRescan(rebuilt)
+                }
                 await MainActor.run {
                     guard generation == self.refreshGeneration else { return }
                     self.refreshDailySummary()

@@ -91,6 +91,39 @@ enum CursorQuotaParser {
         return windows
     }
 
+    struct BilledSpend: Equatable {
+        let planUSD: Double
+        let bonusUSD: Double
+        let onDemandUSD: Double
+        var totalUSD: Double { planUSD + onDemandUSD }
+    }
+
+    /// Cycle spend from usage-summary cents: plan usage (included + bonus) plus enabled on-demand spend.
+    static func billedSpend(from json: [String: Any]) -> BilledSpend? {
+        let individual = json["individualUsage"] as? [String: Any]
+            ?? json["individual_usage"] as? [String: Any]
+        let plan = (individual?["plan"] as? [String: Any])
+            ?? (json["planUsage"] as? [String: Any])
+            ?? (json["plan_usage"] as? [String: Any])
+            ?? (individual?["overall"] as? [String: Any])
+        let onDemand = (individual?["onDemand"] as? [String: Any])
+            ?? (individual?["on_demand"] as? [String: Any])
+        let breakdown = plan?["breakdown"] as? [String: Any]
+        let planCents = breakdown.flatMap { number($0, keys: ["total"]) }
+            ?? plan.flatMap { number($0, keys: ["used", "totalSpend", "total_spend", "includedSpend"]) }
+        let bonusCents = breakdown.flatMap { number($0, keys: ["bonus"]) } ?? 0
+        let onDemandCents: Double? = {
+            guard let onDemand, (onDemand["enabled"] as? Bool) != false else { return nil }
+            return number(onDemand, keys: ["used", "totalSpend", "total_spend"])
+        }()
+        guard planCents != nil || onDemandCents != nil else { return nil }
+        return BilledSpend(
+            planUSD: max(0, planCents ?? 0) / 100,
+            bonusUSD: max(0, bonusCents) / 100,
+            onDemandUSD: max(0, onDemandCents ?? 0) / 100
+        )
+    }
+
     /// `usedPercent` in 0...100. With a `breakdown` block (current API) the
     /// percent fields are percent used and authoritative; otherwise fall back
     /// to cents `used`/`limit`, then to legacy remaining-percent inversion.
@@ -108,6 +141,13 @@ enum CursorQuotaParser {
                         return min(100, max(0, scaled))
                     }
                 }
+            }
+            // Cents are only trustworthy when the limit spans the whole allowance, not just the included bucket.
+            if let used = number(object, keys: ["used", "totalSpend", "total_spend", "includedSpend"]),
+               let limit = number(object, keys: ["limit"]),
+               limit >= breakdownTotal
+            {
+                return min(100, max(0, used / limit * 100))
             }
             return nil
         }

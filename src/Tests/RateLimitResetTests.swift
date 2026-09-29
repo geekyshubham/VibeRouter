@@ -72,16 +72,16 @@ final class RateLimitResetTests: XCTestCase {
         live.appendProtoVarint("ConsumerResetToken_live".utf8.count)
         live.append(contentsOf: "ConsumerResetToken_live".utf8)
         live.append(contentsOf: [0xF2, 0x01]) // field 30 (validity_end), wire type 2
-        live.appendProtoVarint(timestampMessage(future).count)
-        live.append(timestampMessage(future))
+        live.appendProtoVarint(Self.timestampMessage(future).count)
+        live.append(Self.timestampMessage(future))
 
         var expired = Data()
         expired.append(contentsOf: [0x52])
         expired.appendProtoVarint("tok_expired".utf8.count)
         expired.append(contentsOf: "tok_expired".utf8)
         expired.append(contentsOf: [0xF2, 0x01])
-        expired.appendProtoVarint(timestampMessage(past).count)
-        expired.append(timestampMessage(past))
+        expired.appendProtoVarint(Self.timestampMessage(past).count)
+        expired.append(Self.timestampMessage(past))
 
         var response = Data()
         for token in [live, expired] {

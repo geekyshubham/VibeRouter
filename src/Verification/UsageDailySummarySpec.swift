@@ -81,7 +81,8 @@ struct UsageDailySummarySpec {
                     provider("grok", volume: 250_000, cost: 0.50, unit: .estimatedTokens),
                 ]
             )
-            expectEqual(summary.totalTokens, 1_250_000, "only token-like volume sums", recorder: recorder)
+            expectEqual(summary.totalTokens, 1_000_000, "only exact tokens sum", recorder: recorder)
+            expectEqual(summary.totalEstimatedTokens, 250_000, "estimates are reported beside it", recorder: recorder)
             expectEqual(summary.totalCostUSD, 6.50, "all providers contribute cost", recorder: recorder)
         }
 
@@ -169,7 +170,8 @@ struct UsageDailySummarySpec {
             expectEqual(rows.count, 2, "two distinct rows", recorder: recorder)
             expectEqual(rows.first?.usage.volumeUnit, .estimatedTokens, "costlier row first", recorder: recorder)
             expectEqual(rows.first?.providerID, "opencode", "attributed to its provider", recorder: recorder)
-            expectEqual(summary.totalTokens, 50_000, "credits stay out of tokens", recorder: recorder)
+            expectEqual(summary.totalTokens, 0, "credits and estimates stay out of exact tokens", recorder: recorder)
+            expectEqual(summary.totalEstimatedTokens, 50_000, "the estimate is still reported", recorder: recorder)
         }
 
         run("model rows are ordered by cost then volume", recorder: recorder) {

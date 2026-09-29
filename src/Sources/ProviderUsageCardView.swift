@@ -409,8 +409,14 @@ struct ProviderUsageCardView: View {
                     if cost.last30DaysTokens > 0 {
                         costPill(label: "30d", volume: cost.last30DaysTokens, unit: cost.volumeUnit, usd: cost.last30DaysCostUSD)
                     }
+                    if let pill = Self.estimatedTokensPill(cost) {
+                        costPill(label: pill.label, text: pill.value, usd: nil)
+                    }
                 }
-                let listed = Array(cost.models.prefix(6))
+                let listed = cost.volumeUnit == .estimatedTokens
+                    ? Array(cost.models.prefix(6))
+                    : Array(cost.models.filter { $0.volumeUnit != .estimatedTokens }.prefix(3))
+                        + Self.estimateRowsForCard(cost.models, limit: 3)
                 if listed.count == 1, let top = listed.first {
                     Text("Top model: \(top.model) · \(formatVolume(top.totalTokens, unit: top.volumeUnit))")
                         .font(.caption2)
@@ -431,12 +437,40 @@ struct ProviderUsageCardView: View {
         }
     }
 
+    /// Estimate rows get their own slots, led by the largest row of each estimate kind (e.g. Kiro's proxy row).
+    static func estimateRowsForCard(_ models: [ModelTokenUsage], limit: Int) -> [ModelTokenUsage] {
+        let estimates = models.filter { $0.volumeUnit == .estimatedTokens }
+            .sorted { $0.totalTokens != $1.totalTokens ? $0.totalTokens > $1.totalTokens : $0.model < $1.model }
+        var seenBases = Set<String>()
+        let leaders = estimates.filter { seenBases.insert($0.estimateBasis ?? "").inserted }
+        let rest = estimates.filter { row in !leaders.contains(row) }
+        return Array((leaders + rest).prefix(limit))
+    }
+
+    /// Side estimate for exact/credit providers; a range when the snapshot knows its low end.
+    static func estimatedTokensPill(_ cost: ProviderCostSnapshot) -> (label: String, value: String)? {
+        guard cost.volumeUnit != .estimatedTokens, cost.estimatedTokens30d > 0 else { return nil }
+        let high = cost.estimatedTokens30d
+        if let low = cost.estimatedTokensLowerBound30d, low < high {
+            let range = "\(UsageNumberFormatter.tokens(max(0, low)))–\(UsageNumberFormatter.tokens(high)) est"
+            return ("Est. tokens 30d (range)", range)
+        }
+        if cost.models.contains(where: { $0.volumeUnit == .estimatedTokens && $0.model.hasSuffix(LocalKiroCredits.cliEstimateSuffix) }) {
+            return ("Est. tokens 30d", "up to \(UsageNumberFormatter.tokens(high)) (est.)")
+        }
+        return ("Est. tokens 30d", UsageNumberFormatter.volume(high, unit: .estimatedTokens))
+    }
+
     private func costPill(label: String, volume: Int, unit: UsageVolumeUnit, usd: Double?) -> some View {
+        costPill(label: label, text: formatVolume(volume, unit: unit), usd: usd)
+    }
+
+    private func costPill(label: String, text: String, usd: Double?) -> some View {
         VStack(alignment: .leading, spacing: 1) {
             Text(label)
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
-            Text(formatVolume(volume, unit: unit))
+            Text(text)
                 .font(.caption.weight(.semibold).monospacedDigit())
             if let usd, AppSettings.shared.showCostEstimates {
                 Text(formatUSD(usd))

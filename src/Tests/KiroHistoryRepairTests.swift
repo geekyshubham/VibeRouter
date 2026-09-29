@@ -141,24 +141,25 @@ final class KiroHistoryRepairTests: XCTestCase {
         XCTAssertEqual(results(currentMessage(state)).count, 1)
     }
 
-    func testHistoryToolNameMissingFromToolListGetsPlaceholder() {
+    func testOldHistoryToolCallIsRenderedAsPlainText() {
         let state = translate(body([
             ["role": "user", "content": "Run echo hi."],
             ["role": "assistant", "content": [
                 ["type": "tool_use", "id": "tooluse_A1", "name": "Bash", "input": ["command": "echo hi"]],
             ]],
             ["role": "user", "content": [["type": "tool_result", "tool_use_id": "tooluse_A1", "content": "hi"]]],
+            ["role": "assistant", "content": [["type": "text", "text": "Done."]]],
             ["role": "user", "content": "Summarize."],
         ]))
 
-        let contextTools = context(currentMessage(state))["tools"] as? [[String: Any]] ?? []
-        let names = contextTools.compactMap {
-            ($0["toolSpecification"] as? [String: Any])?["name"] as? String
-        }
-        XCTAssertTrue(names.contains("Bash"))
+        let entries = historyEntries(state)
+        XCTAssertTrue(uses(entries[1]).isEmpty)
+        XCTAssertTrue(results(userEntry(entries[2])).isEmpty)
+        XCTAssertTrue((assistantEntry(entries[1])["content"] as? String ?? "").contains("Called Bash"))
+        XCTAssertTrue((userEntry(entries[2])["content"] as? String ?? "").contains("Bash result"))
     }
 
-    func testCanonicalRoundTripKeepsRealToolUses() {
+    func testCanonicalOldRoundTripBecomesReadableTranscript() {
         let state = translate(body([
             ["role": "user", "content": "Run echo hi."],
             ["role": "assistant", "content": [
@@ -172,10 +173,10 @@ final class KiroHistoryRepairTests: XCTestCase {
 
         let entries = historyEntries(state)
         XCTAssertEqual(entries.count, 4)
-        let historyUses = uses(entries[1])
-        XCTAssertEqual(historyUses.count, 1)
-        XCTAssertEqual(historyUses[0]["name"] as? String, "Bash")
-        XCTAssertEqual(historyUses[0]["toolUseId"] as? String, "tooluse_A1")
+        XCTAssertTrue(uses(entries[1]).isEmpty)
+        XCTAssertTrue(results(userEntry(entries[2])).isEmpty)
+        XCTAssertTrue((assistantEntry(entries[1])["content"] as? String ?? "").contains("Called Bash"))
+        XCTAssertTrue((userEntry(entries[2])["content"] as? String ?? "").contains("Bash result"))
         XCTAssertNil(assistantEntry(entries[3])["toolUses"])
     }
 

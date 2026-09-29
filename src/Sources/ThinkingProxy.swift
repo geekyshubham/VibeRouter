@@ -347,23 +347,44 @@ class ThinkingProxy {
                     "error": ["type": "api_error", "message": message],
                 ]
                 self.sendJSON(payload, status: status, to: connection)
-            case .success(let reply):
-                NSLog("[ThinkingProxy] Kiro replied (%.4f credits, %d tool calls)", reply.credits, reply.toolCalls.count)
+            case .success(let reply, let delivery):
+                let usage = KiroDirectProvider.usageFigures(
+                    reply: reply,
+                    payloadBytes: delivery.payloadBytes,
+                    contextWindowTokens: reply.contextUsagePercentage == nil
+                        ? nil
+                        : KiroDirectProvider.contextWindowTokens(forUpstreamID: translated.upstreamModel)
+                )
+                let messageID = KiroDirectProvider.newMessageID()
+                NSLog(
+                    "[ThinkingProxy] Kiro replied (%.4f credits, %d tool calls, %@, %d in / %d out via %@)",
+                    reply.credits, reply.toolCalls.count, delivery.credential.ledgerAccount,
+                    usage.inputTokens, usage.outputTokens, usage.source.rawValue
+                )
                 if translated.stream {
                     let body = KiroDirectProvider.anthropicSSE(
                         reply: reply,
                         model: translated.model,
-                        inputTokens: translated.estimatedInputTokens
+                        usage: usage,
+                        messageID: messageID
                     )
                     self.sendSSE(body, to: connection)
                 } else {
                     let payload = KiroDirectProvider.anthropicMessageJSON(
                         reply: reply,
                         model: translated.model,
-                        inputTokens: translated.estimatedInputTokens
+                        usage: usage,
+                        messageID: messageID
                     )
                     self.sendJSON(payload, status: 200, to: connection)
                 }
+                KiroProxyUsageLedger.append(KiroDirectProvider.ledgerEntry(
+                    reply: reply,
+                    delivery: delivery,
+                    usage: usage,
+                    upstreamModel: translated.upstreamModel,
+                    claudeMessageID: messageID
+                ))
             }
         }
     }

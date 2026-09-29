@@ -503,7 +503,9 @@ enum VibeRouterCLI {
         let data: [String: Any] = [
             "period_days": days,
             "total_volume": overview.totalTokens30d,
+            "estimated_volume": overview.estimatedTokens30d,
             "estimated_cost_usd": overview.totalCostUSD30d,
+            "estimated_volume_cost_usd": overview.estimatedCostUSD30d,
             "providers": rows,
             "generated_at": iso(overview.generatedAt),
         ]
@@ -1147,6 +1149,8 @@ enum VibeRouterCLI {
             "volume_unit": cost.volumeUnit.rawValue,
             "session_cost_usd": cost.sessionCostUSD ?? NSNull(),
             "period_cost_usd": cost.last30DaysCostUSD ?? NSNull(),
+            "estimated_volume": cost.estimatedTokens30d,
+            "estimated_volume_cost_usd": cost.estimatedCostUSD30d,
             "models": cost.models.map { ["model": $0.model, "volume": $0.totalTokens, "requests": $0.requestCount, "estimated_cost_usd": $0.estimatedCostUSD] as [String: Any] },
         ]
     }
@@ -1202,7 +1206,7 @@ enum VibeRouterCLI {
         guard !snapshots.isEmpty else { return "No local usage history found." }
         var lines = ["\(pad("PROVIDER", 18)) \(pad("SESSION", 16)) \(pad("\(days)-DAY VOLUME", 18)) EST. COST"]
         for row in snapshots.sorted(by: { $0.last30DaysTokens > $1.last30DaysTokens }) {
-            lines.append("\(pad(row.providerID, 18)) \(pad(UsageNumberFormatter.volume(row.sessionTokens, unit: row.volumeUnit), 16)) \(pad(UsageNumberFormatter.volume(row.last30DaysTokens, unit: row.volumeUnit), 18)) \(money(row.last30DaysCostUSD))")
+            lines.append("\(pad(row.providerID, 18)) \(pad(UsageNumberFormatter.volume(row.sessionTokens, unit: row.volumeUnit), 16)) \(pad(UsageNumberFormatter.volume(row.last30DaysTokens, unit: row.volumeUnit), 18)) \(money(row.last30DaysCostUSD))\(row.volumeUnit != .estimatedTokens && row.estimatedCostUSD30d >= 0.005 ? " +" + UsageNumberFormatter.usd(row.estimatedCostUSD30d) + " est" : "")")
         }
         return lines.joined(separator: "\n")
     }

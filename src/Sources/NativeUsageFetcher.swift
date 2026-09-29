@@ -1387,6 +1387,8 @@ enum NativeUsageFetcher {
 
             let membershipFromUsage = stringValue(json, keys: ["membershipType", "membership_type"]) ?? membership
             let windows = CursorQuotaParser.windows(from: json)
+            let billed = CursorQuotaParser.billedSpend(from: json).map { String(format: "$%.2f billed", $0.totalUSD) }
+            let planLabel = [cursorPlanLabel(membershipFromUsage), billed].compactMap { $0 }.joined(separator: " · ")
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
@@ -1394,7 +1396,7 @@ enum NativeUsageFetcher {
                 windows: windows,
                 accountEmail: email,
                 planType: membershipFromUsage,
-                planLabel: cursorPlanLabel(membershipFromUsage),
+                planLabel: planLabel.isEmpty ? nil : planLabel,
                 updatedAt: Date(),
                 errorMessage: windows.isEmpty ? "No Cursor quota data for this plan" : nil,
                 isRefreshing: false
@@ -2209,6 +2211,8 @@ enum NativeUsageFetcher {
         }
     }
 
+    static let kiroCLISocialAccountID = "kiro-cli-social"
+
     private static func fetchKiroUsage(
         authAccountID: String,
         providerID: String,
@@ -2217,117 +2221,181 @@ enum NativeUsageFetcher {
     ) async -> ProviderUsageSnapshot {
         let email = stringValue(payload, keys: ["email"])
 
-        // kiro-cli /usage is the plan. GetUsageLimits on the builder-id token
-        // reports "KIRO FREE" and a 50-credit included cap for this Power plan.
-        let cliProbe = await Task.detached(priority: .userInitiated) {
-            KiroCLIUsageProbe.fetch()
-        }.value
-        if cliProbe == nil {
-            NSLog("[Kiro] kiro-cli /usage probe returned nothing — using GetUsageLimits")
+        // This card is the auth file's own account. The kiro-cli login can be a
+        // different account, so it is fetched with its own token and compared.
+        var api = await fetchKiroLimitsAPI(payload: payload, authFile: authFile)
+        api?.profileArn = stringValue(payload, keys: ["profile_arn", "profileArn"])
+        KiroDirectProvider.rememberUserID(
+            api?.userID,
+            forAccount: KiroDirectProvider.Credential.authFile(authFile.lastPathComponent).ledgerAccount
+        )
+        let social = await fetchKiroSocialLimits()
+        KiroDirectProvider.rememberUserID(social?.userID, forAccount: KiroDirectProvider.Credential.cliSocial.ledgerAccount)
+
+        var cliText: KiroCLIUsageSnapshot?
+        if api == nil, social == nil {
+            cliText = await Task.detached(priority: .userInitiated) {
+                KiroCLIUsageProbe.fetch()
+            }.value
         }
-        if let cli = cliProbe, cli.hasAbsoluteCredits {
-            NSLog(
-                "[Kiro] %@ → %.2f of %.0f credits (%.1f%%)",
-                cli.planName ?? "plan?", cli.creditsUsed, cli.creditsTotal, cli.creditsPercent
-            )
-            let usedPercent = clampPercent(cli.creditsPercent)
-            let window: RateWindow
-            if cli.hasAbsoluteCredits {
-                let total = cli.creditsTotal
-                let used = min(total, max(0, cli.creditsUsed))
-                let remaining = max(0, total - used)
-                window = RateWindow(
-                    usedPercent: usedPercent > 0
-                        ? usedPercent
-                        : clampPercent(total > 0 ? used / total * 100 : 0),
-                    windowMinutes: 43_200,
-                    resetsAt: cli.resetsAt,
-                    resetDescription: cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                    label: cli.planName.map { "\($0) credits" } ?? "Credits",
-                    remainingValue: remaining,
-                    totalValue: total,
-                    unitLabel: "credits",
-                    displayStyle: .creditsRemaining
-                )
-            } else {
-                // Percent-only: show % used/left — do not invent remaining/total (50 vs 1000 vs 10000).
-                window = RateWindow(
-                    usedPercent: usedPercent,
-                    windowMinutes: 43_200,
-                    resetsAt: cli.resetsAt,
-                    resetDescription: cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                    label: cli.planName.map { "\($0) credits" } ?? "Credits",
-                    remainingValue: nil,
-                    totalValue: nil,
-                    unitLabel: "credits",
-                    displayStyle: .percent
+        let snapshot = kiroSnapshot(
+            authAccountID: authAccountID,
+            providerID: providerID,
+            email: email,
+            api: api,
+            social: social,
+            cliText: cliText,
+            authFileName: authFile.lastPathComponent,
+            lastProxyAccount: KiroProxyUsageLedger.latestAccount()
+        )
+        NSLog(
+            "[Kiro] %@ → %@ (%d windows, %d sub-accounts)",
+            authFile.lastPathComponent, snapshot.planLabel ?? "plan?", snapshot.windows.count, snapshot.subAccounts.count
+        )
+        return snapshot
+    }
+
+    static func kiroSameAccount(_ auth: KiroAPIUsage, _ social: KiroAPIUsage) -> Bool {
+        if let a = auth.userID, let b = social.userID, !a.isEmpty, !b.isEmpty { return a == b }
+        if let a = auth.profileArn, let b = social.profileArn, !a.isEmpty, !b.isEmpty { return a == b }
+        return KiroCreditMath.samePlan(auth.reportedPlan, social.reportedPlan)
+    }
+
+    static func kiroSnapshot(
+        authAccountID: String,
+        providerID: String,
+        email: String?,
+        api: KiroAPIUsage?,
+        social: KiroAPIUsage?,
+        cliText: KiroCLIUsageSnapshot?,
+        authFileName: String? = nil,
+        lastProxyAccount: String? = nil
+    ) -> ProviderUsageSnapshot {
+        let billedNote = " · Claude Code via VibeRouter last billed here"
+        let socialBilled = lastProxyAccount == KiroDirectProvider.Credential.cliSocial.ledgerAccount
+        let authBilled = authFileName.map { lastProxyAccount == KiroDirectProvider.Credential.authFile($0).ledgerAccount } ?? false
+        let other: ProviderUsageSubAccount? = {
+            if let social {
+                if let api, kiroSameAccount(api, social) { return nil }
+                return ProviderUsageSubAccount(
+                    id: kiroCLISocialAccountID,
+                    title: social.planName ?? "Kiro",
+                    subtitle: "kiro-cli login" + (socialBilled ? billedNote : ""),
+                    planType: social.reportedPlan,
+                    windows: social.windows,
+                    errorMessage: social.windows.isEmpty ? "kiro-cli login returned no credit breakdown" : nil
                 )
             }
-            return ProviderUsageSnapshot(
-                id: authAccountID,
-                providerID: providerID,
-                source: cli.source,
-                windows: [window],
-                accountEmail: email,
-                planType: cli.planName,
-                planLabel: cli.planName,
-                updatedAt: Date(),
-                errorMessage: nil,
-                isRefreshing: false
+            guard let cliText else { return nil }
+            let windows = kiroCLIWindows(cliText)
+            return ProviderUsageSubAccount(
+                id: kiroCLISocialAccountID,
+                title: cliText.planName ?? "Kiro",
+                subtitle: "kiro-cli login · \(cliText.source)",
+                planType: cliText.planName,
+                windows: windows,
+                errorMessage: windows.isEmpty ? "kiro-cli /usage returned no credits" : nil
             )
-        }
+        }()
 
-        let apiUsage = await fetchKiroLimitsAPI(payload: payload, authFile: authFile)
-        if let api = apiUsage, !api.windows.isEmpty {
+        let authWindows = api?.windows ?? []
+        let authError: String? = {
+            if api == nil { return "Could not load this login's Kiro limits (GetUsageLimits failed)" }
+            if authWindows.isEmpty { return "Kiro returned no credit breakdown for this login" }
+            return nil
+        }()
+
+        guard let other else {
             return ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
                 source: "Kiro GetUsageLimits",
-                windows: api.windows,
+                windows: authWindows,
                 accountEmail: email,
-                planType: api.planName,
-                planLabel: api.planName,
+                planType: api?.reportedPlan,
+                planLabel: api?.planName,
                 updatedAt: Date(),
-                errorMessage: nil,
+                errorMessage: authError,
                 isRefreshing: false
             )
         }
 
-        if let cli = cliProbe {
-            let usedPercent = clampPercent(cli.creditsPercent)
-            let window = RateWindow(
-                usedPercent: usedPercent,
-                windowMinutes: 43_200,
-                resetsAt: cli.resetsAt,
-                resetDescription: cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                label: cli.planName.map { "\($0) credits" } ?? "Credits",
-                displayStyle: .percent
-            )
-            return ProviderUsageSnapshot(
-                id: authAccountID,
-                providerID: providerID,
-                source: cli.source,
-                windows: [window],
-                accountEmail: email,
-                planType: cli.planName,
-                planLabel: cli.planName,
-                updatedAt: Date(),
-                errorMessage: nil,
-                isRefreshing: false
-            )
-        }
-
-        return .empty(
-            authAccountID: authAccountID,
+        let own = ProviderUsageSubAccount(
+            id: authAccountID,
+            title: api?.planName ?? "Kiro",
+            subtitle: "this login" + (authBilled ? billedNote : ""),
+            planType: api?.reportedPlan,
+            windows: authWindows,
+            errorMessage: authError
+        )
+        return ProviderUsageSnapshot(
+            id: authAccountID,
             providerID: providerID,
-            error: "Missing access token (and kiro-cli /usage unavailable)"
+            source: "Kiro GetUsageLimits",
+            windows: authWindows,
+            subAccounts: [own, other],
+            accountEmail: email,
+            planType: api?.reportedPlan,
+            planLabel: api?.planName,
+            updatedAt: Date(),
+            errorMessage: nil,
+            isRefreshing: false
         )
     }
 
-    private struct KiroAPIUsage {
+    /// `kiro-cli /usage` text, through the same credit math as GetUsageLimits and without clamping.
+    static func kiroCLIWindows(_ cli: KiroCLIUsageSnapshot) -> [RateWindow] {
+        let resetLine = cli.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) }
+        guard cli.hasAbsoluteCredits else {
+            guard cli.creditsPercent > 0 else { return [] }
+            return [RateWindow(
+                usedPercent: clampPercent(cli.creditsPercent),
+                windowMinutes: 43_200,
+                resetsAt: cli.resetsAt,
+                resetDescription: resetLine,
+                label: cli.planName.map { "\($0) credits" } ?? "Credits",
+                unitLabel: "credits",
+                displayStyle: .percent
+            )]
+        }
+        return KiroCreditMath.slices(
+            totalUsed: cli.creditsUsed,
+            planLimit: cli.creditsTotal,
+            overageUsed: cli.overageCreditsUsed ?? 0,
+            overageCap: 0,
+            overageChargesUSD: cli.estimatedOverageCostUSD
+        ).map { slice in
+            kiroWindow(slice, planName: cli.planName, resetsAt: cli.resetsAt)
+        }
+    }
+
+    private static func kiroWindow(_ slice: KiroCreditMath.Slice, planName: String?, resetsAt: Date?) -> RateWindow {
+        let label: String
+        if slice.label == "Credits" {
+            label = planName.map { "\($0) credits" } ?? "Credits"
+        } else {
+            label = slice.detail.map { "\(slice.label) · \($0)" } ?? slice.label
+        }
+        return RateWindow(
+            usedPercent: slice.total > 0 ? clampPercent(slice.used / slice.total * 100) : 0,
+            windowMinutes: 43_200,
+            resetsAt: resetsAt,
+            resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: label,
+            remainingValue: max(0, slice.total - slice.used),
+            totalValue: slice.total,
+            unitLabel: "credits",
+            displayStyle: .creditsRemaining
+        )
+    }
+
+    struct KiroAPIUsage {
         let planName: String?
+        let reportedPlan: String?
         let totalUsed: Double
         let windows: [RateWindow]
+        let userID: String?
+        var profileArn: String?
     }
 
     /// This auth file's own limits. `currentUsage` is the total burn, overage included.
@@ -2345,24 +2413,47 @@ enum NativeUsageFetcher {
         return nil
     }
 
+    /// The kiro-cli social login's limits, read with its own token (read-only call).
+    private static func fetchKiroSocialLimits() async -> KiroAPIUsage? {
+        guard var social = KiroDirectProvider.cliSocialPayload() else { return nil }
+        if KiroDirectProvider.cliSocialAccessToken() == nil {
+            let refreshed = await Task.detached(priority: .utility) {
+                KiroDirectProvider.refreshCLISession()
+            }.value
+            guard refreshed, KiroDirectProvider.cliSocialAccessToken() != nil,
+                  let fresh = KiroDirectProvider.cliSocialPayload()
+            else { return nil }
+            social = fresh
+        }
+        guard case .value(var usage) = await fetchKiroLimitsOnce(payload: social, sendProfileArn: true) else {
+            return nil
+        }
+        usage.profileArn = stringValue(social, keys: ["profile_arn", "profileArn"])
+        return usage
+    }
+
     private enum KiroLimitsAttempt {
         case value(KiroAPIUsage)
         case unauthorized
         case unavailable
     }
 
-    private static func fetchKiroLimitsOnce(payload: [String: Any]) async -> KiroLimitsAttempt {
+    private static func fetchKiroLimitsOnce(payload: [String: Any], sendProfileArn: Bool = false) async -> KiroLimitsAttempt {
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else { return .unavailable }
         let region = stringValue(payload, keys: ["region"]) ?? "us-east-1"
         guard let url = URL(string: "https://codewhisperer.\(region).amazonaws.com/getUsageLimits") else { return .unavailable }
 
+        var body: [String: Any] = ["origin": "KIRO_CLI"]
+        if sendProfileArn, let arn = stringValue(payload, keys: ["profile_arn", "profileArn"]) {
+            body["profileArn"] = arn
+        }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/x-amz-json-1.0", forHTTPHeaderField: "Content-Type")
         request.setValue("AmazonCodeWhispererService.GetUsageLimits", forHTTPHeaderField: "x-amz-target")
-        request.httpBody = Data("{\"origin\":\"KIRO_CLI\"}".utf8)
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
@@ -2371,30 +2462,77 @@ enum NativeUsageFetcher {
             guard (200...299).contains(http.statusCode),
                   let json = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return .unavailable }
-
-            let subscription = json["subscriptionInfo"] as? [String: Any]
-            let reportedPlan = stringValue(subscription ?? [:], keys: ["subscriptionTitle", "type"])
-            let breakdown = json["usageBreakdownList"] as? [[String: Any]] ?? []
-            let credit = breakdown.first { stringValue($0, keys: ["resourceType"]) == "CREDIT" } ?? breakdown.first
-            let totalUsed = credit.flatMap { doubleValue($0, keys: ["currentUsageWithPrecision", "currentUsage"]) } ?? 0
-            let planLimit = credit.flatMap { doubleValue($0, keys: ["usageLimitWithPrecision", "usageLimit"]) } ?? 0
-            let planName = KiroCreditMath.displayPlanName(
-                reported: reportedPlan,
-                planLimit: planLimit,
-                totalUsed: totalUsed
-            )
-            let windows = mapKiroUsageBreakdownAPI(credit, planName: planName, fallbackReset: json["nextDateReset"])
-            return .value(KiroAPIUsage(planName: planName, totalUsed: totalUsed, windows: windows))
+            return .value(parseKiroLimits(json))
         } catch {
             return .unavailable
         }
+    }
+
+    static func parseKiroLimits(_ json: [String: Any], now: Date = Date()) -> KiroAPIUsage {
+        let subscription = json["subscriptionInfo"] as? [String: Any]
+        let reportedPlan = stringValue(subscription ?? [:], keys: ["subscriptionTitle", "type"])
+        let breakdown = json["usageBreakdownList"] as? [[String: Any]] ?? []
+        let credit = breakdown.first { stringValue($0, keys: ["resourceType"]) == "CREDIT" } ?? breakdown.first
+        let totalUsed = credit.flatMap { doubleValue($0, keys: ["currentUsageWithPrecision", "currentUsage"]) } ?? 0
+        let planLimit = credit.flatMap { doubleValue($0, keys: ["usageLimitWithPrecision", "usageLimit"]) } ?? 0
+        let overageUsed = credit.flatMap { doubleValue($0, keys: ["currentOveragesWithPrecision", "currentOverages"]) } ?? 0
+        let planName = KiroCreditMath.displayPlanName(
+            reported: reportedPlan,
+            planLimit: planLimit,
+            totalUsed: totalUsed,
+            overageUsed: overageUsed
+        )
+        let overage = (credit?["overageConfiguration"] as? [String: Any]) ?? (json["overageConfiguration"] as? [String: Any])
+        var windows = mapKiroUsageBreakdownAPI(
+            credit,
+            planName: reportedPlan,
+            fallbackReset: json["nextDateReset"],
+            overageStatus: overage.flatMap { stringValue($0, keys: ["overageStatus", "status"]) },
+            overageChargesUSD: credit.flatMap { doubleValue($0, keys: ["overageCharges"]) }
+                ?? doubleValue(json, keys: ["overageCharges"])
+        )
+        windows += breakdown.compactMap { kiroBonusWindow($0, now: now) }
+        let userInfo = json["userInfo"] as? [String: Any]
+        return KiroAPIUsage(
+            planName: planName,
+            reportedPlan: reportedPlan,
+            totalUsed: totalUsed,
+            windows: windows,
+            userID: userInfo.flatMap { stringValue($0, keys: ["userId", "userID"]) }
+        )
+    }
+
+    /// Free-trial / bonus credits, only when the breakdown carries them.
+    private static func kiroBonusWindow(_ breakdown: [String: Any], now: Date) -> RateWindow? {
+        guard let trial = breakdown["freeTrialInfo"] as? [String: Any],
+              let limit = doubleValue(trial, keys: ["usageLimitWithPrecision", "usageLimit"]), limit > 0
+        else { return nil }
+        let used = max(0, doubleValue(trial, keys: ["currentUsageWithPrecision", "currentUsage"]) ?? 0)
+        let expiry: Date? = {
+            if let epoch = doubleValue(trial, keys: ["freeTrialExpiry", "expiryDate"]) {
+                return Date(timeIntervalSince1970: epoch > 1_000_000_000_000 ? epoch / 1000 : epoch)
+            }
+            return doubleValue(trial, keys: ["daysRemaining"]).map { now.addingTimeInterval($0 * 86_400) }
+        }()
+        return RateWindow(
+            usedPercent: clampPercent(used / limit * 100),
+            resetsAt: expiry,
+            resetDescription: expiry.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: "Bonus",
+            remainingValue: max(0, limit - used),
+            totalValue: max(limit, used),
+            unitLabel: "credits",
+            displayStyle: .creditsRemaining
+        )
     }
 
     /// Windows for this account. Does not add overage on top of `currentUsage`.
     private static func mapKiroUsageBreakdownAPI(
         _ breakdown: [String: Any]?,
         planName: String?,
-        fallbackReset: Any?
+        fallbackReset: Any?,
+        overageStatus: String?,
+        overageChargesUSD: Double?
     ) -> [RateWindow] {
         guard let breakdown else { return [] }
 
@@ -2404,8 +2542,6 @@ enum NativeUsageFetcher {
         let overageUsed = doubleValue(breakdown, keys: ["currentOveragesWithPrecision", "currentOverages"]) ?? 0
 
         let resetEpoch = doubleValue(breakdown, keys: ["nextDateReset"])
-            ?? (fallbackReset as? Double)
-            ?? (fallbackReset as? Int).map(Double.init)
             ?? (fallbackReset as? NSNumber).map { $0.doubleValue }
         let resetsAt = resetEpoch.map { epoch in
             Date(timeIntervalSince1970: TimeInterval(epoch > 1_000_000_000_000 ? epoch / 1000 : epoch))
@@ -2415,29 +2551,10 @@ enum NativeUsageFetcher {
             totalUsed: totalUsed,
             planLimit: planLimit,
             overageUsed: overageUsed,
-            overageCap: overageCap
-        ).map { slice in
-            let total = slice.total
-            let used = slice.used
-            let remaining = max(0, total - used)
-            let label: String = {
-                if slice.label == "Credits" {
-                    return planName.map { "\($0) credits" } ?? "Credits"
-                }
-                return slice.label
-            }()
-            return RateWindow(
-                usedPercent: total > 0 ? clampPercent(used / total * 100) : 0,
-                windowMinutes: 43_200,
-                resetsAt: resetsAt,
-                resetDescription: resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                label: label,
-                remainingValue: remaining,
-                totalValue: total,
-                unitLabel: "credits",
-                displayStyle: .creditsRemaining
-            )
-        }
+            overageCap: overageCap,
+            overageStatus: overageStatus,
+            overageChargesUSD: overageChargesUSD
+        ).map { kiroWindow($0, planName: planName, resetsAt: resetsAt) }
     }
 
     // MARK: - Grok

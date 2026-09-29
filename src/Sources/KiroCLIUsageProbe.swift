@@ -4,8 +4,8 @@ import Darwin
 #endif
 
 /// Mirrors CodexBar's `KiroStatusProbe`: run `kiro-cli chat --no-interactive /usage`
-/// and parse `Credits (X of Y covered in plan)`. This is the ground truth for org/power plans;
-/// AWS GetUsageLimits often under-reports (e.g. 0.11 while CLI shows 285.62 of 10000).
+/// and parse `Credits (X of Y covered in plan)`. It reports the kiro-cli login, which can be a
+/// different account from a Kiro auth file, so it is only a fallback when GetUsageLimits fails.
 ///
 /// Conventions (CodexBar docs + real CLI output):
 /// - Plan pools vary: Free ≈ 50, Pro ≈ 1000, Power/Pro+ ≈ 10000 — never invent a default total.
@@ -282,7 +282,7 @@ enum KiroCLIUsageProbe {
         return nil
     }
 
-    private static func parseResetDate(in text: String) -> Date? {
+    static func parseResetDate(in text: String, now: Date = Date()) -> Date? {
         // "resets on 2026-08-01" or "resets on 01/15"
         if let dateStr = firstMatch(in: text, pattern: #"(?i)resets on\s+(\d{4}-\d{2}-\d{2})"#) {
             let formatter = DateFormatter()
@@ -295,8 +295,8 @@ enum KiroCLIUsageProbe {
         if let md = firstMatch(in: text, pattern: #"(?i)resets on\s+(\d{1,2}/\d{1,2})"#) {
             let parts = md.split(separator: "/")
             guard parts.count == 2, let month = Int(parts[0]), let day = Int(parts[1]) else { return nil }
-            let calendar = Calendar.current
-            let now = Date()
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = TimeZone(identifier: "UTC") ?? calendar.timeZone
             var components = DateComponents()
             components.month = month
             components.day = day
@@ -321,38 +321,62 @@ enum KiroCreditMath {
         let label: String
         let used: Double
         let total: Double
+        var detail: String? = nil
     }
 
+    /// `overageStatus` nil means unknown (CLI text), which keeps the capped ceiling.
     static func slices(
         totalUsed: Double,
         planLimit: Double,
         overageUsed: Double,
-        overageCap: Double
+        overageCap: Double,
+        overageStatus: String? = nil,
+        overageChargesUSD: Double? = nil
     ) -> [Slice] {
         let used = max(0, totalUsed)
         let plan = max(0, planLimit)
         let overUsed = max(0, overageUsed)
         let overCap = max(0, overageCap)
+        let overageEnabled = overageStatus.map { $0.uppercased() == "ENABLED" } ?? true
         // Free is 50 included under a 10,000 overage cap. Power's plan limit is
         // already the 10,000 pool, so adding the cap again would show 20,000.
-        let smallPlanUnderOverage = plan > 0 && overCap > plan
-        let ceiling = smallPlanUnderOverage ? plan + overCap : max(plan, overCap)
+        let smallPlanUnderOverage = overageEnabled && plan > 0 && overCap > plan
+        let ceiling: Double
+        if !overageEnabled, plan > 0 {
+            ceiling = plan
+        } else {
+            ceiling = smallPlanUnderOverage ? plan + overCap : max(plan, overCap)
+        }
         guard ceiling > 0 || used > 0 else { return [] }
 
         var out = [Slice(label: "Credits", used: used, total: max(ceiling, used))]
-        if overCap > 0, overUsed > 0 || smallPlanUnderOverage {
-            out.append(Slice(label: "Overage", used: overUsed, total: max(overCap, overUsed)))
+        if overUsed > 0 || (overCap > 0 && smallPlanUnderOverage) {
+            var notes: [String] = []
+            if let charges = overageChargesUSD, charges > 0 {
+                notes.append(String(format: "$%.2f billed", charges))
+            }
+            if overageStatus != nil, !overageEnabled {
+                notes.append("overage now disabled")
+            }
+            out.append(Slice(
+                label: "Overage",
+                used: overUsed,
+                total: overageEnabled ? max(overCap, overUsed) : overUsed,
+                detail: notes.isEmpty ? nil : notes.joined(separator: ", ")
+            ))
         }
         // Do not emit the 50-credit "included" row. It is exhausted as soon as
         // real usage starts, and the card then reads as a used-up Free plan.
         return out
     }
 
-    /// GetUsageLimits labels some Power subscriptions "KIRO FREE" with a 50-credit
-    /// included cap while `currentUsage` is already thousands. That title is not the plan.
-    static func displayPlanName(reported: String?, planLimit: Double, totalUsed: Double) -> String? {
-        if planKey(reported) == "FREE", planLimit > 0, planLimit <= 200, totalUsed > planLimit {
-            return nil
+    /// Keep the vendor's title; a Free account burning overage is still Free.
+    static func displayPlanName(
+        reported: String?, planLimit: Double, totalUsed: Double, overageUsed: Double = 0
+    ) -> String? {
+        guard let reported, !reported.isEmpty else { return nil }
+        if overageUsed > 0 || (planLimit > 0 && totalUsed > planLimit) {
+            return "\(reported) + overage"
         }
         return reported
     }

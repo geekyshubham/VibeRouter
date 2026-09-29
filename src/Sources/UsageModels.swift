@@ -289,6 +289,8 @@ struct ProviderCostSnapshot: Equatable, Identifiable {
     /// Unit for session/last30Days volume fields.
     let volumeUnit: UsageVolumeUnit
     let updatedAt: Date?
+    /// Low end of `estimatedTokens30d` when the estimate is a range (Kiro CLI: first turns from 0%).
+    let estimatedTokensLowerBound30d: Int?
 
     init(
         id: String,
@@ -299,7 +301,8 @@ struct ProviderCostSnapshot: Equatable, Identifiable {
         last30DaysCostUSD: Double?,
         models: [ModelTokenUsage] = [],
         volumeUnit: UsageVolumeUnit = .tokens,
-        updatedAt: Date?
+        updatedAt: Date?,
+        estimatedTokensLowerBound30d: Int? = nil
     ) {
         self.id = id
         self.providerID = providerID
@@ -310,17 +313,45 @@ struct ProviderCostSnapshot: Equatable, Identifiable {
         self.models = models
         self.volumeUnit = volumeUnit
         self.updatedAt = updatedAt
+        self.estimatedTokensLowerBound30d = estimatedTokensLowerBound30d
     }
+
+    /// Estimated-token volume in the window: the headline itself for estimate-only providers,
+    /// otherwise the estimate rows listed beside exact tokens or credits (Grok, Kiro).
+    var estimatedTokens30d: Int {
+        if volumeUnit == .estimatedTokens { return last30DaysTokens }
+        return models.filter { $0.volumeUnit == .estimatedTokens }.reduce(0) { $0 + $1.totalTokens }
+    }
+
+    /// Exact or billed cost; estimate-only providers contribute nothing here.
+    var exactCostUSD30d: Double { volumeUnit == .estimatedTokens ? 0 : last30DaysCostUSD ?? 0 }
+    var exactCostUSDSession: Double { volumeUnit == .estimatedTokens ? 0 : sessionCostUSD ?? 0 }
+
+    /// Cost of estimate-only usage: the headline of estimate providers, else their estimate rows (Grok signals).
+    var estimatedCostUSD30d: Double {
+        if volumeUnit == .estimatedTokens { return last30DaysCostUSD ?? 0 }
+        return models.filter { $0.volumeUnit == .estimatedTokens }.reduce(0) { $0 + $1.estimatedCostUSD }
+    }
+    var estimatedCostUSDSession: Double { volumeUnit == .estimatedTokens ? sessionCostUSD ?? 0 : 0 }
 }
 
 struct AnalyticsOverview: Equatable {
+    /// Exact tokens only; estimates are reported in `estimatedTokens30d`.
     let totalTokens30d: Int
     let totalCostUSD30d: Double
     let totalTokensSession: Int
     let totalCostUSDSession: Double
     let byProvider: [ProviderCostSnapshot]
+    /// Exact-token and credit rows ranked by cost.
     let topModels: [ModelTokenUsage]
     let generatedAt: Date
+    var estimatedTokens30d: Int = 0
+    var estimatedTokensSession: Int = 0
+    /// Estimated-token rows ranked by volume, since most carry no cost.
+    var topEstimatedModels: [ModelTokenUsage] = []
+    /// Cost of estimate-only usage, kept out of `totalCostUSD30d`.
+    var estimatedCostUSD30d: Double = 0
+    var estimatedCostUSDSession: Double = 0
 }
 
 enum ChatGPTPlanFormatter {
@@ -465,12 +496,14 @@ enum ChatGPTPlanFormatter {
 
 enum AnalyticsEngine {
     static func overview(from costs: [ProviderCostSnapshot], now: Date = Date()) -> AnalyticsOverview {
-        // Only token-like units feed global volume totals (exclude Kiro credits).
-        let tokenLike = costs.filter { $0.volumeUnit.aggregatesAsTokens }
-        let totalTokens30d = tokenLike.reduce(0) { $0 + $1.last30DaysTokens }
-        let totalCost30d = costs.reduce(0.0) { $0 + ($1.last30DaysCostUSD ?? 0) }
-        let totalTokensSession = tokenLike.reduce(0) { $0 + $1.sessionTokens }
-        let totalCostSession = costs.reduce(0.0) { $0 + ($1.sessionCostUSD ?? 0) }
+        // Exact tokens and estimates are totalled apart; Kiro credits never join either.
+        let exact = costs.filter { $0.volumeUnit == .tokens }
+        let totalTokens30d = exact.reduce(0) { $0 + $1.last30DaysTokens }
+        let totalCost30d = costs.reduce(0.0) { $0 + $1.exactCostUSD30d }
+        let totalTokensSession = exact.reduce(0) { $0 + $1.sessionTokens }
+        let totalCostSession = costs.reduce(0.0) { $0 + $1.exactCostUSDSession }
+        let estimatedTokens30d = costs.reduce(0) { $0 + $1.estimatedTokens30d }
+        let estimatedTokensSession = costs.filter { $0.volumeUnit == .estimatedTokens }.reduce(0) { $0 + $1.sessionTokens }
 
         var modelMerge: [String: (ModelTokenUsage, String)] = [:]
         for cost in costs {
@@ -493,10 +526,12 @@ enum AnalyticsEngine {
                         inputTokens: existing.0.inputTokens + model.inputTokens,
                         outputTokens: existing.0.outputTokens + model.outputTokens,
                         cacheReadTokens: existing.0.cacheReadTokens + model.cacheReadTokens,
+                        cacheWriteTokens: existing.0.cacheWriteTokens + model.cacheWriteTokens,
                         totalTokens: existing.0.totalTokens + model.totalTokens,
                         estimatedCostUSD: existing.0.estimatedCostUSD + model.estimatedCostUSD,
                         requestCount: existing.0.requestCount + model.requestCount,
-                        volumeUnit: model.volumeUnit
+                        volumeUnit: model.volumeUnit,
+                        estimateBasis: existing.0.estimateBasis ?? model.estimateBasis
                     )
                     modelMerge[mergeKey] = (merged, existing.1)
                 } else {
@@ -506,8 +541,9 @@ enum AnalyticsEngine {
         }
 
         // Rank primarily by API-equivalent $ when present; fall back to unit-local volume.
-        let topModels = modelMerge.values
-            .map(\.0)
+        let merged = modelMerge.values.map(\.0)
+        let topModels = merged
+            .filter { $0.volumeUnit != .estimatedTokens }
             .sorted {
                 if $0.estimatedCostUSD != $1.estimatedCostUSD {
                     return $0.estimatedCostUSD > $1.estimatedCostUSD
@@ -515,7 +551,10 @@ enum AnalyticsEngine {
                 return $0.totalTokens > $1.totalTokens
             }
             .prefix(12)
-            .map { $0 }
+        let topEstimated = merged
+            .filter { $0.volumeUnit == .estimatedTokens }
+            .sorted { $0.totalTokens != $1.totalTokens ? $0.totalTokens > $1.totalTokens : $0.model < $1.model }
+            .prefix(8)
 
         return AnalyticsOverview(
             totalTokens30d: totalTokens30d,
@@ -524,7 +563,12 @@ enum AnalyticsEngine {
             totalCostUSDSession: totalCostSession,
             byProvider: costs.sorted { ($0.last30DaysCostUSD ?? 0) > ($1.last30DaysCostUSD ?? 0) },
             topModels: Array(topModels),
-            generatedAt: now
+            generatedAt: now,
+            estimatedTokens30d: estimatedTokens30d,
+            estimatedTokensSession: estimatedTokensSession,
+            topEstimatedModels: Array(topEstimated),
+            estimatedCostUSD30d: costs.reduce(0.0) { $0 + $1.estimatedCostUSD30d },
+            estimatedCostUSDSession: costs.reduce(0.0) { $0 + $1.estimatedCostUSDSession }
         )
     }
 }

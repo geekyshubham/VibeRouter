@@ -22,7 +22,7 @@ struct KiroCreditMathSpec {
         precondition(abs(free[0].used - (7909.89 + 7856.07)) > 1000, "do not add overage on top of currentUsage")
         precondition(free[1].label == "Overage")
         precondition(abs(free[1].used - 7856.07) < 0.001)
-        precondition(KiroCreditMath.displayPlanName(reported: "KIRO FREE", planLimit: 50, totalUsed: 7909.89) == nil)
+        precondition(KiroCreditMath.displayPlanName(reported: "KIRO FREE", planLimit: 50, totalUsed: 7909.89, overageUsed: 7856.07) == "KIRO FREE + overage")
         precondition(KiroCreditMath.displayPlanName(reported: "KIRO POWER", planLimit: 10000, totalUsed: 8445) == "KIRO POWER")
 
         let power = KiroCreditMath.slices(
