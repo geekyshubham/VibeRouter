@@ -347,8 +347,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         if settingsWindow == nil {
             createSettingsWindow()
         }
-        settingsWindow?.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.bringToFront()
     }
 
     func createSettingsWindow() {
@@ -692,5 +691,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
         completionHandler([.banner, .sound])
+    }
+}
+
+extension NSWindow {
+    /// LSUIElement apps are never frontmost, and on macOS 14+ activation is cooperative and can
+    /// be declined — `makeKeyAndOrderFront` alone then left Settings/About stacked behind the
+    /// active app's windows, so clicking "Settings" looked like it did nothing.
+    /// `orderFrontRegardless` raises the window even when activation doesn't happen.
+    func bringToFront() {
+        if #available(macOS 14.0, *) {
+            NSApp.activate()
+        } else {
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        makeKeyAndOrderFront(nil)
+        orderFrontRegardless()
     }
 }

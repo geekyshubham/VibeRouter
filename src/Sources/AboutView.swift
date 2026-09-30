@@ -176,8 +176,7 @@ enum AboutWindowController {
 
     static func show() {
         if let window, window.isVisible {
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            window.bringToFront()
             return
         }
 
@@ -193,8 +192,7 @@ enum AboutWindowController {
         panel.contentView = NSHostingView(rootView: AboutView {
             panel.close()
         })
-        panel.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        panel.bringToFront()
         window = panel
     }
 }
