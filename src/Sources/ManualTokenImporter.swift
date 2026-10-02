@@ -109,35 +109,45 @@ enum ManualTokenImporter {
     ) throws -> ParsedAccount {
         let unwrapped = unwrapNestedTokens(raw)
         let detected = detectType(unwrapped, preferredType: preferredType)
+        let parsed: ParsedAccount
         switch detected {
-        case .codex: return try normalizeCodex(unwrapped)
-        case .claude: return try normalizeClaude(unwrapped)
-        case .gemini, .antigravity: return try normalizeGoogle(unwrapped, type: detected)
-        case .copilot: return try normalizeCopilot(unwrapped)
-        case .cursor: return try normalizeCursor(unwrapped)
-        case .kiro: return try normalizeKiro(unwrapped)
-        case .grok: return try normalizeGrok(unwrapped)
-        case .kimi: return try normalizeGenericOAuth(unwrapped, type: .kimi, labelKeys: ["email", "username"])
-        case .qwen: return try normalizeGenericOAuth(unwrapped, type: .qwen, labelKeys: ["email", "username"])
-        case .codebuddy: return try normalizeGenericOAuth(unwrapped, type: .codebuddy, labelKeys: ["email", "username", "login"])
-        case .codebuddyCN: return try normalizeGenericOAuth(unwrapped, type: .codebuddyCN, labelKeys: ["email", "username", "login"])
-        case .windsurf: return try normalizeGenericOAuth(unwrapped, type: .windsurf, labelKeys: ["email", "username"])
-        case .qoder: return try normalizeGenericOAuth(unwrapped, type: .qoder, labelKeys: ["email", "username"])
-        case .trae: return try normalizeGenericOAuth(unwrapped, type: .trae, labelKeys: ["email", "username"])
-        case .zed: return try normalizeGenericOAuth(unwrapped, type: .zed, labelKeys: ["email", "username"])
-        case .gitlab: return try normalizeGenericOAuth(unwrapped, type: .gitlab, labelKeys: ["email", "username", "login"])
-        case .kilo: return try normalizeGenericOAuth(unwrapped, type: .kilo, labelKeys: ["email", "username"])
+        case .codex: parsed = try normalizeCodex(unwrapped)
+        case .claude: parsed = try normalizeClaude(unwrapped)
+        case .gemini, .antigravity: parsed = try normalizeGoogle(unwrapped, type: detected)
+        case .copilot: parsed = try normalizeCopilot(unwrapped)
+        case .cursor: parsed = try normalizeCursor(unwrapped)
+        case .kiro: parsed = try normalizeKiro(unwrapped)
+        case .grok: parsed = try normalizeGrok(unwrapped)
+        case .kimi, .qwen, .codebuddy, .codebuddyCN, .windsurf, .qoder, .trae, .zed, .gitlab, .kilo:
+            parsed = try normalizeGenericOAuth(unwrapped, type: detected, labelKeys: ["email", "username", "login"])
         case .zai:
-            if let key = firstString(unwrapped, keys: ["api_key", "apiKey", "key", "token"]) {
-                return try normalizeZai(key: key)
+            guard let key = firstString(unwrapped, keys: ["api_key", "apiKey", "key", "token"]) else {
+                throw ImportError.missingField("api_key")
             }
-            throw ImportError.missingField("api_key")
+            parsed = try normalizeZai(key: key)
         case .opencodeGo:
             // Stored by CustomProviderCredentialStore, not as a pasted auth record.
             throw ImportError.message(
                 "Add \(ServiceType.opencodeGo.displayName) keys under Settings → Providers, not by pasting a token."
             )
         }
+        return try preserveIdentity(parsed, from: unwrapped)
+    }
+
+    private static func preserveIdentity(_ parsed: ParsedAccount, from raw: [String: Any]) throws -> ParsedAccount {
+        var record = parsed.record
+        for key in ["user_id", "userId", "subject", "uid", "account_id", "accountId", "workspace_id", "workspaceId",
+                    "organization_id", "organizationId", "org_id", "project_id", "projectId", "profile_arn", "profileArn", "login"] {
+            if record[key] == nil, let value = raw[key] { record[key] = value }
+        }
+        if let email = AccountCredentialIdentity.email(raw) { record["email"] = email }
+        else if let label = record["email"] as? String, label.hasSuffix("-account") { record["email"] = "" }
+        if let username = record["username"] as? String, username.hasSuffix("-account") { record.removeValue(forKey: "username") }
+        guard AccountCredentialIdentity.isConsistent(record) else {
+            throw ImportError.message("Account identity does not match its credentials.")
+        }
+        return ParsedAccount(type: parsed.type, filename: AccountCredentialIdentity.filename(record),
+                             displayName: parsed.displayName, record: record)
     }
 
     private static func unwrapNestedTokens(_ raw: [String: Any]) -> [String: Any] {
@@ -188,12 +198,12 @@ enum ManualTokenImporter {
         }
         let refresh = firstString(raw, keys: ["refresh_token", "refreshToken", "refresh"]) ?? ""
         let idToken = firstString(raw, keys: ["id_token", "idToken"]) ?? ""
-        let email = firstString(raw, keys: ["email"])
+        let email = JWTEmailExtractor.email(from: access)
             ?? JWTEmailExtractor.email(from: idToken)
-            ?? JWTEmailExtractor.email(from: access)
+            ?? firstString(raw, keys: ["email"])
             ?? "codex-account"
-        let accountID = firstString(raw, keys: ["account_id", "accountId"])
-            ?? CodexWorkspaceCredentials.chatgptAccountID(from: access)
+        let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: access)
+            ?? firstString(raw, keys: ["account_id", "accountId"])
             ?? ""
         let now = Date()
         var record: [String: Any] = [
@@ -213,7 +223,7 @@ enum ManualTokenImporter {
         }
         return ParsedAccount(
             type: .codex,
-            filename: "codex-\(sanitize(email)).json",
+            filename: codexFilename(record),
             displayName: email,
             record: record
         )
@@ -285,10 +295,11 @@ enum ManualTokenImporter {
         guard let access = firstString(raw, keys: ["access_token", "accessToken", "oauth_token", "token"]) else {
             throw ImportError.missingField("access_token")
         }
-        let username = firstString(raw, keys: ["username", "login", "email"])
+        let username = firstString(raw, keys: ["username", "login"])
+            ?? AccountCredentialIdentity.email(raw)
             ?? nestedAccountName(raw)
             ?? "copilot-account"
-        let record: [String: Any] = [
+        var record: [String: Any] = [
             "type": "github-copilot",
             "access_token": access,
             "token_type": "bearer",
@@ -297,6 +308,10 @@ enum ManualTokenImporter {
             "email": username,
             "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         ]
+        if let account = raw["account"] as? [String: Any],
+           let id = AccountCredentialIdentity.identifier(account, ["id", "user_id", "userId"]) {
+            record["user_id"] = id
+        }
         return ParsedAccount(
             type: .copilot,
             filename: "github-copilot-\(sanitize(username)).json",
@@ -345,9 +360,7 @@ enum ManualTokenImporter {
             throw ImportError.missingField("access_token")
         }
         let refresh = firstString(raw, keys: ["refresh_token", "refreshToken"]) ?? ""
-        let email = firstString(raw, keys: ["email", "username"])
-            ?? JWTEmailExtractor.email(from: access)
-            ?? "kiro-account"
+        let email = KiroAccountIdentity.email(raw) ?? ""
         let region = firstString(raw, keys: ["region"]) ?? "us-east-1"
         let now = Date()
         var record: [String: Any] = [
@@ -361,27 +374,23 @@ enum ManualTokenImporter {
             "expired": firstString(raw, keys: ["expired", "expires_at", "expiresAt"]) ?? iso(now.addingTimeInterval(3600)),
             "last_refresh": iso(now),
         ]
-        for key in ["client_id", "clientId", "client_secret", "clientSecret", "client_id_hash", "clientIdHash", "auth_method", "authMethod", "provider", "start_url", "profile_arn"] {
+        for key in ["client_id", "clientId", "client_secret", "clientSecret", "client_id_hash", "clientIdHash", "auth_method", "authMethod", "provider", "start_url", "profile_arn", "profileArn", "user_id", "userId"] {
             if let value = firstString(raw, keys: [key]) {
                 switch key {
                 case "clientId": record["client_id"] = value
                 case "clientSecret": record["client_secret"] = value
                 case "clientIdHash": record["client_id_hash"] = value
                 case "authMethod": record["auth_method"] = value
+                case "profileArn": record["profile_arn"] = value
+                case "userId": record["user_id"] = value
                 default: record[key] = value
                 }
             }
         }
-        let filename: String
-        if let clientID = firstString(raw, keys: ["client_id", "clientId"]) {
-            filename = KiroAWSAuth.filename(clientID: clientID)
-        } else {
-            filename = "kiro-\(sanitize(email)).json"
-        }
         return ParsedAccount(
             type: .kiro,
-            filename: filename,
-            displayName: email,
+            filename: KiroAccountIdentity.filename(record),
+            displayName: email.isEmpty ? "Kiro account" : email,
             record: record
         )
     }
@@ -469,17 +478,10 @@ enum ManualTokenImporter {
         overwrite: Bool
     ) -> ConfiguredAccountImportResult {
         do {
-            try FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true)
-            let destination = authDirectory.appendingPathComponent(account.filename)
-            if !overwrite, FileManager.default.fileExists(atPath: destination.path) {
-                return .failure(message: "Account already exists at \(account.filename)")
-            }
             if account.type == .zai, let key = account.record["api_key"] as? String {
                 return ConfiguredAccountImporter.importZaiAPIKey(apiKey: key, authDirectory: authDirectory)
             }
-            let data = try JSONSerialization.data(withJSONObject: account.record, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: destination, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            try AccountCredentialStore.save(account.record, in: authDirectory, overwrite: overwrite)
             return .success(message: "Added \(account.displayName) to \(account.type.displayName)")
         } catch {
             return .failure(message: error.localizedDescription)
@@ -487,6 +489,24 @@ enum ManualTokenImporter {
     }
 
     // MARK: - Helpers
+
+    static func copilotAccount(_ raw: [String: Any]) throws -> ParsedAccount {
+        let unwrapped = unwrapNestedTokens(raw)
+        return try preserveIdentity(normalizeCopilot(unwrapped), from: unwrapped)
+    }
+
+    static func codexFilename(_ record: [String: Any]) -> String {
+        let access = firstString(record, keys: ["access_token"])
+        let email = TokenRefreshService.seatEmail(record)
+        if let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: access)
+            ?? firstString(record, keys: ["account_id"])
+        {
+            return CodexWorkspaceCredentials.seatFilename(accountID: accountID, email: email)
+        }
+        if let email, email.contains("@") { return "codex-\(sanitize(email.lowercased())).json" }
+        let lineage = firstString(record, keys: ["refresh_token", "access_token"]) ?? UUID().uuidString
+        return "codex-account-\(KiroAccountIdentity.digest(lineage)).json"
+    }
 
     enum ImportError: LocalizedError {
         case missingField(String)
@@ -511,7 +531,8 @@ enum ManualTokenImporter {
 
     private static func nestedAccountName(_ raw: [String: Any]) -> String? {
         let account = raw["account"] as? [String: Any]
-        return firstString(account ?? [:], keys: ["label", "login"])
+        return firstString(account ?? [:], keys: ["login"])
+            ?? AccountCredentialIdentity.email(account ?? [:])
     }
 
     private static func intValue(_ json: [String: Any], keys: [String]) -> Int? {

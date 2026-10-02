@@ -27,7 +27,7 @@ VibeRouter manages OAuth tokens, auto-refreshes them, routes requests, and handl
 
 ## Step 1: Install VibeRouter
 
-1. **Download [VibeRouter](https://github.com/Geekyshubham/vibeproxy-ultra/releases)** from the releases page or build from source
+1. **Download [VibeRouter](https://github.com/Geekyshubham/VibeRouter/releases)** from the releases page or build from source
 2. **Install**: Drag `VibeRouter.app` to your `/Applications` folder
 3. **Launch**: Open VibeRouter from Applications
    - If macOS blocks it: Right-click → Open, then click "Open" in the dialog
@@ -609,5 +609,5 @@ VibeRouter is built on top of [CLIProxyAPI](https://github.com/router-for-me/CLI
 ---
 
 **Need Help?**
-- Report issues: [GitHub Issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)
+- Report issues: [GitHub Issues](https://github.com/Geekyshubham/VibeRouter/issues)
 - VibeRouter by Geekyshubham

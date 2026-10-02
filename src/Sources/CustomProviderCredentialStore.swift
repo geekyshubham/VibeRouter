@@ -89,8 +89,6 @@ final class CustomProviderCredentialStore {
                 return .alreadyPresent(preferredRecord(from: existingRecords))
             }
 
-            let filename = "openai-compat-\(sanitizeFilenameComponent(providerID))-\(UUID().uuidString.prefix(8)).json"
-            let filePath = directoryURL.appendingPathComponent(filename)
             let authData = credentialJSONObject(
                 providerID: providerID,
                 apiKey: apiKey,
@@ -98,7 +96,7 @@ final class CustomProviderCredentialStore {
                 createdAt: createdAt,
                 isDisabled: false
             )
-            try writeCredentialJSONUnlocked(authData, to: filePath, providerID: providerID)
+            let filePath = try AccountCredentialStore.save(authData, in: directoryURL)
 
             return .created(try record(from: authData, filePath: filePath))
         }

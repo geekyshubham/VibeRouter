@@ -193,6 +193,9 @@ enum CLIHarnessAutoconfigure {
                 "ANTHROPIC_API_KEY": apiKey,
                 "ANTHROPIC_AUTH_TOKEN": apiKey,
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+                "API_TIMEOUT_MS": "1800000",
+                // Kiro's HTTP payload ceiling is below its 1M model window.
+                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "20",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
                 "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "[VibeRouter] \(opus)",
                 "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "Kiro via VibeRouter",
@@ -274,7 +277,7 @@ enum CLIHarnessAutoconfigure {
         # Launch Claude Code via VibeRouter (Kiro, OpenCode Go, Codex, etc.).
         # Does NOT touch your Anthropic subscription — use `claude` for that.
         set -e
-        if ! curl -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" \(baseURL)/v1/models; then
+        if ! curl --connect-timeout 2 --max-time 20 -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" \(baseURL)/v1/models; then
           echo "VibeRouter is not running. Start VibeRouter.app first." >&2
           exit 1
         fi
@@ -284,6 +287,8 @@ enum CLIHarnessAutoconfigure {
         mkdir -p "$CLAUDE_CONFIG_DIR"
         unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
         export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+        export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1800000}"
+        export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-20}"
         echo "Starting Claude Code via VibeRouter (\(baseURL)). Anthropic subscription: claude"
         exec claude --settings "$HOME/.claude/settings.viberouter.json" "$@"
         """

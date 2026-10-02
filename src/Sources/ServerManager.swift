@@ -424,7 +424,14 @@ class ServerManager: ObservableObject {
             return
         }
         
-        authProcess.arguments = ["--config", configPath, "-\(loginFlag)"]
+        let loginStaging: AuthLoginStaging
+        do {
+            loginStaging = try AuthLoginStaging(configPath: configPath, targetDirectory: authDirectoryURL())
+        } catch {
+            completion(false, error.localizedDescription)
+            return
+        }
+        authProcess.arguments = ["--config", loginStaging.configURL.path, "-\(loginFlag)"]
         
         // Create pipes for output
         let outputPipe = Pipe()
@@ -490,8 +497,6 @@ class ServerManager: ObservableObject {
         // Set environment to inherit from parent
         authProcess.environment = ProcessInfo.processInfo.environment
 
-        // Snapshot auth dir *before* login so we can detect real credential writes.
-        let preAuthSnapshot = AuthAccountLifecycle.authFileSnapshot()
         let completionOnce = AuthCompletionBox(completion: completion)
 
         authProcess.terminationHandler = { [weak self] process in
@@ -503,8 +508,14 @@ class ServerManager: ObservableObject {
 
             // Give CLIProxy a moment to flush the new auth JSON to disk.
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.6) {
-                AuthAccountLifecycle.clearTombstonesForPresentCodexSeats()
-                let changed = AuthAccountLifecycle.authFilesChanged(since: preAuthSnapshot)
+                defer { loginStaging.cleanup() }
+                let changed: [URL]
+                do {
+                    changed = try loginStaging.importAccounts()
+                } catch {
+                    completionOnce.finish(false, "Could not save this account: \(error.localizedDescription)")
+                    return
+                }
                 let names = changed.map(\.lastPathComponent)
                 NSLog(
                     "[Auth] Exit %d — auth files changed: %@",
@@ -526,11 +537,9 @@ class ServerManager: ObservableObject {
                 }
 
                 if exitCode == 0 {
-                    // Exit 0 but no new files — often re-login of the same seat (overwrite).
-                    // Treat as soft success if any matching provider file exists and was recently touched.
                     completionOnce.finish(
-                        true,
-                        "✓ Authentication finished.\n\nIf you don't see a new account, you may have re-authorized an existing seat (same email/workspace). Open Settings and refresh."
+                        false,
+                        "Authentication finished without saving credentials. Complete the account login and try again."
                     )
                 } else {
                     let detail = capture.text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -573,6 +582,7 @@ class ServerManager: ObservableObject {
                 )
             }
         } catch {
+            loginStaging.cleanup()
             clearActiveAuthProcess(authProcess)
             NSLog("[Auth] Failed to start: %@", error.localizedDescription)
             completionOnce.finish(false, "Failed to start auth process: \(error.localizedDescription)")

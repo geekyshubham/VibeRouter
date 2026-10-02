@@ -97,6 +97,7 @@ export default function AccountsTab() {
     } finally {
       setBusy(null);
       void qc.invalidateQueries({ queryKey: KEY });
+      void qc.invalidateQueries({ queryKey: ['mgmt', '/routing/models'] });
     }
   };
 
@@ -113,6 +114,7 @@ export default function AccountsTab() {
       await apiClient.del(`/auth-files?name=${encodeURIComponent(file.name)}`);
       toast('Account removed', 'ok');
       await qc.invalidateQueries({ queryKey: KEY });
+      await qc.invalidateQueries({ queryKey: ['mgmt', '/routing/models'] });
     } catch {
       toast("Couldn't remove the account", 'bad');
     } finally {

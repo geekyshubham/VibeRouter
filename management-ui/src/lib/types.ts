@@ -119,8 +119,9 @@ export interface UsageDailyProviderRow {
 /** A single day's usage report. */
 export interface UsageDailyResponse {
   date: string;
-  /** Token-like units only; Kiro millicredits are excluded by design. */
+  /** Measured tokens only, matching the app's DailyUsageSummary. */
   totalTokens: number;
+  totalEstimatedTokens?: number;
   totalCostUSD: number;
   totalRequests: number;
   providers: UsageDailyProviderRow[] | null;

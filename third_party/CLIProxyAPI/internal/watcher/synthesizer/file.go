@@ -66,7 +66,7 @@ func SynthesizeAuthFile(ctx *SynthesisContext, fullPath string, data []byte) []*
 }
 
 func synthesizeFileAuths(ctx *SynthesisContext, fullPath string, data []byte) []*coreauth.Auth {
-	if ctx == nil || len(data) == 0 {
+	if ctx == nil || len(data) == 0 || strings.HasPrefix(filepath.Base(fullPath), ".") {
 		return nil
 	}
 	now := ctx.Now

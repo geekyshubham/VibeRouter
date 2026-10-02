@@ -256,8 +256,7 @@ final class NativeSessionManager: ObservableObject {
 
             if seatMatch {
                 // Same org seat: only the native login email is "current".
-                if let emailMatch { return emailMatch }
-                return true
+                return emailMatch == true
             }
             // Different seats (seat known on both sides) never match by email alone.
             if fileID != nil, identityID != nil {
@@ -266,8 +265,9 @@ final class NativeSessionManager: ObservableObject {
             // No seat id on either side — fall through to email.
             return emailMatch == true
         }
-        if let email = accountEmail?.lowercased(),
-           let other = identity.email?.lowercased(),
+        if let email = accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           let other = identity.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           email.contains("@"), other.contains("@"),
            email == other
         {
             return true
@@ -310,6 +310,9 @@ final class NativeSessionManager: ObservableObject {
         }
         guard let src = readJSON(account.filePath) else {
             return .failure(message: "Could not read credentials for \(account.baseDisplayName).")
+        }
+        guard AccountCredentialIdentity.isConsistent(src) else {
+            return .failure(message: "This account's credentials do not match its identity. Re-import its own session before switching.")
         }
 
         // Disk + Keychain writes run off the main thread (the `security` subprocess can
@@ -456,7 +459,11 @@ final class NativeSessionManager: ObservableObject {
             if let mail = resolved.email ?? email { updated["email"] = mail }
             updated["last_refresh"] = Self.isoNow()
             updated["type"] = "codex"
-            try backupThenWrite(json: updated, to: alsoUpdateAuthFile)
+            // Switching the native workspace must not turn the source account's
+            // managed file into the destination account. Its snapshot stays intact.
+            if !AccountCredentialIdentity.hasConflict(src, updated) {
+                try backupThenWrite(json: updated, to: alsoUpdateAuthFile)
+            }
 
             // Durable per-seat file already written via persistSeat above.
         }
@@ -488,9 +495,7 @@ final class NativeSessionManager: ObservableObject {
         if let email { snap["email"] = email }
 
         let seatURL = authFile.deletingLastPathComponent()
-            .appendingPathComponent(
-                CodexWorkspaceCredentials.seatFilename(accountID: outgoingID, email: email)
-            )
+            .appendingPathComponent(AccountCredentialIdentity.filename(snap))
         // Prefer not to clobber a fresher live seat file with an older snapshot.
         if let existing = readJSON(seatURL),
            let existingAccess = nonEmpty(existing["access_token"]),
@@ -500,7 +505,7 @@ final class NativeSessionManager: ObservableObject {
         {
             return
         }
-        try backupThenWrite(json: snap, to: seatURL)
+        try AccountCredentialStore.save(snap, in: authFile.deletingLastPathComponent())
     }
 
     private func writeClaudeAuth(from src: [String: Any]) throws {

@@ -135,9 +135,9 @@ struct AboutView: View {
 
     private var links: some View {
         VStack(alignment: .leading, spacing: 6) {
-            linkRow(title: "GitHub · Releases", url: "https://github.com/Geekyshubham/vibeproxy-ultra/releases")
-            linkRow(title: "Report an issue", url: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")
-            linkRow(title: "Source repository", url: "https://github.com/Geekyshubham/vibeproxy-ultra")
+            linkRow(title: "GitHub · Releases", url: "https://github.com/Geekyshubham/VibeRouter/releases")
+            linkRow(title: "Report an issue", url: "https://github.com/Geekyshubham/VibeRouter/issues")
+            linkRow(title: "Source repository", url: "https://github.com/Geekyshubham/VibeRouter")
         }
     }
 

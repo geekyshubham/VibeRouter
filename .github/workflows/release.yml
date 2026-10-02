@@ -268,7 +268,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeRouter-arm64.zip"
+                <enclosure url="https://github.com/Geekyshubham/VibeRouter/releases/download/v${VERSION}/VibeRouter-arm64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${ARM64_SIGNATURE}"
                            length="${ARM64_LENGTH}"/>
@@ -288,7 +288,7 @@ jobs:
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
             <channel>
               <title>VibeRouter Updates (Intel)</title>
-              <link>https://github.com/Geekyshubham/vibeproxy-ultra/releases</link>
+              <link>https://github.com/Geekyshubham/VibeRouter/releases</link>
               <description>Most recent updates to VibeRouter for Intel Macs</description>
               <language>en</language>
             </channel>
@@ -304,7 +304,7 @@ jobs:
                 <sparkle:shortVersionString>${VERSION}</sparkle:shortVersionString>
                 <sparkle:minimumSystemVersion>13.0</sparkle:minimumSystemVersion>
                 <pubDate>${TODAY}</pubDate>
-                <enclosure url="https://github.com/Geekyshubham/vibeproxy-ultra/releases/download/v${VERSION}/VibeRouter-x86_64.zip"
+                <enclosure url="https://github.com/Geekyshubham/VibeRouter/releases/download/v${VERSION}/VibeRouter-x86_64.zip"
                            type="application/octet-stream"
                            sparkle:edSignature="${X86_64_SIGNATURE}"
                            length="${X86_64_LENGTH}"/>
@@ -364,7 +364,7 @@ jobs:
 
             ### What's New
 
-            See the [CHANGELOG](https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/CHANGELOG.md) for details.
+            See the [CHANGELOG](https://github.com/Geekyshubham/VibeRouter/blob/main/CHANGELOG.md) for details.
 
             ### Verification
 

@@ -10,7 +10,7 @@ import type { AuthFile, ModelCatalogEntry, ModelRoutingResponse } from './types'
 
 export function useAuthFiles() {
   const q = useManagementQuery<{ files: AuthFile[] | null }>('/auth-files', { refetchInterval: 30_000 });
-  return { ...q, files: pluckArray<AuthFile>(q.data, 'files').filter((f) => f && f.name) };
+  return { ...q, files: pluckArray<AuthFile>(q.data, 'files').filter((f) => f && f.name && !f.name.split(/[\\/]/).pop()?.startsWith('.')) };
 }
 
 export function useRouting() {

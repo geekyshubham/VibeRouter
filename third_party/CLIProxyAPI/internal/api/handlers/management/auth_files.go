@@ -321,7 +321,7 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			continue
 		}
 		name := e.Name()
-		if !strings.HasSuffix(strings.ToLower(name), ".json") {
+		if strings.HasPrefix(name, ".") || !strings.HasSuffix(strings.ToLower(name), ".json") {
 			continue
 		}
 		if info, errInfo := e.Info(); errInfo == nil {
@@ -331,6 +331,9 @@ func (h *Handler) listAuthFilesFromDisk(c *gin.Context) {
 			full := filepath.Join(h.cfg.AuthDir, name)
 			if data, errRead := os.ReadFile(full); errRead == nil {
 				typeValue := gjson.GetBytes(data, "type").String()
+				if strings.TrimSpace(typeValue) == "" {
+					continue
+				}
 				emailValue := gjson.GetBytes(data, "email").String()
 				fileData["type"] = typeValue
 				fileData["email"] = emailValue
@@ -388,6 +391,9 @@ func (h *Handler) buildAuthFileEntry(auth *coreauth.Auth) gin.H {
 	name := strings.TrimSpace(auth.FileName)
 	if name == "" {
 		name = auth.ID
+	}
+	if strings.HasPrefix(filepath.Base(name), ".") {
+		return nil
 	}
 	entry := gin.H{
 		"id":             auth.ID,
@@ -755,7 +761,7 @@ func (h *Handler) DeleteAuthFile(c *gin.Context) {
 				continue
 			}
 			name := e.Name()
-			if !strings.HasSuffix(strings.ToLower(name), ".json") {
+			if strings.HasPrefix(name, ".") || !strings.HasSuffix(strings.ToLower(name), ".json") {
 				continue
 			}
 			full := filepath.Join(h.cfg.AuthDir, name)

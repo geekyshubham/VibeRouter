@@ -168,6 +168,17 @@ enum AuthAccountLifecycle {
         // Always include the visible row's file.
         var urls: [URL] = [account.filePath]
 
+        if account.type != .codex,
+           let target = NativeUsageFetcher.readAuthPayload(at: account.filePath),
+           let files = try? FileManager.default.contentsOfDirectory(at: authDirectory, includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension == "json" && !file.lastPathComponent.hasPrefix(".") {
+                guard let other = NativeUsageFetcher.readAuthPayload(at: file),
+                      AccountCredentialIdentity.provider(target) == AccountCredentialIdentity.provider(other),
+                      AccountCredentialIdentity.sameAccount(target, other) else { continue }
+                urls.append(file)
+            }
+        }
+
         if account.type == .codex {
             let target = codexIdentity(in: account.filePath)
             let targetID = target.accountID
@@ -242,9 +253,6 @@ enum AuthAccountLifecycle {
         if let seatName, file.lastPathComponent.lowercased() == seatName {
             if let fileEmail, let targetEmail, !targetEmail.isEmpty {
                 return fileEmail == targetEmail
-            }
-            if fileEmail == nil || fileEmail?.isEmpty == true {
-                return true
             }
         }
         return false

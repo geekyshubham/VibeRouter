@@ -181,7 +181,7 @@ final class KiroProxyUsageTests: XCTestCase {
         XCTAssertLessThan(translated.estimatedInputTokens, (output.utf8.count + 2 * system.utf8.count) / 4, "system prompt counted once")
     }
 
-    func testCountTokensMatchesTrimmedPayloadNotRawHistory() {
+    func testCountTokensIncludesFullHistoryToTriggerCompaction() {
         var messages: [[String: Any]] = []
         for index in 0..<40 {
             messages.append(["role": "user", "content": "question \(index) " + String(repeating: "q", count: 40_000)])
@@ -193,8 +193,8 @@ final class KiroProxyUsageTests: XCTestCase {
             KiroDirectProvider.requestPayload(conversationState: translated.conversationState)
         )
         XCTAssertGreaterThan(untrimmed, KiroDirectProvider.maxRequestBytes)
-        XCTAssertLessThanOrEqual(translated.estimatedInputTokens, KiroDirectProvider.maxRequestBytes / 4)
-        XCTAssertGreaterThan(translated.estimatedInputTokens, KiroDirectProvider.maxRequestBytes / 8)
+        XCTAssertEqual(translated.estimatedInputTokens, untrimmed / 4)
+        XCTAssertGreaterThan(translated.estimatedInputTokens, KiroDirectProvider.maxRequestBytes / 4)
     }
 
     func testRequestPayloadMovesEffortOutOfConversationState() {

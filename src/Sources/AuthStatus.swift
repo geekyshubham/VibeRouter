@@ -252,7 +252,7 @@ class AuthManager: ObservableObject {
     }
 
     /// One row per identity per provider.
-    /// Identity key: email → login/username → (provider-specific) → file id (no merge).
+    /// Identity includes the provider, login, scope, and token lineage or full API key.
     /// Prefer: enabled > session still usable > newer mtime > stable id.
     private static func deduplicateAccounts(_ accounts: [AuthAccount]) -> [AuthAccount] {
         guard accounts.count > 1 else { return accounts }
@@ -276,73 +276,11 @@ class AuthManager: ObservableObject {
     }
 
     /// Stable identity used only for UI/list dedupe (does not delete files on disk).
-    /// Codex/ChatGPT: email alone is NOT unique — one login can own Go + Team seats
-    /// (Cockpit stores them as separate accounts keyed by chatgpt_account_id).
+    /// Shared rules keep workspaces, anonymous sessions, and API keys distinct.
     static func identityKey(for account: AuthAccount) -> String {
-        if account.type == .codex {
-            if let seat = codexSeatIdentity(for: account) {
-                return seat
-            }
-        }
-
-        if let email = account.email?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !email.isEmpty
-        {
-            return "email:" + email.lowercased()
-        }
-        if let login = account.login?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !login.isEmpty
-        {
-            return "login:" + login.lowercased()
-        }
-
-        // Filename patterns like `xai-user@host.json` or `codex-user@host.json`
-        let name = account.filePath.deletingPathExtension().lastPathComponent
-        if let at = name.firstIndex(of: "@") {
-            // Strip provider prefix up to first '-' when it looks like email-bearing name.
-            let afterPrefix: Substring = {
-                if let dash = name.firstIndex(of: "-"), dash < at {
-                    return name[name.index(after: dash)...]
-                }
-                return name[...]
-            }()
-            let candidate = String(afterPrefix).trimmingCharacters(in: .whitespacesAndNewlines)
-            if candidate.contains("@") {
-                return "email:" + candidate.lowercased()
-            }
-        }
-
-        // No mergeable identity — keep as unique file (API keys, device flows, etc.).
-        return "file:" + account.id
-    }
-
-    /// `email|account_id` when either JWT or stored account_id is present.
-    private static func codexSeatIdentity(for account: AuthAccount) -> String? {
-        guard let data = try? Data(contentsOf: account.filePath),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-
-        let access = json["access_token"] as? String
-        let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: access)
-            ?? (json["account_id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = (account.email ?? json["email"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-
-        if let accountID, !accountID.isEmpty {
-            let mail = (email?.isEmpty == false) ? email! : "unknown"
-            return "codex-seat:\(mail)|\(accountID.lowercased())"
-        }
-        // codex-seat-{uuid}.json filename fallback
-        let name = account.filePath.deletingPathExtension().lastPathComponent.lowercased()
-        if name.hasPrefix("codex-seat-") {
-            let id = String(name.dropFirst("codex-seat-".count))
-            if !id.isEmpty {
-                let mail = (email?.isEmpty == false) ? email! : "unknown"
-                return "codex-seat:\(mail)|\(id)"
-            }
-        }
-        return nil
+        guard let payload = NativeUsageFetcher.readAuthPayload(at: account.filePath),
+              AccountCredentialIdentity.isConsistent(payload) else { return "file:" + account.id }
+        return AccountCredentialIdentity.key(payload)
     }
 
     private static func prefers(_ candidate: AuthAccount, over existing: AuthAccount) -> Bool {

@@ -3,8 +3,16 @@ package management
 import (
 	"encoding/json"
 	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"testing"
+
+	"github.com/gin-gonic/gin"
 )
 
 // swiftEncodedFixture is REAL output from Swift's JSONEncoder, produced by encoding
@@ -74,7 +82,7 @@ const swiftEncodedFixture = `{
     }
   },
   "updatedAt": 1784000000,
-  "version": 1
+  "version": 3
 }`
 
 func parseFixture(t *testing.T) *usageDailyFile {
@@ -89,6 +97,20 @@ func parseFixture(t *testing.T) *usageDailyFile {
 // The schema version must match what the Swift store writes, or loadUsageDailyFile
 // discards the file as unknown and the console silently shows "no data".
 func TestSwiftFixtureMatchesSchemaVersion(t *testing.T) {
+	// Read the actual writer, not just the pasted fixture: the old test let both
+	// Go constants drift together while Swift moved to schema 3.
+	source, err := os.ReadFile("../../../../../../src/Sources/UsageDailyStore.swift")
+	if err != nil {
+		t.Fatal(err)
+	}
+	match := regexp.MustCompile(`schemaVersion = (\d+)`).FindSubmatch(source)
+	if len(match) != 2 {
+		t.Fatal("Swift schema version missing")
+	}
+	version, _ := strconv.Atoi(string(match[1]))
+	if version != usageDailySchemaVersion {
+		t.Fatalf("Swift schema %d differs from Go schema %d", version, usageDailySchemaVersion)
+	}
 	parsed := parseFixture(t)
 	if parsed.Version != usageDailySchemaVersion {
 		t.Fatalf("version = %d, want %d (Swift and Go schema versions have drifted)", parsed.Version, usageDailySchemaVersion)
@@ -182,32 +204,21 @@ func TestSwiftEnumSpellingsMatchGoSwitches(t *testing.T) {
 
 // The headline numbers: tokens exclude credits, cost includes everything.
 func TestTotalsApplyMixedUnitRules(t *testing.T) {
-	parsed := parseFixture(t)
-	providers := parsed.Days["2026-07-30"]
-
-	totalTokens := 0
-	totalCost := 0.0
-	totalRequests := 0
-	for _, provider := range providers {
-		for _, m := range provider.Models {
-			totalCost += m.EstimatedCostUSD
-			totalRequests += m.RequestCount
-			if volumeAggregatesAsTokens(m.VolumeUnit) {
-				totalTokens += m.TotalVolume
-			}
-		}
+	writeUsageHistoryFixture(t, swiftEncodedFixture)
+	status, resp := queryUsageHistory(t, "2026-07-30")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
 	}
-
-	// 2,242,000 codex + 91,000 grok. Kiro's 4,200 millicredits are excluded.
-	if totalTokens != 2333000 {
-		t.Errorf("totalTokens = %d, want 2333000 (credits must be excluded)", totalTokens)
+	// Match the menu bar: measured tokens exclude both estimates and credits.
+	if resp.TotalTokens != 2242000 || resp.TotalEstimatedTokens != 91000 {
+		t.Errorf("tokens = %d + %d estimated", resp.TotalTokens, resp.TotalEstimatedTokens)
 	}
 	// Cost is the one basis comparable across unlike units.
-	if math.Abs(totalCost-5.918) > 1e-9 {
-		t.Errorf("totalCostUSD = %v, want 5.918", totalCost)
+	if math.Abs(resp.TotalCostUSD-5.918) > 1e-9 {
+		t.Errorf("totalCostUSD = %v, want 5.918", resp.TotalCostUSD)
 	}
-	if totalRequests != 98 {
-		t.Errorf("totalRequests = %d, want 98", totalRequests)
+	if resp.TotalRequests != 98 {
+		t.Errorf("totalRequests = %d, want 98", resp.TotalRequests)
 	}
 }
 
@@ -310,13 +321,89 @@ func TestProviderDisplayNamesMatchSwift(t *testing.T) {
 	}
 }
 
-// An unknown schema version must degrade to "no data" rather than being guessed at.
-func TestUnknownSchemaVersionIsTreatedAsNoData(t *testing.T) {
-	var parsed usageDailyFile
-	if err := json.Unmarshal([]byte(`{"version":999,"updatedAt":1,"days":{}}`), &parsed); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+func TestUnsupportedSchemaIsAnErrorInsteadOfZeroUsage(t *testing.T) {
+	for _, version := range []int{1, 2, 999} {
+		t.Run(strconv.Itoa(version), func(t *testing.T) {
+			writeUsageHistoryFixture(t, `{"version":`+strconv.Itoa(version)+`,"days":{}}`)
+			status, _ := queryUsageHistory(t, "2026-07-30")
+			if status != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want error for incompatible history", status)
+			}
+		})
 	}
-	if parsed.Version == usageDailySchemaVersion {
-		t.Fatal("fixture should carry a deliberately unknown version")
+}
+
+func writeUsageHistoryFixture(t *testing.T, fixture string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, "Library", "Application Support", "VibeRouter")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, usageDailyFileName), []byte(fixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func queryUsageHistory(t *testing.T, date string) (int, usageDailyResponse) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/usage-daily?date="+date, nil)
+	(&Handler{}).GetUsageDaily(c)
+	var resp usageDailyResponse
+	if rec.Code == http.StatusOK {
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return rec.Code, resp
+}
+
+func TestDailyUsageMixedProviderUnitsAndFidelity(t *testing.T) {
+	parsed := parseFixture(t)
+	providers := parsed.Days["2026-07-30"]
+	kiro := providers["kiro"]
+	kiro.Fidelity = "partial"
+	kiro.Models = append(kiro.Models, usageDailyModel{Model: "proxy-estimate", TotalVolume: 800000, VolumeUnit: "estimatedTokens"})
+	providers["kiro"] = kiro
+	grok := providers["grok"]
+	grok.Fidelity = "legacy"
+	providers["grok"] = grok
+	data, err := json.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeUsageHistoryFixture(t, string(data))
+	status, resp := queryUsageHistory(t, "2026-07-30")
+	if status != http.StatusOK {
+		t.Fatalf("status = %d", status)
+	}
+	if resp.TotalTokens != 2242000 || resp.TotalEstimatedTokens != 891000 {
+		t.Fatalf("wrong token totals: %+v", resp)
+	}
+	for _, row := range resp.Providers {
+		if row.ProviderID == "kiro" && row.TotalVolume != 4200 {
+			t.Fatalf("estimates inflated credit volume: %+v", row)
+		}
+	}
+	if len(resp.Caveats) != 2 {
+		t.Fatalf("missing partial/legacy caveats: %v", resp.Caveats)
+	}
+	if len(resp.AvailableDays) != 1 || resp.UpdatedAt == "" || resp.Empty {
+		t.Fatalf("missing history metadata: %+v", resp)
+	}
+}
+
+func TestUsageHistoryMissingFileStillValidatesDates(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	status, resp := queryUsageHistory(t, "2026-07-30")
+	if status != http.StatusOK || !resp.Empty {
+		t.Fatalf("absent history status=%d empty=%v", status, resp.Empty)
+	}
+	status, _ = queryUsageHistory(t, "2026-02-30")
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid date status=%d", status)
 	}
 }

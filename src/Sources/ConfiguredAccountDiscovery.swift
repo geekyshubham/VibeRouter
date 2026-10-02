@@ -121,7 +121,8 @@ enum ConfiguredAccountDiscovery {
         _ discovered: DiscoveredConfiguredAccount,
         existingAccounts: [AuthAccount],
         zaiAPIKeys: [String] = [],
-        customCredentials: [String: [CustomProviderCredential]] = [:]
+        customCredentials: [String: [CustomProviderCredential]] = [:],
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
     ) -> Bool {
         switch discovered.importKind {
         case let .zaiAPIKey(apiKey):
@@ -130,28 +131,46 @@ enum ConfiguredAccountDiscovery {
             let stored = customCredentials[ProviderCatalog.openCodeGoProviderName] ?? []
             return stored.contains { $0.apiKey == apiKey && !$0.isDisabled }
         case .kiroIDE:
-            // Kiro discovery uses a generic label; any existing Kiro auth file means imported.
-            return !existingAccounts.isEmpty
-        case .grokCLI, .grokOpenCode:
-            let normalized = discovered.displayName.lowercased()
+            let cache = ConfiguredAccountImporter.kiroIDETokenRelativePaths.lazy
+                .compactMap { NativeUsageFetcher.readAuthPayload(at: home.appendingPathComponent($0)) }.first
+            guard let cache else { return false }
             return existingAccounts.contains { account in
-                account.baseDisplayName.lowercased() == normalized
-                    || account.email?.lowercased() == normalized
-                    || account.displayName.lowercased() == normalized
+                guard let stored = NativeUsageFetcher.readAuthPayload(at: account.filePath) else { return false }
+                return KiroAccountIdentity.sameAccount(stored, cache)
+            }
+        case .codexApp, .codexOpenCode:
+            let local: [String: Any]?
+            if discovered.importKind == .codexApp {
+                local = NativeUsageFetcher.readCodexAppPayload(at: home.appendingPathComponent(".codex/auth.json"))
+            } else {
+                let entry = readOpenCodeAuthPayload()?["openai"] as? [String: Any]
+                var normalized = entry ?? [:]
+                normalized["access_token"] = entry?["access"] ?? entry?["access_token"]
+                normalized["account_id"] = entry?["accountId"] ?? entry?["account_id"]
+                local = entry == nil ? nil : normalized
+            }
+            guard let local else { return false }
+            return existingAccounts.contains { account in
+                guard let stored = NativeUsageFetcher.readAuthPayload(at: account.filePath) else { return false }
+                return TokenRefreshService.sameCodexSeat(stored, as: local)
+            }
+        case .copilotApp:
+            guard discovered.id.hasPrefix("copilot-") else { return false }
+            let identity = String(discovered.id.dropFirst("copilot-".count))
+            return existingAccounts.contains { account in
+                guard let stored = NativeUsageFetcher.readAuthPayload(at: account.filePath) else { return false }
+                return AccountCredentialIdentity.key(stored) == identity
             }
         default:
             break
         }
 
-        if let customProviderID = discovered.customProviderID {
-            return !(customCredentials[customProviderID]?.filter { !$0.isDisabled }.isEmpty ?? true)
-        }
-
         let normalized = discovered.displayName.lowercased()
+        guard normalized.contains("@") else { return false }
+        let identity: [String: Any] = ["type": discovered.serviceType.rawValue, "email": normalized]
         return existingAccounts.contains { account in
-            account.baseDisplayName.lowercased() == normalized
-                || account.email?.lowercased() == normalized
-                || account.displayName.lowercased() == normalized
+            guard let stored = NativeUsageFetcher.readAuthPayload(at: account.filePath) else { return false }
+            return AccountCredentialIdentity.sameAccount(stored, identity)
         }
     }
 
@@ -172,13 +191,16 @@ enum ConfiguredAccountDiscovery {
                   tokens["access_token"] != nil
             else { continue }
 
-            let email = JWTEmailExtractor.email(from: tokens["id_token"] as? String)
-                ?? JWTEmailExtractor.email(from: tokens["access_token"] as? String)
+            let email = JWTEmailExtractor.email(from: tokens["access_token"] as? String)
+                ?? JWTEmailExtractor.email(from: tokens["id_token"] as? String)
                 ?? "Codex account"
-            guard seen.insert(email.lowercased()).inserted else { continue }
+            let seat = CodexWorkspaceCredentials.chatgptAccountID(from: tokens["access_token"] as? String)
+                ?? tokens["account_id"] as? String ?? ""
+            let identity = email.lowercased() + "|" + seat
+            guard seen.insert(identity).inserted else { continue }
             accounts.append(
                 DiscoveredConfiguredAccount(
-                    id: "codex-app-\(email)",
+                    id: "codex-app-\(identity)",
                     serviceType: .codex,
                     displayName: email,
                     sourceAppName: "Codex app",
@@ -196,10 +218,13 @@ enum ConfiguredAccountDiscovery {
             let email = JWTEmailExtractor.email(from: access)
                 ?? JWTEmailExtractor.email(from: stringValue(openai, keys: ["id_token", "idToken"]))
                 ?? "Codex account"
-            if seen.insert(email.lowercased()).inserted {
+            let seat = CodexWorkspaceCredentials.chatgptAccountID(from: access)
+                ?? stringValue(openai, keys: ["accountId", "account_id"]) ?? ""
+            let identity = email.lowercased() + "|" + seat
+            if seen.insert(identity).inserted {
                 accounts.append(
                     DiscoveredConfiguredAccount(
-                        id: "codex-opencode-\(email)",
+                        id: "codex-opencode-\(identity)",
                         serviceType: .codex,
                         displayName: email,
                         sourceAppName: "OpenCode",
@@ -313,11 +338,10 @@ enum ConfiguredAccountDiscovery {
 
     // MARK: - Copilot
 
-    private static func discoverCopilot() -> [DiscoveredConfiguredAccount] {
+    static func discoverCopilot(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> [DiscoveredConfiguredAccount] {
         var accounts: [DiscoveredConfiguredAccount] = []
         var seenLabels: Set<String> = []
 
-        let home = FileManager.default.homeDirectoryForCurrentUser
         let candidateFiles = [
             home.appendingPathComponent(".config/github-copilot/oauth.json"),
             home.appendingPathComponent(".config/github-copilot/apps.json"),
@@ -331,17 +355,18 @@ enum ConfiguredAccountDiscovery {
                 guard stringValue(entry, keys: ["accessToken", "access_token", "token"]) != nil
                 else { continue }
                 let account = entry["account"] as? [String: Any]
-                let label = (account?["label"] as? String)
-                    ?? (account?["login"] as? String)
+                let label = (account?["login"] as? String)
+                    ?? (account?["label"] as? String)
                     ?? (entry["login"] as? String)
                     ?? (entry["user"] as? String)
                     ?? (entry["id"] as? String).map { "GitHub \($0)" }
                     ?? "GitHub Copilot account"
-                let normalized = label.lowercased()
-                guard seenLabels.insert(normalized).inserted else { continue }
+                guard let parsed = try? ManualTokenImporter.copilotAccount(entry) else { continue }
+                let identity = AccountCredentialIdentity.key(parsed.record)
+                guard seenLabels.insert(identity).inserted else { continue }
                 accounts.append(
                     DiscoveredConfiguredAccount(
-                        id: "copilot-\(label)",
+                        id: "copilot-\(identity)",
                         serviceType: .copilot,
                         displayName: label,
                         sourceAppName: "GitHub Copilot",

@@ -98,6 +98,7 @@ export default function UsageByDatePanel() {
             <div className="usage-total">
               <div className="lbl">Tokens</div>
               <div className="val">{tokens(data?.totalTokens)}</div>
+              {!!data?.totalEstimatedTokens && <div className="small">+{tokens(data.totalEstimatedTokens)} estimated</div>}
             </div>
             <div className="usage-total">
               <div className="lbl">Requests</div>

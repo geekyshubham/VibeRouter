@@ -96,7 +96,7 @@ enum KiroProxyUsageLedger {
 
     private static var parsedCache: [String: Parsed] = [:]
 
-    /// The login (`cli-social` or `auth-file:<name>`) that paid for the newest proxied request.
+    /// The login (`cli-social`, `cli-oidc`, or `auth-file:<name>`) billed by the newest request.
     static func latestAccount(from url: URL? = fileURL) -> String? {
         guard let url else { return nil }
         return parsed(url)?.latestAccount?.account

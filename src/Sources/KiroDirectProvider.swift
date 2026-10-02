@@ -9,9 +9,8 @@ import SQLite3
 /// translates the Anthropic Messages API in both directions, so Claude Code can
 /// spend a Kiro subscription the same way it spends an Anthropic one.
 ///
-/// Requests are buffered and then replayed as SSE rather than relayed
-/// incrementally: correctness first, and a Kiro turn is short enough that the
-/// added latency is the model's own think time, not ours.
+/// Text is relayed incrementally. Tool calls are released only after a complete,
+/// validated upstream response, so a truncated stream cannot execute a partial call.
 enum KiroDirectProvider {
     static let endpoint = "https://codewhisperer.us-east-1.amazonaws.com/generateAssistantResponse"
     static let modelPrefix = "kiro/"
@@ -168,8 +167,7 @@ enum KiroDirectProvider {
     }
 
     static func modelName(in body: String) -> String? {
-        guard let data = body.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        guard let root = try? JSONSerialization.jsonObject(with: KiroJSON.repaired(body)) as? [String: Any]
         else { return nil }
         return root["model"] as? String
     }
@@ -251,24 +249,77 @@ enum KiroDirectProvider {
     /// Which login paid for a request, so its credits reconcile with that account's limits.
     enum Credential: Equatable {
         case cliSocial
+        case cliOIDC
         case authFile(String)
 
         var ledgerAccount: String {
             switch self {
             case .cliSocial: return "cli-social"
+            case .cliOIDC: return "cli-oidc"
             case .authFile(let name): return "auth-file:\(name)"
+            }
+        }
+
+        var isCLI: Bool {
+            switch self {
+            case .cliSocial, .cliOIDC: return true
+            case .authFile: return false
             }
         }
     }
 
     /// The kiro-cli social login is the Power subscription. The builder-id file
     /// in ~/.cli-proxy-api can be a different, already-limited account.
-    static func accessToken() async -> (token: String, credential: Credential)? {
-        if let token = cliSocialAccessToken() { return (token, .cliSocial) }
-        if cliSocialPayload() != nil, refreshCLISession(), let token = cliSocialAccessToken() {
-            return (token, .cliSocial)
+    private actor CredentialGate {
+        func accessToken(forceCLIRefresh: Bool) async -> (token: String, credential: Credential)? {
+            await resolveAccessToken(forceCLIRefresh: forceCLIRefresh)
         }
-        return await authFileAccessToken()
+    }
+
+    private static let credentialGate = CredentialGate()
+
+    static func accessToken(forceCLIRefresh: Bool = false) async -> (token: String, credential: Credential)? {
+        // Concurrent Claude sessions must not run competing CLI refreshes.
+        await credentialGate.accessToken(forceCLIRefresh: forceCLIRefresh)
+    }
+
+    static func resolveAccessToken(
+        forceCLIRefresh: Bool = false,
+        readSocialPayload: () -> [String: Any]? = cliSocialPayload,
+        readOIDCPayload: () -> [String: Any]? = cliOIDCPayload,
+        refreshSocialSession: () -> Bool = refreshCLISession,
+        readAuthFileToken: () async -> (token: String, credential: Credential)? = authFileAccessToken,
+        now: () -> Date = Date.init
+    ) async -> (token: String, credential: Credential)? {
+        let payload: [String: Any]
+        let credential: Credential
+        if let social = readSocialPayload() {
+            payload = social
+            credential = .cliSocial
+        } else if let oidc = readOIDCPayload() {
+            payload = oidc
+            credential = .cliOIDC
+        } else {
+            return await readAuthFileToken()
+        }
+        if !forceCLIRefresh, let token = usableToken(payload, minimumValidity: 120, now: now()) {
+            return (token, credential)
+        }
+        _ = refreshSocialSession()
+        // Kiro can leave a still-valid token unchanged inside our early refresh
+        // window. Keep that account: another login has different model access.
+        // Read again even if the CLI failed; it may have persisted a new token.
+        guard let refreshed = credential == .cliSocial ? readSocialPayload() : readOIDCPayload(),
+              let token = usableToken(refreshed, minimumValidity: 0, now: now())
+        else { return nil }
+        return (token, credential)
+    }
+
+    private static func usableToken(_ payload: [String: Any], minimumValidity: TimeInterval, now: Date) -> String? {
+        guard let token = payload["access_token"] as? String, !token.isEmpty,
+              !isExpired(payload, minimumValidity: minimumValidity, now: now)
+        else { return nil }
+        return token
     }
 
     private static let accountLock = NSLock()
@@ -332,7 +383,7 @@ enum KiroDirectProvider {
     /// True when a kiro-cli login or an enabled Kiro auth file exists. Checked
     /// without refreshing, so it is cheap enough for config composition.
     static func hasCredentials() -> Bool {
-        if cliSocialPayload() != nil { return true }
+        if cliPayload() != nil { return true }
         let directory = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
         let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
         return files.contains { file in
@@ -345,15 +396,32 @@ enum KiroDirectProvider {
     }
 
     static func cliSocialPayload() -> [String: Any]? {
+        cliPayload(forKey: "kirocli:social:token")
+    }
+
+    static func cliOIDCPayload() -> [String: Any]? {
+        // Kiro CLI persists its OIDC token under this spelling ("odic").
+        cliPayload(forKey: "kirocli:odic:token")
+    }
+
+    static func cliPayload() -> (payload: [String: Any], credential: Credential)? {
+        if let payload = cliSocialPayload() { return (payload, .cliSocial) }
+        if let payload = cliOIDCPayload() { return (payload, .cliOIDC) }
+        return nil
+    }
+
+    private static func cliPayload(forKey key: String) -> [String: Any]? {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/kiro-cli/data.sqlite3")
         var db: OpaquePointer?
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return nil }
         defer { sqlite3_close(db) }
         var stmt: OpaquePointer?
-        let sql = "SELECT value FROM auth_kv WHERE key = 'kirocli:social:token' LIMIT 1"
+        let sql = "SELECT value FROM auth_kv WHERE key = ? LIMIT 1"
         guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
         defer { sqlite3_finalize(stmt) }
+        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+        guard sqlite3_bind_text(stmt, 1, key, -1, transient) == SQLITE_OK else { return nil }
         guard sqlite3_step(stmt) == SQLITE_ROW, let cString = sqlite3_column_text(stmt, 0) else { return nil }
         let raw = String(cString: cString)
         guard let data = raw.data(using: .utf8),
@@ -368,6 +436,11 @@ enum KiroDirectProvider {
               !isExpired(payload)
         else { return nil }
         return token
+    }
+
+    static func cliAccessToken() -> String? {
+        guard let session = cliPayload() else { return nil }
+        return usableToken(session.payload, minimumValidity: 0, now: Date())
     }
 
     /// Lets kiro-cli refresh its own social token and write it back. We do not
@@ -389,7 +462,7 @@ enum KiroDirectProvider {
         return proc.terminationStatus == 0
     }
 
-    private static func isExpired(_ payload: [String: Any]) -> Bool {
+    private static func isExpired(_ payload: [String: Any], minimumValidity: TimeInterval = 120, now: Date = Date()) -> Bool {
         let keys = ["expires_at", "expired"]
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -399,7 +472,7 @@ enum KiroDirectProvider {
             guard let raw = payload[key] as? String else { continue }
             if let date = formatter.date(from: raw) ?? plain.date(from: raw) {
                 // Refresh a little early so a long turn cannot expire mid-flight.
-                return date.timeIntervalSinceNow < 120
+                return date.timeIntervalSince(now) <= minimumValidity
             }
         }
         return true
@@ -413,7 +486,8 @@ enum KiroDirectProvider {
         var upstreamModel: String = ""
         let stream: Bool
         let systemPrompt: String
-        /// Bytes/4 of the trimmed payload that would be POSTed; an estimate, not a count.
+        var validationError: String? = nil
+        /// Include the full local history so Claude can compact before we trim it.
         var estimatedInputTokens: Int {
             KiroDirectProvider.estimatedInputTokens(conversationState: conversationState, systemPrompt: systemPrompt)
         }
@@ -435,19 +509,13 @@ enum KiroDirectProvider {
         max(1, payloadBytes / 4)
     }
 
-    /// What count_tokens reports: the same trim send() applies, without sending.
+    /// Count the local conversation, rather than the reduced upstream window.
     static func estimatedInputTokens(conversationState: [String: Any], systemPrompt: String) -> Int {
-        let trimmed = trimHistory(
-            in: requestPayload(conversationState: conversationState),
-            systemPrompt: systemPrompt,
-            maxBytes: maxRequestBytes
-        )
-        return estimatedTokens(payloadBytes: payloadByteCount(trimmed))
+        estimatedTokens(payloadBytes: payloadByteCount(requestPayload(conversationState: conversationState)))
     }
 
     static func translateRequest(anthropicBody: String) -> TranslatedRequest? {
-        guard let data = anthropicBody.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let root = try? JSONSerialization.jsonObject(with: KiroJSON.repaired(anthropicBody)) as? [String: Any],
               let requestedModel = root["model"] as? String,
               let model = upstreamModel(for: requestedModel),
               let messages = root["messages"] as? [[String: Any]]
@@ -457,8 +525,15 @@ enum KiroDirectProvider {
         let systemText = systemPrompt(from: root["system"])
         let tools = toolSpecifications(from: root["tools"])
 
-        var turns: [Turn] = messages.compactMap(Turn.init(message:))
+        func imageCount(_ blocks: Any?) -> Int {
+            guard let blocks = blocks as? [[String: Any]] else { return 0 }
+            return blocks.reduce(0) { $0 + (($1["type"] as? String) == "image" ? 1 : imageCount($1["content"])) }
+        }
+        let count = messages.reduce(0) { $0 + imageCount($1["content"]) }
+        let imageBudget = min(180_000, 450_000 / max(1, count))
+        var turns: [Turn] = messages.compactMap { Turn(message: $0, imageBudget: imageBudget) }
         guard !turns.isEmpty else { return nil }
+        let validationError = turns.compactMap(\.validationError).first
 
         // Kiro rebuilds the conversation from scratch on every call, so the
         // system prompt rides on the first user turn and stays stable.
@@ -545,7 +620,8 @@ enum KiroDirectProvider {
             model: requestedModel,
             upstreamModel: model,
             stream: stream,
-            systemPrompt: systemText
+            systemPrompt: systemText,
+            validationError: validationError
         )
     }
 
@@ -572,7 +648,7 @@ enum KiroDirectProvider {
     }
 
     static func acceptsEffort(_ model: String) -> Bool {
-        let id = model.lowercased()
+        let id = model.lowercased().replacingOccurrences(of: ".", with: "-")
         if id == "auto" || id.contains("haiku") || id.hasPrefix("gpt-")
             || id.hasPrefix("glm") || id.hasPrefix("qwen")
             || id.hasPrefix("deepseek") || id.hasPrefix("minimax") {
@@ -588,7 +664,8 @@ enum KiroDirectProvider {
               !effort.isEmpty
         else { return nil }
         if effort == "x-high" || effort == "extra-high" || effort == "extrahigh" { effort = "xhigh" }
-        let noXHigh = model.lowercased().contains("opus-4-6") || model.lowercased().contains("sonnet-4-6")
+        let id = model.lowercased().replacingOccurrences(of: ".", with: "-")
+        let noXHigh = id.contains("opus-4-6") || id.contains("sonnet-4-6")
         let allowed: Set<String> = noXHigh
             ? ["low", "medium", "high", "max"]
             : ["low", "medium", "high", "xhigh", "max"]
@@ -602,9 +679,11 @@ enum KiroDirectProvider {
         var text: String
         var toolUses: [[String: Any]] = []
         var toolResults: [[String: Any]] = []
+        var images: [[String: Any]] = []
+        var validationError: String?
 
-        init?(message: [String: Any]) {
-            guard let role = message["role"] as? String else { return nil }
+        init?(message: [String: Any], imageBudget: Int = 180_000) {
+            guard let role = message["role"] as? String, role == "user" || role == "assistant" else { return nil }
             self.role = role
             var text = ""
             if let plain = message["content"] as? String {
@@ -614,6 +693,9 @@ enum KiroDirectProvider {
                     switch block["type"] as? String {
                     case "text":
                         if let value = block["text"] as? String { text += value }
+                    case "image":
+                        do { images.append(try KiroImage.translate(block, maxBytes: imageBudget)) }
+                        catch { validationError = error.localizedDescription }
                     case "tool_use":
                         if let id = block["id"] as? String, let name = block["name"] as? String {
                             toolUses.append([
@@ -624,6 +706,12 @@ enum KiroDirectProvider {
                         }
                     case "tool_result":
                         if let id = block["tool_use_id"] as? String {
+                            if let content = block["content"] as? [[String: Any]] {
+                                for image in content where image["type"] as? String == "image" {
+                                    do { images.append(try KiroImage.translate(image, maxBytes: imageBudget)) }
+                                    catch { validationError = error.localizedDescription }
+                                }
+                            }
                             let isError = (block["is_error"] as? Bool) ?? false
                             toolResults.append([
                                 "toolUseId": id,
@@ -651,6 +739,7 @@ enum KiroDirectProvider {
                 merged[merged.count - 1].text += joiner + turn.text
                 merged[merged.count - 1].toolUses += turn.toolUses
                 merged[merged.count - 1].toolResults += turn.toolResults
+                merged[merged.count - 1].images += turn.images
             } else {
                 merged.append(turn)
             }
@@ -729,7 +818,7 @@ enum KiroDirectProvider {
                     let input = use["input"] as? [String: Any] ?? [:]
                     let data = try? JSONSerialization.data(withJSONObject: input, options: [.sortedKeys])
                     let arguments = data.flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-                    return "[Called \(name): \(shortened(arguments, limit: 1_000))]"
+                    return "[Called \(name): \(arguments)]"
                 }
                 if !notes.isEmpty {
                     history[index].text = ([history[index].text] + notes)
@@ -743,7 +832,7 @@ enum KiroDirectProvider {
                     let name = names[id] ?? "tool"
                     let content = result["content"] as? [[String: Any]] ?? []
                     let output = content.compactMap { $0["text"] as? String }.joined(separator: "\n")
-                    return "[\(name) result: \(shortened(output, limit: 4_000))]"
+                    return "[\(name) result: \(output)]"
                 }
                 history[index].text = ([history[index].text] + notes)
                     .filter { !$0.isEmpty }.joined(separator: "\n")
@@ -753,10 +842,10 @@ enum KiroDirectProvider {
     }
 
     private static func shortened(_ text: String, limit: Int) -> String {
-        guard text.count > limit else { return text }
+        guard text.utf8.count > limit else { return text }
         let head = limit * 3 / 4
-        return String(text.prefix(head)) + "\n[Earlier content omitted]\n"
-            + String(text.suffix(limit - head))
+        return String(decoding: text.utf8.prefix(head), as: UTF8.self) + "\n[Earlier content omitted]\n"
+            + String(decoding: text.utf8.suffix(limit - head), as: UTF8.self)
     }
 
     static func toolResultText(_ raw: Any?) -> String {
@@ -787,6 +876,7 @@ enum KiroDirectProvider {
         if !tools.isEmpty { context["tools"] = tools }
         if !turn.toolResults.isEmpty { context["toolResults"] = turn.toolResults }
         if !context.isEmpty { message["userInputMessageContext"] = context }
+        if !turn.images.isEmpty { message["images"] = turn.images }
         return message
     }
 
@@ -843,7 +933,7 @@ enum KiroDirectProvider {
         while offset + 16 <= bytes.count {
             let total = be32(offset)
             let headerLength = be32(offset + 4)
-            guard total >= 16, offset + total <= bytes.count else { break }
+            guard total >= 16, headerLength <= total - 16, offset + total <= bytes.count else { break }
 
             var eventType = ""
             var cursor = offset + 12
@@ -851,10 +941,10 @@ enum KiroDirectProvider {
             while cursor < headerEnd, cursor < bytes.count {
                 let nameLength = Int(bytes[cursor])
                 cursor += 1
-                guard cursor + nameLength <= bytes.count else { break }
+                guard cursor + nameLength <= headerEnd else { break }
                 let name = String(decoding: bytes[cursor..<(cursor + nameLength)], as: UTF8.self)
                 cursor += nameLength
-                guard cursor < bytes.count else { break }
+                guard cursor < headerEnd else { break }
                 let valueType = bytes[cursor]
                 cursor += 1
                 let valueLength: Int
@@ -866,13 +956,13 @@ enum KiroDirectProvider {
                 case 5, 8: valueLength = 8
                 case 9: valueLength = 16
                 case 6, 7:
-                    guard cursor + 2 <= bytes.count else { valueLength = -1; break }
+                    guard cursor + 2 <= headerEnd else { valueLength = -1; break }
                     valueLength = (Int(bytes[cursor]) << 8) | Int(bytes[cursor + 1])
                     cursor += 2
                 default: valueLength = -1
                 }
-                guard valueLength >= 0, cursor + valueLength <= bytes.count else { break }
-                if valueType == 7, name == ":event-type" {
+                guard valueLength >= 0, cursor + valueLength <= headerEnd else { break }
+                if valueType == 7, name == ":event-type" || name == ":exception-type" || name == ":error-code" {
                     eventType = String(decoding: bytes[cursor..<(cursor + valueLength)], as: UTF8.self)
                 }
                 cursor += valueLength
@@ -913,8 +1003,9 @@ enum KiroDirectProvider {
 
         struct ToolCall {
             let id: String
-            let name: String
+            var name: String
             var argumentsJSON: String
+            var completed = false
         }
 
         var stopReason: String { toolCalls.isEmpty ? "end_turn" : "tool_use" }
@@ -958,10 +1049,12 @@ enum KiroDirectProvider {
                     order.append(id)
                     byID[id] = AssembledReply.ToolCall(id: id, name: name, argumentsJSON: "")
                 }
+                if !name.isEmpty { byID[id]?.name = name }
                 // `input` arrives as incremental JSON fragments that concatenate.
                 if let fragment = frame.payload["input"] as? String {
                     byID[id]?.argumentsJSON += fragment
                 }
+                if frame.payload["stop"] as? Bool == true { byID[id]?.completed = true }
             case "meteringEvent":
                 if let usage = frame.payload["usage"] as? Double {
                     reply.credits += usage
@@ -1205,11 +1298,14 @@ enum KiroDirectProvider {
         case failure(status: Int, message: String)
     }
 
-    static func send(conversationState: [String: Any], systemPrompt: String = "") async -> CallResult {
+    static func send(
+        conversationState: [String: Any], systemPrompt: String = "",
+        onFrame: ((Frame) async throws -> Void)? = nil
+    ) async -> CallResult {
         guard let access = await accessToken() else {
             return .failure(status: 401, message: "No usable Kiro credentials — add a Kiro account in VibeRouter")
         }
-        let (token, credential) = access
+        var (token, credential) = access
         var payload = requestPayload(conversationState: conversationState)
         guard let url = URL(string: endpoint) else {
             return .failure(status: 500, message: "Could not build the Kiro request")
@@ -1220,14 +1316,38 @@ enum KiroDirectProvider {
         // Kiro's own content-length check still rejects the estimate.
         payload = trimHistory(in: payload, systemPrompt: systemPrompt, maxBytes: maxRequestBytes)
         for attempt in 0...3 {
-            let result = await postKiro(url: url, token: token, credential: credential, payload: payload)
-            guard case .failure(_, let message) = result else { return result }
+            if Task.isCancelled { return .failure(status: 499, message: "Request cancelled") }
+            guard payloadByteCount(payload) <= maxRequestBytes else {
+                return .failure(status: 413, message: "The current message or attachments exceed Kiro's input limit. Compact the conversation or split the message and retry.")
+            }
+            var delivered = false
+            let result = await postKiro(url: url, token: token, credential: credential, payload: payload, onFrame: { frame in
+                delivered = true
+                try await onFrame?(frame)
+            })
+            guard case .failure(let status, let message) = result else { return result }
+            // Replaying a turn after visible output could duplicate content or tools.
+            if delivered || Task.isCancelled { return result }
+            if status == 401, attempt == 0 {
+                if case .authFile(let name) = credential {
+                    let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api").appendingPathComponent(name)
+                    if let data = try? Data(contentsOf: file),
+                       let old = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                       let updated = await KiroAWSAuth.refresh(old),
+                       let data = try? JSONSerialization.data(withJSONObject: updated) { try? data.write(to: file, options: .atomic) }
+                }
+                if let fresh = await accessToken(forceCLIRefresh: credential.isCLI),
+                   fresh.credential == credential {
+                    (token, credential) = fresh
+                    continue
+                }
+            }
             if payload["additionalModelRequestFields"] != nil,
                message.contains("additionalModelRequestFields") {
                 payload.removeValue(forKey: "additionalModelRequestFields")
                 continue
             }
-            guard message.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD"), attempt < 3 else {
+            guard (message.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") || message.contains("PROMPT_TOO_LONG")), attempt < 3 else {
                 return result
             }
             let bytes = payloadByteCount(payload)
@@ -1308,12 +1428,8 @@ enum KiroDirectProvider {
             for index in results.indices {
                 guard var content = results[index]["content"] as? [[String: Any]] else { continue }
                 for item in content.indices {
-                    guard let text = content[item]["text"] as? String, text.count > cap else { continue }
-                    let head = cap * 3 / 4
-                    let tail = cap - head
-                    content[item]["text"] = String(text.prefix(head))
-                        + "\n[Older tool output omitted to fit Kiro's input limit]\n"
-                        + String(text.suffix(tail))
+                    guard let text = content[item]["text"] as? String, text.utf8.count > cap else { continue }
+                    content[item]["text"] = shortened(text, limit: cap)
                     changed = true
                 }
                 results[index]["content"] = content
@@ -1329,8 +1445,9 @@ enum KiroDirectProvider {
         return result
     }
 
-    private static func postKiro(
-        url: URL, token: String, credential: Credential, payload: [String: Any]
+    static func postKiro(
+        url: URL, token: String, credential: Credential, payload: [String: Any],
+        onFrame: @escaping (Frame) async throws -> Void
     ) async -> CallResult {
         guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             return .failure(status: 500, message: "Could not build the Kiro request")
@@ -1343,23 +1460,63 @@ enum KiroDirectProvider {
         request.setValue("application/x-amz-json-1.0", forHTTPHeaderField: "Content-Type")
         request.setValue("aws-sdk-rust/kiro", forHTTPHeaderField: "User-Agent")
         do {
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (bytes, response) = try await upstreamSession.bytes(for: request)
             guard let http = response as? HTTPURLResponse else {
                 return .failure(status: 502, message: "No response from Kiro")
             }
             guard (200...299).contains(http.statusCode) else {
+                var data = Data()
+                for try await byte in bytes {
+                    if data.count >= 64_000 { break }
+                    data.append(byte)
+                }
                 let text = String(data: data, encoding: .utf8) ?? "Kiro request failed"
                 let friendly = text.contains("MONTHLY_REQUEST_COUNT")
                     ? "Kiro monthly request limit reached on this login"
                     : text
                 return .failure(status: http.statusCode, message: friendly)
             }
+            var decoder = KiroEventDecoder()
+            var frames: [Frame] = []
+            for try await byte in bytes {
+                try Task.checkCancellation()
+                if let frame = try decoder.append(byte) {
+                    if let failure = KiroEventDecoder.failure(frame) { return failure }
+                    frames.append(frame)
+                    try await onFrame(frame)
+                }
+            }
+            try decoder.finish()
+            var reply = assemble(frames: frames)
+            guard !reply.text.isEmpty || !reply.toolCalls.isEmpty else {
+                return .failure(status: 502, message: "Kiro returned an empty response. Retry the turn.")
+            }
+            for index in reply.toolCalls.indices {
+                // No-argument tools may send an empty input followed by stop.
+                // A syntactically complete object without stop can still be a
+                // stream cut off between frames; never release that tool call.
+                if reply.toolCalls[index].argumentsJSON.isEmpty, reply.toolCalls[index].completed {
+                    reply.toolCalls[index].argumentsJSON = "{}"
+                }
+                let call = reply.toolCalls[index]
+                guard call.completed, !call.name.isEmpty, let data = call.argumentsJSON.data(using: .utf8),
+                      (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else {
+                    return .failure(status: 502, message: "Kiro returned an incomplete tool call. Retry the turn.")
+                }
+            }
             return .success(
-                assemble(frames: decodeFrames(data)),
+                reply,
                 Delivery(payloadBytes: body.count, credential: credential)
             )
         } catch {
             return .failure(status: 502, message: error.localizedDescription)
         }
     }
+
+    private static let upstreamSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 600
+        config.timeoutIntervalForResource = 1800
+        return URLSession(configuration: config)
+    }()
 }

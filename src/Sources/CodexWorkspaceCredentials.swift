@@ -84,9 +84,7 @@ enum CodexWorkspaceCredentials {
         let preferred = preferredAccountID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
-        let email = (hintEmail ?? stringValue(seed, keys: ["email"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["access_token"]))
+        let email = hintEmail ?? TokenRefreshService.seatEmail(seed)
 
         let candidates = collectCandidates(seed: seed, email: email)
             .filter { !isTombstonedSeat($0.accountID, email: $0.email ?? email) }
@@ -101,6 +99,7 @@ enum CodexWorkspaceCredentials {
             if let best = pickBest(among: matches) { return best }
             // Allow seed if it is the preferred seat even when tombstoned (re-login path).
             if let fromSeed = payload(from: seed, source: "seed", forceAccountID: nil),
+               email == nil || fromSeed.email?.caseInsensitiveCompare(email!) == .orderedSame,
                fromSeed.accountID.caseInsensitiveCompare(preferred) == .orderedSame
             {
                 return fromSeed
@@ -108,7 +107,8 @@ enum CodexWorkspaceCredentials {
             return nil
         }
 
-        if let fromSeed = payload(from: seed, source: "seed", forceAccountID: nil) {
+        if let fromSeed = payload(from: seed, source: "seed", forceAccountID: nil),
+           email == nil || fromSeed.email?.caseInsensitiveCompare(email!) == .orderedSame {
             return fromSeed
         }
         return pickBest(among: candidates)
@@ -127,9 +127,7 @@ enum CodexWorkspaceCredentials {
         let preferred = preferredAccountID?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nilIfEmpty
-        let email = (hintEmail ?? stringValue(seed, keys: ["email"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["access_token"]))
+        let email = hintEmail ?? TokenRefreshService.seatEmail(seed)
 
         let pool: [Payload]
         if let preferred {
@@ -141,6 +139,7 @@ enum CodexWorkspaceCredentials {
             if !matches.isEmpty {
                 pool = matches
             } else if let fromSeed = payload(from: seed, source: "seed", forceAccountID: nil),
+                      email == nil || fromSeed.email?.caseInsensitiveCompare(email!) == .orderedSame,
                       fromSeed.accountID.caseInsensitiveCompare(preferred) == .orderedSame
             {
                 pool = [fromSeed]
@@ -199,9 +198,7 @@ enum CodexWorkspaceCredentials {
 
     /// All known seat-scoped payloads for this email (for multi-sub usage probes).
     static func allSeats(seed: [String: Any], email hintEmail: String? = nil) -> [Payload] {
-        let email = (hintEmail ?? stringValue(seed, keys: ["email"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: stringValue(seed, keys: ["access_token"]))
+        let email = hintEmail ?? TokenRefreshService.seatEmail(seed)
         var byID: [String: Payload] = [:]
 
         for candidate in collectCandidates(seed: seed, email: email) {
@@ -210,7 +207,7 @@ enum CodexWorkspaceCredentials {
             {
                 continue
             }
-            let key = candidate.accountID.lowercased()
+            let key = candidate.accountID.lowercased() + "|" + (candidate.email ?? "").lowercased()
             if let existing = byID[key] {
                 byID[key] = pickBest(among: [existing, candidate]) ?? candidate
             } else {
@@ -219,7 +216,9 @@ enum CodexWorkspaceCredentials {
         }
         if let seedPayload = payload(from: seed, source: "seed", forceAccountID: nil) {
             // Active proxy file wins for its JWT seat (even if previously tombstoned — user re-added).
-            byID[seedPayload.accountID.lowercased()] = seedPayload
+            if email == nil || seedPayload.email?.caseInsensitiveCompare(email!) == .orderedSame {
+                byID[seedPayload.accountID.lowercased() + "|" + (seedPayload.email ?? "").lowercased()] = seedPayload
+            }
         }
         return Array(byID.values)
     }
@@ -277,7 +276,7 @@ enum CodexWorkspaceCredentials {
             let tombstoneKey = AuthAccountLifecycle.seatKey(accountID: key, email: seat.email)
             if tombstones.contains(tombstoneKey) { continue }
             if emailKey.isEmpty, tombstones.contains("codex:" + key) { continue }
-            let groupKey = emailKey.isEmpty ? key : "\(emailKey)|\(key)"
+            let groupKey = AccountCredentialIdentity.key(seat.asAuthDictionary)
             if let existing = bestBySeat[groupKey] {
                 bestBySeat[groupKey] = pickBest(among: [existing, seat]) ?? existing
             } else {
@@ -316,7 +315,7 @@ enum CodexWorkspaceCredentials {
     /// Stable filename: `codex-seat-{accountID}-{email}.json` when email is known so two
     /// Team members on the same org do not overwrite each other's seat clone.
     static func seatFilename(for payload: Payload) -> String {
-        seatFilename(accountID: payload.accountID, email: payload.email)
+        AccountCredentialIdentity.filename(payload.asAuthDictionary)
     }
 
     static func seatFilename(accountID: String, email: String? = nil) -> String {
@@ -338,8 +337,7 @@ enum CodexWorkspaceCredentials {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dir = authDirectory ?? home.appendingPathComponent(".cli-proxy-api")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(seatFilename(for: payload))
-        return writeJSON(payload.asAuthDictionary, to: url) ? url : nil
+        return try? AccountCredentialStore.save(payload.asAuthDictionary, in: dir)
     }
 
     // MARK: - Ranking
@@ -397,7 +395,12 @@ enum CodexWorkspaceCredentials {
 
         func append(_ payload: Payload?) {
             guard let payload else { return }
-            let key = payload.accountID.lowercased() + "|" + String(payload.accessToken.prefix(24))
+            if let email {
+                guard let candidateEmail = payload.email,
+                      candidateEmail.caseInsensitiveCompare(email) == .orderedSame else { return }
+            }
+            let key = payload.accountID.lowercased() + "|" + (payload.email ?? "").lowercased()
+                + "|" + SHA256.hash(data: Data(payload.accessToken.utf8)).description
             guard seen.insert(key).inserted else { return }
             out.append(payload)
         }
@@ -416,14 +419,6 @@ enum CodexWorkspaceCredentials {
                 guard name.hasPrefix("codex-"),
                       let json = readJSON(file)
                 else { continue }
-                if let email,
-                   let fileEmail = stringValue(json, keys: ["email"])
-                    ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["id_token"]))
-                    ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["access_token"])),
-                   fileEmail.caseInsensitiveCompare(email) != .orderedSame
-                {
-                    continue
-                }
                 let source = name.hasPrefix("codex-seat-")
                     ? "codex-seat:\(file.lastPathComponent)"
                     : "cli-proxy:\(file.lastPathComponent)"
@@ -438,12 +433,6 @@ enum CodexWorkspaceCredentials {
         ) {
             for file in files where file.pathExtension == "json" {
                 guard let json = readJSON(file) else { continue }
-                if let email,
-                   let fileEmail = stringValue(json, keys: ["email"]),
-                   fileEmail.caseInsensitiveCompare(email) != .orderedSame
-                {
-                    continue
-                }
                 var flat = json
                 if let tokens = json["tokens"] as? [String: Any] {
                     for (k, v) in tokens { flat[k] = v }
@@ -474,6 +463,7 @@ enum CodexWorkspaceCredentials {
         source: String,
         forceAccountID: String?
     ) -> Payload? {
+        guard AccountCredentialIdentity.isConsistent(json) else { return nil }
         guard let access = stringValue(json, keys: ["access_token"]), !access.isEmpty else {
             return nil
         }
@@ -489,9 +479,7 @@ enum CodexWorkspaceCredentials {
             ?? chatgptPlanType(from: stringValue(json, keys: ["id_token"]))
             ?? stringValue(json, keys: ["plan_type", "chatgpt_plan_type"])
 
-        let email = stringValue(json, keys: ["email"])
-            ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: access)
+        let email = TokenRefreshService.seatEmail(json)
 
         return Payload(
             accessToken: access,

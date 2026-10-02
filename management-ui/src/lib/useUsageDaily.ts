@@ -18,5 +18,6 @@ export function useUsageDaily(day: string): UseQueryResult<UsageDailyResponse> {
   // into the request; the server validates the format regardless.
   return useManagementQuery<UsageDailyResponse>(`/usage-daily?date=${encodeURIComponent(day)}`, {
     enabled: Boolean(day),
+    refetchInterval: 30_000,
   });
 }

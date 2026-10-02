@@ -24,13 +24,18 @@ struct VercelGatewayConfig {
 
 class ThinkingProxy {
     private var listener: NWListener?
-    let proxyPort: UInt16 = 8317
-    private let targetPort: UInt16 = 8318
+    let proxyPort: UInt16
+    private let targetPort: UInt16
     private let targetHost = "127.0.0.1"
     private(set) var isRunning = false
     private let stateQueue = DispatchQueue(label: "com.viberouter.thinking-proxy-state")
 
     var vercelConfig = VercelGatewayConfig(enabled: false, apiKey: "")
+
+    init(proxyPort: UInt16 = 8317, targetPort: UInt16 = 8318) {
+        self.proxyPort = proxyPort
+        self.targetPort = targetPort
+    }
     
     private enum Config {
         static let hardTokenCap = 32000
@@ -147,32 +152,50 @@ class ThinkingProxy {
             
             var newAccumulatedData = accumulatedData
             newAccumulatedData.append(data)
+            if newAccumulatedData.count > 64 * 1024 * 1024 {
+                self.sendError(to: connection, statusCode: 413, message: "Request exceeds 64 MB")
+                return
+            }
             
             // Check if we have a complete HTTP request
-            if let requestString = String(data: newAccumulatedData, encoding: .utf8),
-               let headerEndRange = requestString.range(of: "\r\n\r\n") {
+            if let headerEndRange = newAccumulatedData.range(of: Data("\r\n\r\n".utf8)) {
                 
                 // Extract Content-Length if present
-                let headerEndIndex = requestString.distance(from: requestString.startIndex, to: headerEndRange.upperBound)
-                let headerPart = String(requestString.prefix(headerEndIndex))
+                let headerEndIndex = headerEndRange.upperBound
+                let headerPart = String(decoding: newAccumulatedData[..<headerEndIndex], as: UTF8.self)
+                if headerPart.lowercased().contains("transfer-encoding: chunked") {
+                    self.sendError(to: connection, statusCode: 400, message: "Send this request with Content-Length")
+                    return
+                }
                 
                 if let contentLengthLine = headerPart.components(separatedBy: "\r\n").first(where: { $0.lowercased().starts(with: "content-length:") }) {
                     let contentLengthStr = contentLengthLine.components(separatedBy: ":")[1].trimmingCharacters(in: .whitespaces)
                     if let contentLength = Int(contentLengthStr) {
+                        guard contentLength >= 0, contentLength <= 64 * 1024 * 1024 else {
+                            self.sendError(to: connection, statusCode: 413, message: "Invalid or oversized Content-Length")
+                            return
+                        }
                         let bodyStartIndex = headerEndIndex
                         let currentBodyLength = newAccumulatedData.count - bodyStartIndex
                         
                         // If we haven't received the full body yet, schedule next iteration
                         if currentBodyLength < contentLength {
+                            if isComplete {
+                                self.sendError(to: connection, statusCode: 400, message: "Incomplete request body")
+                                return
+                            }
                             self.receiveNextChunk(from: connection, accumulatedData: newAccumulatedData)
                             return
                         }
+                    } else {
+                        self.sendError(to: connection, statusCode: 400, message: "Invalid Content-Length")
+                        return
                     }
                 }
                 
                 // We have a complete request, process it
                 self.processRequest(data: newAccumulatedData, connection: connection)
-            } else if !isComplete {
+            } else if !isComplete, newAccumulatedData.count <= 64_000 {
                 // Haven't found header end yet, schedule next iteration
                 self.receiveNextChunk(from: connection, accumulatedData: newAccumulatedData)
             } else {
@@ -335,10 +358,28 @@ class ThinkingProxy {
     // MARK: - Kiro direct route
 
     private func serveKiro(_ translated: KiroDirectProvider.TranslatedRequest, connection: NWConnection) {
-        Task {
+        if let error = translated.validationError {
+            sendJSON(["type": "error", "error": ["type": "invalid_request_error", "message": error]], status: 400, to: connection)
+            return
+        }
+        let stream = translated.stream ? KiroClientStream(connection: connection) : nil
+        let messageID = KiroDirectProvider.newMessageID()
+        let task = Task {
+            do { try await stream?.start(model: translated.model, messageID: messageID, inputTokens: translated.estimatedInputTokens) }
+            catch { connection.cancel(); return }
+            let heartbeat = Task {
+                while !Task.isCancelled {
+                    do {
+                        try await Task.sleep(nanoseconds: 10_000_000_000)
+                        try await stream?.ping()
+                    } catch { break }
+                }
+            }
+            defer { heartbeat.cancel() }
             switch await KiroDirectProvider.send(
                 conversationState: translated.conversationState,
-                systemPrompt: translated.systemPrompt
+                systemPrompt: translated.systemPrompt,
+                onFrame: { frame in try await stream?.consume(frame) }
             ) {
             case .failure(let status, let message):
                 NSLog("[ThinkingProxy] Kiro request failed (%d): %@", status, message)
@@ -346,7 +387,8 @@ class ThinkingProxy {
                     "type": "error",
                     "error": ["type": "api_error", "message": message],
                 ]
-                self.sendJSON(payload, status: status, to: connection)
+                if let stream { await stream.fail(status: status, message: message) }
+                else { self.sendJSON(payload, status: status, to: connection) }
             case .success(let reply, let delivery):
                 let usage = KiroDirectProvider.usageFigures(
                     reply: reply,
@@ -355,25 +397,26 @@ class ThinkingProxy {
                         ? nil
                         : KiroDirectProvider.contextWindowTokens(forUpstreamID: translated.upstreamModel)
                 )
-                let messageID = KiroDirectProvider.newMessageID()
                 NSLog(
                     "[ThinkingProxy] Kiro replied (%.4f credits, %d tool calls, %@, %d in / %d out via %@)",
                     reply.credits, reply.toolCalls.count, delivery.credential.ledgerAccount,
                     usage.inputTokens, usage.outputTokens, usage.source.rawValue
                 )
-                if translated.stream {
-                    let body = KiroDirectProvider.anthropicSSE(
-                        reply: reply,
-                        model: translated.model,
-                        usage: usage,
-                        messageID: messageID
-                    )
-                    self.sendSSE(body, to: connection)
+                // Kiro's smaller upstream window must not mask Claude's growing
+                // local conversation; otherwise auto-compaction never runs.
+                let clientUsage = KiroDirectProvider.UsageFigures(
+                    inputTokens: max(usage.inputTokens, translated.estimatedInputTokens - usage.cacheReadTokens - usage.cacheWriteTokens),
+                    outputTokens: usage.outputTokens, cacheReadTokens: usage.cacheReadTokens,
+                    cacheWriteTokens: usage.cacheWriteTokens, source: usage.source
+                )
+                if let stream {
+                    do { try await stream.finish(reply: reply, usage: clientUsage) }
+                    catch { connection.cancel() }
                 } else {
                     let payload = KiroDirectProvider.anthropicMessageJSON(
                         reply: reply,
                         model: translated.model,
-                        usage: usage,
+                        usage: clientUsage,
                         messageID: messageID
                     )
                     self.sendJSON(payload, status: 200, to: connection)
@@ -386,6 +429,14 @@ class ThinkingProxy {
                     claudeMessageID: messageID
                 ))
             }
+        }
+        connection.stateUpdateHandler = { state in
+            if case .cancelled = state { task.cancel() }
+            if case .failed = state { task.cancel() }
+        }
+        // Watch for a client closing its request while Kiro is still generating.
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 1) { _, _, complete, error in
+            if complete || error != nil { task.cancel(); connection.cancel() }
         }
     }
 

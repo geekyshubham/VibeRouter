@@ -231,15 +231,11 @@ enum KiroAWSAuth {
     // MARK: - IO
 
     private static func write(_ record: [String: Any], authDirectory: URL) -> ConfiguredAccountImportResult {
-        guard let clientID = stringValue(record, keys: ["client_id"]) else {
+        guard stringValue(record, keys: ["client_id"]) != nil else {
             return .failure(message: "Kiro AWS login did not return a client id")
         }
         do {
-            try FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true)
-            let destination = authDirectory.appendingPathComponent(filename(clientID: clientID))
-            let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: destination, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            try AccountCredentialStore.save(record, in: authDirectory)
             NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
             return .success(message: "✓ Kiro AWS account saved. Signed in via Builder ID in the browser.")
         } catch {

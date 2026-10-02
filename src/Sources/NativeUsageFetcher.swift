@@ -11,6 +11,12 @@ enum NativeUsageFetcher {
         guard var payload = readAuthPayload(at: authFile) else {
             return .empty(authAccountID: authAccountID, providerID: providerID, error: "Could not read auth credentials")
         }
+        payload = AccountCredentialIdentity.flattened(payload)
+        guard AccountCredentialIdentity.isConsistent(payload) else {
+            return .empty(authAccountID: authAccountID, providerID: providerID,
+                          accountEmail: stringValue(payload, keys: ["email"]),
+                          error: "Stored account identity does not match its credentials. Re-import this account's own session.")
+        }
 
         payload = enrichPayload(payload, for: serviceType)
 
@@ -188,6 +194,11 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
+        guard TokenRefreshService.codexIdentityIsConsistent(payload) else {
+            return .empty(authAccountID: authAccountID, providerID: providerID,
+                          accountEmail: stringValue(payload, keys: ["email"]),
+                          error: "Stored account identity does not match its tokens. Re-import this account to restore its own session.")
+        }
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else {
             return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
         }
@@ -196,9 +207,7 @@ enum NativeUsageFetcher {
             ?? chatgptAccountIDFromJWT(stringValue(payload, keys: ["id_token"]))
         let storedAccountID = stringValue(payload, keys: ["account_id"])
             ?? jwtAccountID
-        let email = stringValue(payload, keys: ["email"])
-            ?? JWTEmailExtractor.email(from: stringValue(payload, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: accessToken)
+        let email = TokenRefreshService.seatEmail(payload)
         let jwtPlan = chatgptPlanTypeFromJWT(accessToken)
             ?? chatgptPlanTypeFromJWT(stringValue(payload, keys: ["id_token"]))
         var sawUnauthorized = false
@@ -2229,8 +2238,10 @@ enum NativeUsageFetcher {
             api?.userID,
             forAccount: KiroDirectProvider.Credential.authFile(authFile.lastPathComponent).ledgerAccount
         )
-        let social = await fetchKiroSocialLimits()
-        KiroDirectProvider.rememberUserID(social?.userID, forAccount: KiroDirectProvider.Credential.cliSocial.ledgerAccount)
+        let social = await fetchKiroCLILimits()
+        if let session = KiroDirectProvider.cliPayload() {
+            KiroDirectProvider.rememberUserID(social?.userID, forAccount: session.credential.ledgerAccount)
+        }
 
         var cliText: KiroCLIUsageSnapshot?
         if api == nil, social == nil {
@@ -2273,6 +2284,7 @@ enum NativeUsageFetcher {
     ) -> ProviderUsageSnapshot {
         let billedNote = " · Claude Code via VibeRouter last billed here"
         let socialBilled = lastProxyAccount == KiroDirectProvider.Credential.cliSocial.ledgerAccount
+            || lastProxyAccount == KiroDirectProvider.Credential.cliOIDC.ledgerAccount
         let authBilled = authFileName.map { lastProxyAccount == KiroDirectProvider.Credential.authFile($0).ledgerAccount } ?? false
         let other: ProviderUsageSubAccount? = {
             if let social {
@@ -2414,14 +2426,14 @@ enum NativeUsageFetcher {
     }
 
     /// The kiro-cli social login's limits, read with its own token (read-only call).
-    private static func fetchKiroSocialLimits() async -> KiroAPIUsage? {
-        guard var social = KiroDirectProvider.cliSocialPayload() else { return nil }
-        if KiroDirectProvider.cliSocialAccessToken() == nil {
+    private static func fetchKiroCLILimits() async -> KiroAPIUsage? {
+        guard var social = KiroDirectProvider.cliPayload()?.payload else { return nil }
+        if KiroDirectProvider.cliAccessToken() == nil {
             let refreshed = await Task.detached(priority: .utility) {
                 KiroDirectProvider.refreshCLISession()
             }.value
-            guard refreshed, KiroDirectProvider.cliSocialAccessToken() != nil,
-                  let fresh = KiroDirectProvider.cliSocialPayload()
+            guard refreshed, KiroDirectProvider.cliAccessToken() != nil,
+                  let fresh = KiroDirectProvider.cliPayload()?.payload
             else { return nil }
             social = fresh
         }
@@ -2587,7 +2599,9 @@ enum NativeUsageFetcher {
             localGrok: localGrok
         )
 
-        let displayEmail = accountEmail ?? localEmail
+        let displayEmail = accountEmail ?? (localGrok.flatMap {
+            AccountCredentialIdentity.sameAccount(workingPayload, $0) ? localEmail : nil
+        })
 
         // Proactively refresh stale auth-file tokens once (cli-proxy xAI files go stale fast).
         if isGrokCredentialExpired(workingPayload) || tokenCandidates.allSatisfy(\.expired) {
@@ -2918,17 +2932,11 @@ enum NativeUsageFetcher {
             }
         }
 
-        let accountEmail = stringValue(accountPayload, keys: ["email"])
-        let localEmail = stringValue(localGrok ?? [:], keys: ["email"])
         if let localGrok, let token = stringValue(localGrok, keys: ["access_token", "key"]) {
-            let emailsMatch: Bool = {
-                guard let accountEmail, let localEmail else { return accountEmail == nil || accountEmail?.isEmpty == true }
-                return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-            }()
             // A live CLI token with no email must not answer for a named account.
             // That painted one login's usage onto every other row.
             let localLive = !isGrokCredentialExpired(localGrok, now: now)
-            if emailsMatch {
+            if AccountCredentialIdentity.sameAccount(accountPayload, localGrok) {
                 appendCandidate(token, source: "grok-cli", expired: !localLive)
             }
         }
@@ -2954,13 +2962,7 @@ enum NativeUsageFetcher {
               !isGrokCredentialExpired(local, now: now)
         else { return false }
 
-        let accountEmail = stringValue(payload, keys: ["email"])
-        let localEmail = stringValue(local, keys: ["email"])
-        if let accountEmail, !accountEmail.isEmpty {
-            guard let localEmail, !localEmail.isEmpty,
-                  accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-            else { return false }
-        }
+        guard AccountCredentialIdentity.sameAccount(payload, local) else { return false }
 
         let fileToken = stringValue(payload, keys: ["access_token", "key"])
         let sameAccess = fileToken == localToken
@@ -3022,6 +3024,7 @@ enum NativeUsageFetcher {
         let stored = (entry["refresh_token"] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard stored == oldRefresh else { return false }
+        guard !AccountCredentialIdentity.hasConflict(entry, ["access_token": accessToken]) else { return false }
 
         var updated = entry
         updated["key"] = accessToken
@@ -3036,6 +3039,8 @@ enum NativeUsageFetcher {
     }
 
     static func writeAuthPayload(_ payload: [String: Any], to url: URL) -> Bool {
+        guard AccountCredentialIdentity.isConsistent(payload) else { return false }
+        if let original = readAuthPayload(at: url), AccountCredentialIdentity.hasConflict(original, payload) { return false }
         do {
             let data = try JSONSerialization.data(
                 withJSONObject: payload,
@@ -3085,7 +3090,7 @@ enum NativeUsageFetcher {
 
         switch serviceType {
         case .codex:
-            if let local = readCodexAppPayload() {
+            if let local = readCodexAppPayload(), TokenRefreshService.sameCodexSeat(payload, as: local) {
                 for (key, value) in local where merged[key] == nil {
                     merged[key] = value
                 }
@@ -3096,7 +3101,7 @@ enum NativeUsageFetcher {
                 }
             }
         case .claude:
-            if let local = readClaudeAppPayload() {
+            if let local = readClaudeAppPayload(), AccountCredentialIdentity.sameAccount(payload, local) {
                 for (key, value) in local where merged[key] == nil {
                     merged[key] = value
                 }
@@ -3110,13 +3115,7 @@ enum NativeUsageFetcher {
             // Only fill missing fields from ~/.grok — never replace this account's token/email
             // with a different SuperGrok identity (that caused every Grok row to look identical).
             if let local = readGrokAppPayload() {
-                let accountEmail = stringValue(merged, keys: ["email"])
-                let localEmail = stringValue(local, keys: ["email"])
-                let sameIdentity = {
-                    guard let accountEmail, let localEmail else { return accountEmail == nil }
-                    return accountEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-                }()
-                if sameIdentity {
+                if AccountCredentialIdentity.sameAccount(payload, local) {
                     for (key, value) in local where merged[key] == nil {
                         merged[key] = value
                     }
@@ -3209,24 +3208,7 @@ enum NativeUsageFetcher {
             return false
         }
 
-        let fileEmail = stringValue(fileFlat, keys: ["email"])
-        let localEmail = stringValue(localFlat, keys: ["email"])
-        if let fileEmail, !fileEmail.isEmpty {
-            let emailsMatch = localEmail.map {
-                !$0.isEmpty && fileEmail.caseInsensitiveCompare($0) == .orderedSame
-            } ?? false
-            if !emailsMatch {
-                // Same seat with the email stored only on the file is still this account.
-                // An unidentified CLI token is not.
-                let fileAID = CodexWorkspaceCredentials.chatgptAccountID(from: fileToken)
-                    ?? stringValue(fileFlat, keys: ["account_id"])
-                let localAID = CodexWorkspaceCredentials.chatgptAccountID(from: localToken)
-                    ?? stringValue(localFlat, keys: ["account_id"])
-                let seatsMatch = fileAID != nil && localAID != nil
-                    && fileAID!.caseInsensitiveCompare(localAID!) == .orderedSame
-                if !seatsMatch { return false }
-            }
-        }
+        guard TokenRefreshService.sameCodexSeat(fileFlat, as: localFlat) else { return false }
 
         let fileAID = CodexWorkspaceCredentials.chatgptAccountID(from: fileToken)
             ?? stringValue(fileFlat, keys: ["account_id"])
@@ -3307,13 +3289,7 @@ enum NativeUsageFetcher {
             return false
         }
 
-        let fileEmail = stringValue(fileFlat, keys: ["email"])
-        let localEmail = stringValue(localFlat, keys: ["email"])
-        if let fileEmail, !fileEmail.isEmpty {
-            guard let localEmail, !localEmail.isEmpty,
-                  fileEmail.caseInsensitiveCompare(localEmail) == .orderedSame
-            else { return false }
-        }
+        guard AccountCredentialIdentity.sameAccount(fileFlat, localFlat) else { return false }
 
         let localExp = parseISO8601(localFlat["expired"] as? String)
             ?? parseISO8601(localFlat["expires_at"] as? String)

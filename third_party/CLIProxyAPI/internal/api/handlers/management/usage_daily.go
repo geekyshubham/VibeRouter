@@ -2,6 +2,7 @@ package management
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -25,7 +26,7 @@ import (
 // exactly one place per surface: Kiro reports millicredits, everyone else reports
 // tokens, and summing those together would be meaningless.
 
-const usageDailySchemaVersion = 1
+const usageDailySchemaVersion = 3
 
 // usageDailyFileName is written by the Swift app; keep in sync with UsageDailyStore.fileURL.
 const usageDailyFileName = "usage-daily.json"
@@ -81,10 +82,11 @@ type usageDailyProviderRow struct {
 
 type usageDailyResponse struct {
 	Date string `json:"date"`
-	// TotalTokens counts token-like units only; Kiro millicredits are excluded.
-	TotalTokens   int     `json:"totalTokens"`
-	TotalCostUSD  float64 `json:"totalCostUSD"`
-	TotalRequests int     `json:"totalRequests"`
+	// Match DailyUsageSummary: measured tokens, estimates and credits stay separate.
+	TotalTokens          int     `json:"totalTokens"`
+	TotalEstimatedTokens int     `json:"totalEstimatedTokens"`
+	TotalCostUSD         float64 `json:"totalCostUSD"`
+	TotalRequests        int     `json:"totalRequests"`
 	// Providers ranked by cost — the only basis comparable across unlike units.
 	Providers []usageDailyProviderRow `json:"providers"`
 	Models    []usageDailyModelRow    `json:"models"`
@@ -105,6 +107,11 @@ type usageDailyResponse struct {
 func (h *Handler) GetUsageDaily(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
+		return
+	}
+	date := strings.TrimSpace(c.Query("date"))
+	if date != "" && !isUsageDayKey(date) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "date must be formatted YYYY-MM-DD"})
 		return
 	}
 
@@ -145,14 +152,9 @@ func (h *Handler) GetUsageDaily(c *gin.Context) {
 		resp.UpdatedAt = time.Unix(sec, 0).UTC().Format(time.RFC3339)
 	}
 
-	date := strings.TrimSpace(c.Query("date"))
 	if date == "" {
 		// Index request: hand back the day list so the picker can bound itself.
 		c.JSON(http.StatusOK, resp)
-		return
-	}
-	if !isUsageDayKey(date) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "date must be formatted YYYY-MM-DD"})
 		return
 	}
 	resp.Date = date
@@ -166,13 +168,18 @@ func (h *Handler) GetUsageDaily(c *gin.Context) {
 	// Pass 1: totals. Cost is summable across every unit; volume is not.
 	var totalCost float64
 	totalTokens := 0
+	totalEstimatedTokens := 0
 	totalRequests := 0
 	for _, provider := range providers {
 		for _, m := range provider.Models {
 			totalCost += m.EstimatedCostUSD
 			totalRequests += m.RequestCount
-			if volumeAggregatesAsTokens(m.VolumeUnit) {
+			// Match DailyUsageSummary: measured and estimated tokens stay separate.
+			if provider.VolumeUnit == "tokens" && m.VolumeUnit == "tokens" {
 				totalTokens += m.TotalVolume
+			}
+			if m.VolumeUnit == "estimatedTokens" {
+				totalEstimatedTokens += m.TotalVolume
 			}
 		}
 	}
@@ -189,7 +196,10 @@ func (h *Handler) GetUsageDaily(c *gin.Context) {
 			Fidelity:     provider.Fidelity,
 		}
 		for _, m := range provider.Models {
-			row.TotalVolume += m.TotalVolume
+			// Kiro can contain credits and token estimates in the same provider.
+			if m.VolumeUnit == provider.VolumeUnit {
+				row.TotalVolume += m.TotalVolume
+			}
 			row.EstimatedCostUSD += m.EstimatedCostUSD
 			row.RequestCount += m.RequestCount
 			resp.Models = append(resp.Models, usageDailyModelRow{
@@ -237,6 +247,7 @@ func (h *Handler) GetUsageDaily(c *gin.Context) {
 	sort.Strings(resp.Caveats)
 
 	resp.TotalTokens = totalTokens
+	resp.TotalEstimatedTokens = totalEstimatedTokens
 	resp.TotalCostUSD = totalCost
 	resp.TotalRequests = totalRequests
 	resp.Empty = len(resp.Models) == 0
@@ -262,10 +273,10 @@ func loadUsageDailyFile() (*usageDailyFile, error) {
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil, err
 	}
-	// An unknown schema is treated as "no data" rather than guessed at, matching the
-	// Swift reader, so a future format change degrades instead of misreporting.
+	// Never report zero usage when history exists but cannot be understood. Older
+	// schemas need the Swift app's migration and rescan to correct their accounting.
 	if parsed.Version != usageDailySchemaVersion {
-		return nil, nil
+		return nil, fmt.Errorf("unsupported usage history version %d", parsed.Version)
 	}
 	return &parsed, nil
 }
@@ -304,6 +315,10 @@ func usageFidelityCaveat(fidelity string) string {
 		return "day total only — no per-model split"
 	case "sessionApproximate":
 		return "approximate — whole sessions land on one day"
+	case "partial":
+		return "partial — some session logs could not be read"
+	case "legacy":
+		return "from an older build, unverified"
 	default:
 		return ""
 	}

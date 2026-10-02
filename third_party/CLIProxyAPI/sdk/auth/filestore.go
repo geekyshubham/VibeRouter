@@ -186,6 +186,10 @@ func (s *FileTokenStore) resolveDeletePath(id string) (string, error) {
 }
 
 func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, error) {
+	// Dot files hold app bookkeeping, such as deleted-seat tombstones, not logins.
+	if strings.HasPrefix(filepath.Base(path), ".") {
+		return nil, nil
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read file: %w", err)
@@ -198,8 +202,8 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
-	if provider == "" {
-		provider = "unknown"
+	if strings.TrimSpace(provider) == "" {
+		return nil, nil
 	}
 	if provider == "antigravity" || provider == "gemini" {
 		projectID := ""

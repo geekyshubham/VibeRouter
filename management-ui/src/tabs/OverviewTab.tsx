@@ -9,12 +9,12 @@
 import { Link, useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { clientEndpoints } from '../lib/apiClient';
-import { useManagementQuery } from '../lib/useManagementQuery';
+import { useUsageDaily } from '../lib/useUsageDaily';
 import { useAccessKeys, useAuthFiles, useRouting } from '../lib/useConsoleData';
 import { accountState } from '../lib/health';
 import { num, plural, todayKey, tokens, usd } from '../lib/format';
-import type { UsageDailyResponse } from '../lib/types';
 import { useOnline } from '../context/OnlineContext';
+import { useUsageDay } from '../context/UsageDayContext';
 import Icon from '../lib/icons';
 import SectionHeader from '../components/SectionHeader';
 import LoadingBlock from '../components/LoadingBlock';
@@ -29,6 +29,7 @@ function Kpi({
   value,
   sub,
   tone,
+  onClick,
 }: {
   to: string;
   Glyph: typeof Icon.Users;
@@ -36,9 +37,10 @@ function Kpi({
   value: string;
   sub: string;
   tone?: 'ok' | 'warn';
+  onClick?: () => void;
 }) {
   return (
-    <Link to={to} className="kpi glass">
+    <Link to={to} className="kpi glass" onClick={onClick}>
       <div className="kpi-lbl">
         <Glyph />
         <span>{label}</span>
@@ -58,16 +60,17 @@ export default function OverviewTab() {
   const qc = useQueryClient();
   const navigate = useNavigate();
   const { online } = useOnline();
+  const { resetToToday } = useUsageDay();
   const { files, isLoading: filesLoading } = useAuthFiles();
   const routing = useRouting();
   const { keys } = useAccessKeys();
-  const today = useManagementQuery<UsageDailyResponse>(`/usage-daily?date=${todayKey()}`);
+  const today = useUsageDaily(todayKey());
   const ep = clientEndpoints();
 
   const active = files.filter((f) => accountState(f) === 'active');
   const issues = files.filter((f) => accountState(f) === 'issue');
   const models = (routing.data?.models ?? []).filter((m) => !m.disabled);
-  const providers = new Set(active.map((f) => f.provider || f.type).filter(Boolean));
+  const providers = new Set(models.flatMap((m) => m.providers ?? []).filter(Boolean));
 
   const steps = [
     {
@@ -183,10 +186,11 @@ export default function OverviewTab() {
           />
           <Kpi
             to="/overview#usage-title"
+            onClick={resetToToday}
             Glyph={Icon.Activity}
-            label="Spend today"
-            value={today.data ? usd(today.data.totalCostUSD) : '—'}
-            sub={today.data ? `${tokens(today.data.totalTokens)} tokens` : 'Loading…'}
+            label="Estimated spend today"
+            value={!today.isError && today.data ? usd(today.data.totalCostUSD) : '—'}
+            sub={today.isError ? 'Usage history unavailable' : today.data ? `${tokens(today.data.totalTokens)} tokens${today.data.totalEstimatedTokens ? ` + ${tokens(today.data.totalEstimatedTokens)} estimated` : ''}` : 'Loading…'}
           />
           <Kpi
             to="/keys"
@@ -204,8 +208,8 @@ export default function OverviewTab() {
           <SectionHeader
             id="activity-title"
             Glyph={Icon.Zap}
-            title="Live traffic"
-            sub="All accounts, 10-minute windows"
+            title="Backend traffic"
+            sub="Since backend restart · excludes direct Kiro and local CLI sessions"
             actions={
               <Link to="/accounts" className="btn btn-ghost btn-sm">
                 By account

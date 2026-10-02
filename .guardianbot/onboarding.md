@@ -1,6 +1,6 @@
 ## GuardianBot onboarding
 
-Repository: `geekyshubham/vibeproxy-ultra`
+Repository: `geekyshubham/VibeRouter`
 
 | Capability | Detection |
 | --- | --- |

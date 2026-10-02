@@ -132,6 +132,7 @@ enum TokenRefreshService {
             var skipped = Set<String>()
             for job in group {
                 let current = NativeUsageFetcher.readAuthPayload(at: job.file) ?? job.payload
+                guard canCopyTokens(from: updated, onto: current) else { continue }
                 let merged = copyTokenFields(from: updated, onto: current)
                 if writeAuthFile(merged, to: job.file) {
                     refreshed += 1
@@ -179,6 +180,7 @@ enum TokenRefreshService {
         }
         let oldRefresh = refreshToken(from: payload)
         guard let updated = await refreshPayload(payload, type: kind, forceOAuth: force) else { return false }
+        guard canCopyTokens(from: updated, onto: payload) else { return false }
         let ok = writeAuthFile(updated, to: file)
         if ok {
             if let oldRefresh, !oldRefresh.isEmpty {
@@ -275,11 +277,13 @@ enum TokenRefreshService {
         for file in files where file.pathExtension == "json" {
             if skipped.contains(file.path) { continue }
             guard let payload = NativeUsageFetcher.readAuthPayload(at: file) else { continue }
+            guard canCopyTokens(from: updated, onto: payload) else { continue }
             let matchesRefresh = refreshToken(from: payload) == trimmed
-            let matchesSeat = sameCodexSeat(payload, as: updated)
+            let matchesSeat = (updated["type"] as? String)?.lowercased() == "codex"
+                && sameCodexSeat(payload, as: updated)
             guard matchesRefresh || matchesSeat else { continue }
-            // Shared RT always takes the new tokens (OpenAI already rotated).
-            // Seat fan-out must not copy Team onto a Go file or clobber a fresher copy.
+            // Matching lineages receive rotated tokens only after identity checks.
+            // Seat fan-out must also preserve a fresher copy.
             if !matchesRefresh {
                 if seatsConflict(payload, updated: updated) { continue }
                 if hasNewerAccessToken(payload, than: updated) { continue }
@@ -304,6 +308,7 @@ enum TokenRefreshService {
     /// Leave that copy stale and the next CLI refresh sends refresh_token_reused.
     @discardableResult
     private static func syncCodexAuthJSON(oldRefresh: String, updated: [String: Any]) -> Bool {
+        guard (updated["type"] as? String)?.lowercased() == "codex" else { return false }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let url = home.appendingPathComponent(".codex/auth.json")
         guard let data = try? Data(contentsOf: url),
@@ -311,6 +316,7 @@ enum TokenRefreshService {
         else { return false }
 
         var tokens = (root["tokens"] as? [String: Any]) ?? [:]
+        guard canCopyTokens(from: updated, onto: root) else { return false }
         let stored = stringValue(tokens, keys: ["refresh_token"])
             ?? stringValue(root, keys: ["refresh_token"])
         let matchesRefresh = stored == oldRefresh
@@ -347,6 +353,7 @@ enum TokenRefreshService {
     /// Nested Cockpit `~/.antigravity_cockpit/codex_accounts/*.json` share the rotating RT.
     @discardableResult
     private static func syncCockpitCodexAccounts(oldRefresh: String, updated: [String: Any]) -> Int {
+        guard (updated["type"] as? String)?.lowercased() == "codex" else { return 0 }
         let dir = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".antigravity_cockpit/codex_accounts")
         guard let files = try? FileManager.default.contentsOfDirectory(
@@ -357,6 +364,7 @@ enum TokenRefreshService {
         var wrote = 0
         for file in files where file.pathExtension == "json" {
             guard var root = NativeUsageFetcher.readAuthPayload(at: file) else { continue }
+            guard canCopyTokens(from: updated, onto: root) else { continue }
             var tokens = (root["tokens"] as? [String: Any]) ?? [:]
             let stored = stringValue(tokens, keys: ["refresh_token"])
                 ?? stringValue(root, keys: ["refresh_token"])
@@ -393,12 +401,52 @@ enum TokenRefreshService {
     static func sameCodexSeat(_ payload: [String: Any], as updated: [String: Any]) -> Bool {
         let a = flattenedAuth(payload)
         let b = flattenedAuth(updated)
+        guard codexIdentityIsConsistent(a), codexIdentityIsConsistent(b) else { return false }
+        guard canCopyTokens(from: b, onto: a) else { return false }
         guard let idA = seatAccountID(a), let idB = seatAccountID(b),
               idA.caseInsensitiveCompare(idB) == .orderedSame
         else { return false }
         guard let emailA = seatEmail(a), let emailB = seatEmail(b),
               emailA.caseInsensitiveCompare(emailB) == .orderedSame
         else { return false }
+        return true
+    }
+
+    /// A shared refresh token is not permission to replace a different provider,
+    /// ChatGPT member, or workspace's access token and identity.
+    static func canCopyTokens(from updated: [String: Any], onto original: [String: Any]) -> Bool {
+        let a = flattenedAuth(original)
+        let b = flattenedAuth(updated)
+        guard !AccountCredentialIdentity.hasConflict(a, b) else { return false }
+        let typeA = stringValue(a, keys: ["type"])?.lowercased()
+        let typeB = stringValue(b, keys: ["type"])?.lowercased()
+        if let typeA, let typeB, typeA != typeB { return false }
+        if typeA == "codex" || typeB == "codex" {
+            guard codexIdentityIsConsistent(a), codexIdentityIsConsistent(b) else { return false }
+            if let left = seatAccountID(a), let right = seatAccountID(b),
+               left.caseInsensitiveCompare(right) != .orderedSame { return false }
+            if let left = seatEmail(a), let right = seatEmail(b),
+               left.caseInsensitiveCompare(right) != .orderedSame { return false }
+            let userA = CodexWorkspaceCredentials.chatgptUserID(from: stringValue(a, keys: ["access_token"]))
+            let userB = CodexWorkspaceCredentials.chatgptUserID(from: stringValue(b, keys: ["access_token"]))
+            if let userA, let userB, userA != userB { return false }
+        }
+        if typeA == "kiro" || typeB == "kiro" {
+            if let left = KiroAccountIdentity.key(a), let right = KiroAccountIdentity.key(b), left != right {
+                return false
+            }
+        }
+        return true
+    }
+
+    static func codexIdentityIsConsistent(_ json: [String: Any]) -> Bool {
+        let json = flattenedAuth(json)
+        let accessEmail = JWTEmailExtractor.email(from: stringValue(json, keys: ["access_token"]))
+        let idEmail = JWTEmailExtractor.email(from: stringValue(json, keys: ["id_token"]))
+        if let accessEmail, let idEmail, accessEmail.caseInsensitiveCompare(idEmail) != .orderedSame { return false }
+        if let actual = accessEmail ?? idEmail, let stored = stringValue(json, keys: ["email"]), !stored.isEmpty {
+            return actual.caseInsensitiveCompare(stored) == .orderedSame
+        }
         return true
     }
 
@@ -436,10 +484,12 @@ enum TokenRefreshService {
             ?? stringValue(json, keys: ["account_id", "chatgpt_account_id"])
     }
 
-    private static func seatEmail(_ json: [String: Any]) -> String? {
-        stringValue(json, keys: ["email"])
+    static func seatEmail(_ json: [String: Any]) -> String? {
+        // The access token is the identity queried upstream. A stale label or
+        // ID token must never authorize copying another Team member's tokens.
+        JWTEmailExtractor.email(from: stringValue(json, keys: ["access_token"]))
             ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["id_token"]))
-            ?? JWTEmailExtractor.email(from: stringValue(json, keys: ["access_token"]))
+            ?? stringValue(json, keys: ["email"])
     }
 
     static func copyTokenFields(from updated: [String: Any], onto original: [String: Any]) -> [String: Any] {
@@ -495,7 +545,7 @@ enum TokenRefreshService {
         let oauthObj = (root["claudeAiOauth"] as? [String: Any]) ?? root
         let existingRefresh = stringValue(oauthObj, keys: ["refreshToken", "refresh_token"])
 
-        if let existingRefresh, !existingRefresh.isEmpty, existingRefresh != oldRefresh {
+        if existingRefresh != oldRefresh || !canCopyTokens(from: updated, onto: oauthObj) {
             // Native Claude Code already rotated. Writing our leftover family into
             // the keychain is what logs `claude` out every other refresh.
             NSLog("[TokenRefresh] Skipping Keychain sync; Claude Code refresh token already moved on")
@@ -557,7 +607,8 @@ enum TokenRefreshService {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".gemini/oauth_creds.json")
         guard var root = NativeUsageFetcher.readAuthPayload(at: url),
-              stringValue(root, keys: ["refresh_token", "refreshToken"]) == oldRefresh
+              stringValue(root, keys: ["refresh_token", "refreshToken"]) == oldRefresh,
+              canCopyTokens(from: updated, onto: root)
         else { return }
         if let access = stringValue(updated, keys: ["access_token"]) {
             root["access_token"] = access
@@ -578,6 +629,13 @@ enum TokenRefreshService {
             .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
         let stored = VscdbStore.readString(dbURL: db, key: "cursorAuth/refreshToken")
         guard stored == oldRefresh else { return }
+        let native: [String: Any] = [
+            "type": "cursor",
+            "email": VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail") ?? "",
+            "access_token": VscdbStore.readString(dbURL: db, key: "cursorAuth/accessToken") ?? "",
+            "refresh_token": stored ?? "",
+        ]
+        guard canCopyTokens(from: updated, onto: native) else { return }
         if let access = stringValue(updated, keys: ["access_token", "accessToken"]) {
             try? VscdbStore.writeString(dbURL: db, key: "cursorAuth/accessToken", value: access)
             try? VscdbStore.writeString(dbURL: db, key: "cursor.accessToken", value: access)
@@ -640,11 +698,8 @@ enum TokenRefreshService {
         guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let flat = flattenedAuth(payload)
         guard stringValue(flat, keys: ["access_token"]) != nil else { return false }
-        if let local = NativeUsageFetcher.readCodexAppPayload(),
-           !NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local)
-        {
-            return false
-        }
+        guard let local = NativeUsageFetcher.readCodexAppPayload(),
+              NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local) else { return false }
         return writeCodexCLITokens(from: flat, to: url, codexHome: home.appendingPathComponent(".codex"))
     }
 
@@ -682,6 +737,7 @@ enum TokenRefreshService {
     // MARK: - Provider refresh
 
     private static func refreshPayload(_ payload: [String: Any], type: String, forceOAuth: Bool = false) async -> [String: Any]? {
+        guard AccountCredentialIdentity.isConsistent(payload) else { return nil }
         switch type {
         case "codex":
             return await refreshOpenAI(payload)
@@ -750,14 +806,7 @@ enum TokenRefreshService {
         guard stringValue(local, keys: ["access_token", "refresh_token"]) != nil else {
             return true
         }
-        if let fileEmail = stringValue(file, keys: ["email"]),
-           let localEmail = stringValue(local, keys: ["email"]),
-           !fileEmail.isEmpty, !localEmail.isEmpty,
-           fileEmail.caseInsensitiveCompare(localEmail) != .orderedSame
-        {
-            return true
-        }
-        return false
+        return !AccountCredentialIdentity.sameAccount(file, local)
     }
 
     private static func refreshAnthropic(_ payload: [String: Any], forceOAuth: Bool = false) async -> [String: Any]? {
@@ -1067,6 +1116,8 @@ enum TokenRefreshService {
     }
 
     private static func writeAuthFile(_ payload: [String: Any], to file: URL) -> Bool {
+        guard AccountCredentialIdentity.isConsistent(payload) else { return false }
+        if let original = NativeUsageFetcher.readAuthPayload(at: file), AccountCredentialIdentity.hasConflict(original, payload) { return false }
         do {
             let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
             try data.write(to: file, options: [.atomic])

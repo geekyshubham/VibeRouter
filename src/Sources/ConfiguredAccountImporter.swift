@@ -23,7 +23,8 @@ enum ConfiguredAccountImporter {
         case .geminiCLI:
             return importGeminiCLI(authDirectory: authDirectory, displayName: account.displayName)
         case .copilotApp:
-            return importCopilotApp(authDirectory: authDirectory, displayName: account.displayName)
+            return importCopilotApp(authDirectory: authDirectory, displayName: account.displayName,
+                                    preferredIdentity: account.id.hasPrefix("copilot-") ? String(account.id.dropFirst("copilot-".count)) : nil)
         case .grokCLI:
             return importGrokCLI(authDirectory: authDirectory, displayName: account.displayName)
         case .grokOpenCode:
@@ -72,8 +73,10 @@ enum ConfiguredAccountImporter {
         for rel in kiroIDETokenRelativePaths {
             let url = home.appendingPathComponent(rel)
             guard FileManager.default.fileExists(atPath: url.path),
-                  let text = try? String(contentsOf: url, encoding: .utf8),
-                  !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  let cache = NativeUsageFetcher.readAuthPayload(at: url),
+                  let data = try? JSONSerialization.data(withJSONObject:
+                    kiroCacheWithRegistration(cache, home: home, authDirectory: authDirectory)),
+                  let text = String(data: data, encoding: .utf8)
             else { continue }
             switch ManualTokenImporter.importPasted(
                 text,
@@ -90,7 +93,8 @@ enum ConfiguredAccountImporter {
         return .failure(message: lastFailure)
     }
 
-    /// Overlay live SSO-cache tokens onto an existing AWS Builder ID file (keeps client_id/secret).
+    /// Overlay a verified account's live SSO tokens, preserving its OIDC registration.
+    /// A matching client hash alone cannot distinguish two people using the same IDE.
     static func mergeKiroSSOCacheOntoAWSFiles(
         home: URL,
         authDirectory: URL
@@ -120,10 +124,12 @@ enum ConfiguredAccountImporter {
             let existingHash = ((existing["client_id_hash"] as? String) ?? "").lowercased()
             let existingID = (existing["client_id"] as? String).map(KiroAWSAuth.clientIDHash) ?? ""
             let hashMatch = !hash.isEmpty && (hash == existingHash || hash == existingID.lowercased())
-            guard hashMatch else { continue }
+            guard hashMatch, KiroAccountIdentity.sameAccount(existing, cache) else { continue }
             let cacheExp = (cache["expiresAt"] as? String) ?? (cache["expires_at"] as? String)
             let fileExp = (existing["expires_at"] as? String) ?? (existing["expired"] as? String)
-            if let cacheExp, let fileExp, cacheExp <= fileExp { continue }
+            if let cacheExp, let fileExp, cacheExp <= fileExp {
+                return .success(message: "This Kiro account is already imported (\(file.lastPathComponent)).")
+            }
             existing["access_token"] = access
             existing["accessToken"] = access
             if let refresh = (cache["refreshToken"] as? String) ?? (cache["refresh_token"] as? String) {
@@ -139,11 +145,46 @@ enum ConfiguredAccountImporter {
                 withJSONObject: existing,
                 options: [.prettyPrinted, .sortedKeys]
             ) else { continue }
-            try? data.write(to: file, options: [.atomic])
+            do {
+                try data.write(to: file, options: [.atomic])
+            } catch {
+                return .failure(message: error.localizedDescription)
+            }
             NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
             return .success(message: "Updated Kiro AWS account from the local IDE session (\(file.lastPathComponent)).")
         }
         return nil
+    }
+
+    /// Reuse client registration metadata without copying the previous login's identity or tokens.
+    private static func kiroCacheWithRegistration(
+        _ cache: [String: Any], home: URL, authDirectory: URL
+    ) -> [String: Any] {
+        guard let hash = ((cache["clientIdHash"] as? String) ?? (cache["client_id_hash"] as? String)),
+              !hash.isEmpty, hash.allSatisfy({ $0.isHexDigit })
+        else { return cache }
+        var enriched = cache
+        var registrations: [[String: Any]] = []
+        if let registration = NativeUsageFetcher.readAuthPayload(
+            at: home.appendingPathComponent(".aws/sso/cache/\(hash).json")
+        ) { registrations.append(registration) }
+        let files = (try? FileManager.default.contentsOfDirectory(at: authDirectory, includingPropertiesForKeys: nil)) ?? []
+        for file in files where file.pathExtension == "json" {
+            guard let existing = NativeUsageFetcher.readAuthPayload(at: file),
+                  (existing["type"] as? String)?.lowercased() == "kiro"
+            else { continue }
+            let existingHash = existing["client_id_hash"] as? String
+                ?? (existing["client_id"] as? String).map(KiroAWSAuth.clientIDHash)
+            if existingHash?.caseInsensitiveCompare(hash) == .orderedSame { registrations.append(existing) }
+        }
+        for registration in registrations {
+            for (canonical, camel) in [("client_id", "clientId"), ("client_secret", "clientSecret")] {
+                if enriched[canonical] == nil, enriched[camel] == nil {
+                    enriched[canonical] = registration[canonical] ?? registration[camel]
+                }
+            }
+        }
+        return enriched
     }
 
     static func importFromDesktopApp(for command: AuthCommand) -> ConfiguredAccountImportResult {
@@ -173,9 +214,9 @@ enum ConfiguredAccountImporter {
             return .failure(message: "Could not read Codex app credentials from ~/.codex/auth.json")
         }
 
-        let email = JWTEmailExtractor.email(from: tokens["id_token"] as? String)
-            ?? JWTEmailExtractor.email(from: accessToken)
-            ?? displayName
+        let email = JWTEmailExtractor.email(from: accessToken)
+            ?? JWTEmailExtractor.email(from: tokens["id_token"] as? String)
+            ?? ""
         let now = Date()
         let expired = ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
 
@@ -184,7 +225,8 @@ enum ConfiguredAccountImporter {
             "email": email,
             "access_token": accessToken,
             "refresh_token": refreshToken,
-            "account_id": tokens["account_id"] as? String ?? "",
+            "account_id": CodexWorkspaceCredentials.chatgptAccountID(from: accessToken)
+                ?? (tokens["account_id"] as? String) ?? "",
             "id_token": tokens["id_token"] as? String ?? "",
             "expires_in": 3600,
             "expired": expired,
@@ -198,7 +240,7 @@ enum ConfiguredAccountImporter {
 
         return writeAuthRecord(
             record,
-            filename: "codex-\(sanitizeFilename(email)).json",
+            filename: ManualTokenImporter.codexFilename(record),
             authDirectory: authDirectory,
             successLabel: "Imported \(email) from Codex app"
         )
@@ -241,8 +283,9 @@ enum ConfiguredAccountImporter {
         let refreshToken = (openai["refresh"] as? String) ?? (openai["refresh_token"] as? String) ?? ""
         let email = JWTEmailExtractor.email(from: accessToken)
             ?? JWTEmailExtractor.email(from: openai["id_token"] as? String)
-            ?? displayName
-        let accountID = (openai["accountId"] as? String)
+            ?? ""
+        let accountID = CodexWorkspaceCredentials.chatgptAccountID(from: accessToken)
+            ?? (openai["accountId"] as? String)
             ?? (openai["account_id"] as? String)
             ?? ""
         let now = Date()
@@ -263,7 +306,7 @@ enum ConfiguredAccountImporter {
 
         return writeAuthRecord(
             record,
-            filename: "codex-\(sanitizeFilename(email)).json",
+            filename: ManualTokenImporter.codexFilename(record),
             authDirectory: authDirectory,
             successLabel: "Imported \(email) from OpenCode"
         )
@@ -301,9 +344,8 @@ enum ConfiguredAccountImporter {
 
         let expiresAtMs = oauth["expiresAt"] as? Double
         let expiresAt = expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
-        let email = (oauth["email"] as? String)
-            ?? JWTEmailExtractor.email(from: accessToken)
-            ?? displayName
+        let email = AccountCredentialIdentity.email(oauth,
+            matchingNative: AccountCredentialIdentity.email(oauth) == nil ? NativeUsageFetcher.readClaudeAppPayload() : nil) ?? ""
 
         let now = Date()
         let expired = expiresAt.map { ISO8601DateFormatter().string(from: $0) }
@@ -344,7 +386,7 @@ enum ConfiguredAccountImporter {
             return .failure(message: "Could not read Gemini CLI credentials")
         }
 
-        let email = JWTEmailExtractor.email(from: payload["id_token"] as? String) ?? displayName
+        let email = AccountCredentialIdentity.email(payload) ?? ""
         let projectID = (try? Data(contentsOf: FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".gemini/projects.json")))
             .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -375,8 +417,8 @@ enum ConfiguredAccountImporter {
 
     // MARK: - Copilot
 
-    private static func importCopilotApp(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
-        let home = FileManager.default.homeDirectoryForCurrentUser
+    static func importCopilotApp(authDirectory: URL, displayName: String, preferredIdentity: String? = nil,
+                                 home: URL = FileManager.default.homeDirectoryForCurrentUser) -> ConfiguredAccountImportResult {
         let sources = [
             home.appendingPathComponent(".config/github-copilot/oauth.json"),
             home.appendingPathComponent(".config/github-copilot/apps.json"),
@@ -408,12 +450,17 @@ enum ConfiguredAccountImporter {
         }
 
         let normalizedDisplay = displayName.lowercased()
-        guard let entry = entries.first(where: { candidate in
+        let matchedEntry = entries.first(where: { candidate in
+            if let preferredIdentity {
+                guard let parsed = try? ManualTokenImporter.copilotAccount(candidate) else { return false }
+                return AccountCredentialIdentity.key(parsed.record) == preferredIdentity
+            }
             let account = candidate["account"] as? [String: Any]
             let label = (account?["label"] as? String)?.lowercased()
             let login = (account?["login"] as? String)?.lowercased()
             return label == normalizedDisplay || login == normalizedDisplay
-        }) ?? entries.first,
+        })
+        guard let entry = preferredIdentity == nil && normalizedDisplay.isEmpty ? entries.first : matchedEntry,
               let accessToken = (entry["accessToken"] as? String)
                 ?? (entry["access_token"] as? String)
                 ?? (entry["oauth_token"] as? String)
@@ -423,20 +470,11 @@ enum ConfiguredAccountImporter {
             return .failure(message: "No GitHub Copilot access token found")
         }
 
-        let account = entry["account"] as? [String: Any]
-        let username = (account?["label"] as? String)
-            ?? (account?["login"] as? String)
-            ?? displayName
-
-        let record: [String: Any] = [
-            "type": "github-copilot",
-            "access_token": accessToken,
-            "token_type": "bearer",
-            "scope": "",
-            "username": username,
-            "email": username,
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
+        guard let parsed = try? ManualTokenImporter.copilotAccount(entry) else {
+            return .failure(message: "Could not read the selected GitHub Copilot login.")
+        }
+        let record = parsed.record
+        let username = parsed.displayName
 
         return writeAuthRecord(
             record,
@@ -458,7 +496,7 @@ enum ConfiguredAccountImporter {
             return .failure(message: "Could not read Grok credentials from ~/.grok/auth.json")
         }
 
-        let email = (entry["email"] as? String) ?? displayName
+        let email = JWTEmailExtractor.email(from: accessToken) ?? (entry["email"] as? String) ?? ""
         let refreshToken = entry["refresh_token"] as? String ?? ""
         let expiresAt = grokExpiresAt(from: entry)
         let now = Date()
@@ -505,7 +543,7 @@ enum ConfiguredAccountImporter {
             return .failure(message: "Could not read Grok credentials from OpenCode auth.json")
         }
 
-        let email = JWTEmailExtractor.email(from: accessToken) ?? displayName
+        let email = JWTEmailExtractor.email(from: accessToken) ?? (xai["email"] as? String) ?? ""
         let refreshToken = xai["refresh"] as? String ?? ""
         let now = Date()
         let expired = grokExpiresAt(from: xai)
@@ -595,7 +633,7 @@ enum ConfiguredAccountImporter {
 
         var record: [String: Any] = [
             "type": "antigravity",
-            "email": payload["email"] as? String ?? displayName,
+            "email": JWTEmailExtractor.email(from: accessToken) ?? payload["email"] as? String ?? "",
             "access_token": accessToken,
             "refresh_token": refreshToken,
             "expires_in": expiresIn,
@@ -607,7 +645,7 @@ enum ConfiguredAccountImporter {
             record["project_id"] = projectID
         }
 
-        let resolvedEmail = record["email"] as? String ?? displayName
+        let resolvedEmail = record["email"] as? String ?? ""
         return writeAuthRecord(
             record,
             filename: "antigravity-\(sanitizeFilename(resolvedEmail)).json",
@@ -626,10 +664,10 @@ enum ConfiguredAccountImporter {
         else {
             return .failure(message: "Could not read Cursor credentials from the local Cursor app")
         }
-        let email = VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail")
+        let email = JWTEmailExtractor.email(from: accessToken)
+            ?? VscdbStore.readString(dbURL: db, key: "cursorAuth/cachedEmail")
             ?? VscdbStore.readString(dbURL: db, key: "cursor.email")
-            ?? JWTEmailExtractor.email(from: accessToken)
-            ?? displayName
+            ?? ""
         let refresh = VscdbStore.readString(dbURL: db, key: "cursorAuth/refreshToken") ?? ""
         let plan = VscdbStore.readString(dbURL: db, key: "cursorAuth/stripeMembershipType")
         let now = Date()
@@ -664,17 +702,10 @@ enum ConfiguredAccountImporter {
         filename: String,
         authDirectory: URL,
         successLabel: String,
-        overwrite: Bool = false
+        overwrite: Bool = true
     ) -> ConfiguredAccountImportResult {
         do {
-            try FileManager.default.createDirectory(at: authDirectory, withIntermediateDirectories: true)
-            let destination = authDirectory.appendingPathComponent(filename)
-            if !overwrite, FileManager.default.fileExists(atPath: destination.path) {
-                return .failure(message: "Account already exists at \(filename)")
-            }
-            let data = try JSONSerialization.data(withJSONObject: record, options: [.prettyPrinted, .sortedKeys])
-            try data.write(to: destination, options: [.atomic])
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destination.path)
+            try AccountCredentialStore.save(record, in: authDirectory, overwrite: overwrite)
             NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
             return .success(message: successLabel)
         } catch {

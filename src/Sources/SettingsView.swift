@@ -679,8 +679,8 @@ struct SettingsView: View {
                 .font(.caption2)
                 .foregroundColor(.secondary.opacity(0.8))
             HStack(spacing: 12) {
-                Link("Releases", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/releases")!)
-                Link("Issues", destination: URL(string: "https://github.com/Geekyshubham/vibeproxy-ultra/issues")!)
+                Link("Releases", destination: URL(string: "https://github.com/Geekyshubham/VibeRouter/releases")!)
+                Link("Issues", destination: URL(string: "https://github.com/Geekyshubham/VibeRouter/issues")!)
                 Button("About…") { AboutWindowController.show() }
                     .buttonStyle(.plain)
                     .foregroundColor(MenuBarDesign.accent)

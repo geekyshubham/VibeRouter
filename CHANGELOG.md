@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-10-02
+
+### Fixed
+- Management usage history now reads the app's current schema, refreshes automatically, and keeps measured tokens, estimates, and Kiro credits separate.
+- Internal account bookkeeping is excluded from the account list; provider counts reflect the served model catalog.
+- Kiro requests use the active CLI Builder ID login as well as social logins, preserving that login through token refresh instead of selecting another account with different model access.
+- Streaming, images, large conversations, and account isolation are covered by production-code regression checks.
+
+### Changed
+- Renamed the GitHub repository to VibeRouter and updated app, documentation, and release links.
+
 ### Added
 - **Claude rate-limit resets** — Claude accounts now get the same reset bank as ChatGPT and Grok. Saved resets (the Settings → Usage "Reset for free" grant) and the weekly session reset (`/limit-reset`) are read from Claude's OAuth usage API and can be applied from the usage card or `viberouter reset`. A grant Anthropic only exposes on claude.ai stays hidden here instead of showing a false "none left".
 
@@ -205,13 +216,14 @@ Initial VibeRouter release — usage limits, account import, session reliability
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
-[1.2.4]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.4
-[1.2.3]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.3
-[1.2.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.2
-[1.2.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.1
-[1.2.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.2.0
-[1.1.2]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.2
-[1.1.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.1
-[1.1.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.1.0
-[1.0.1]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.0.1
-[1.0.0]: https://github.com/Geekyshubham/vibeproxy-ultra/releases/tag/v1.0.0
+[1.3.3]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.3.3
+[1.2.4]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.4
+[1.2.3]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.3
+[1.2.2]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.2
+[1.2.1]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.1
+[1.2.0]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.0
+[1.1.2]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.1.2
+[1.1.1]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.1.1
+[1.1.0]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.1.0
+[1.0.1]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.0.1
+[1.0.0]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.0.0

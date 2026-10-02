@@ -4,7 +4,7 @@
 
 ## Option 1: Download Pre-built (Recommended)
 
-1. Open **[Geekyshubham/vibeproxy-ultra Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
+1. Open **[Geekyshubham/VibeRouter Releases](https://github.com/Geekyshubham/VibeRouter/releases)**
 2. Download for your Mac:
    - Apple Silicon: `VibeRouter-arm64.dmg` or `VibeRouter-arm64.zip`
    - Intel: `VibeRouter-x86_64.dmg` or `VibeRouter-x86_64.zip`
@@ -12,9 +12,9 @@
 
 ### Install
 
-**ZIP:** extract → drag `VibeRouter.app` to `/Applications` → launch  
+**ZIP:** extract → drag `VibeRouter.app` to `/Applications` → launch
 
-**DMG:** open → drag to Applications → eject → launch  
+**DMG:** open → drag to Applications → eject → launch
 
 ### Gatekeeper
 
@@ -35,8 +35,8 @@ Or **Right-click → Open → Open**.
 - macOS 13.0+ · Swift 5.9+ · Xcode Command Line Tools · Git
 
 ```bash
-git clone https://github.com/Geekyshubham/vibeproxy-ultra.git
-cd vibeproxy-ultra
+git clone https://github.com/Geekyshubham/VibeRouter.git
+cd VibeRouter
 make app
 # or
 make install
@@ -52,9 +52,9 @@ APP_VERSION=1.1.0 ./scripts/build-release-artifacts.sh
 
 ## After install
 
-1. Menu bar icon → **Settings**  
-2. Connect providers (Claude Code, Codex, Gemini, Kiro, Copilot, …)  
-3. Use **usage limits**, **analytics**, and **status** in the popover  
+1. Menu bar icon → **Settings**
+2. Connect providers (Claude Code, Codex, Gemini, Kiro, Copilot, …)
+3. Use **usage limits**, **analytics**, and **status** in the popover
 
 ### Optional CLI and terminal dashboard
 
@@ -82,7 +82,7 @@ full command and JSON automation contract.
 
 ## Support
 
-- Issues: [github.com/Geekyshubham/vibeproxy-ultra/issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)  
-- Releases: [github.com/Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
+- Issues: [github.com/Geekyshubham/VibeRouter/issues](https://github.com/Geekyshubham/VibeRouter/issues)
+- Releases: [github.com/Geekyshubham/VibeRouter/releases](https://github.com/Geekyshubham/VibeRouter/releases)
 
 © 2026 Geekyshubham · VibeRouter · MIT

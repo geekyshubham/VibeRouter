@@ -9,7 +9,7 @@ import type { AuthFile, RecentRequestBucket } from './types';
 export type AccountState = 'active' | 'issue' | 'disabled';
 
 export function accountState(file: AuthFile): AccountState {
-  if (file.disabled) return 'disabled';
+  if (file.disabled || file.status?.toLowerCase() === 'disabled') return 'disabled';
   if (file.unavailable || file.status?.toLowerCase() === 'error') return 'issue';
   return 'active';
 }

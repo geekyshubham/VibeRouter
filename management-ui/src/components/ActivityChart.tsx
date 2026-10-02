@@ -28,7 +28,7 @@ export default function ActivityChart({ files }: { files: AuthFile[] }) {
         <div>
           <div className="kpi-val" style={{ fontSize: 'var(--text-2xl)' }}>{num(sum)}</div>
           <div className="small">
-            requests in the last {minutes >= 60 ? `${Math.round(minutes / 60)} hours` : `${minutes} minutes`}
+            requests in the last {minutes >= 60 ? `${Math.floor(minutes / 60)}h${minutes % 60 ? ` ${minutes % 60}m` : ''}` : `${minutes} minutes`}
             {failed > 0 && ` · ${num(failed)} failed`}
           </div>
         </div>

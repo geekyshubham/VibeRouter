@@ -61,8 +61,6 @@ final class ZAIAPIKeyStore {
                 )
             }
 
-            let filename = "zai-\(UUID().uuidString.prefix(8)).json"
-            let filePath = directoryURL.appendingPathComponent(filename)
             let authData: [String: Any] = [
                 "type": Self.authType,
                 "email": maskAPIKey(apiKey),
@@ -70,25 +68,13 @@ final class ZAIAPIKeyStore {
                 "created": createdAt
             ]
 
-            let jsonData: Data
             do {
-                jsonData = try JSONSerialization.data(withJSONObject: authData, options: .prettyPrinted)
-            } catch {
-                throw ZAIAPIKeyStoreError.failedToSerializeKey(
-                    "Failed to serialize Z.AI API key: \(error.localizedDescription)"
-                )
-            }
-
-            do {
-                try jsonData.write(to: filePath, options: .atomic)
-                try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: filePath.path)
+                return try AccountCredentialStore.save(authData, in: directoryURL)
             } catch {
                 throw ZAIAPIKeyStoreError.failedToWriteKey(
-                    "Failed to write Z.AI API key file at \(filePath.path): \(error.localizedDescription)"
+                    "Failed to write Z.AI API key: \(error.localizedDescription)"
                 )
             }
-
-            return filePath
         }
     }
 

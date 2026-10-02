@@ -38,6 +38,10 @@ export default function Shell() {
   }, [location.pathname]);
 
   useEffect(() => {
+    if (location.hash) document.getElementById(location.hash.slice(1))?.scrollIntoView({ block: 'start' });
+  }, [location.pathname, location.hash]);
+
+  useEffect(() => {
     if (!drawer) return;
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && setDrawer(false);
     window.addEventListener('keydown', onKey);

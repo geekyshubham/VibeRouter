@@ -9,10 +9,10 @@
 </p>
 
 <p align="center">
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Download VibeRouter" src="https://img.shields.io/github/v/release/Geekyshubham/vibeproxy-ultra?label=Download&color=6c5ce7"></a>
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745"></a>
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Geekyshubham/vibeproxy-ultra?style=social"></a>
-<a href="https://github.com/Geekyshubham/vibeproxy-ultra/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Geekyshubham/vibeproxy-ultra/total?label=downloads"></a>
+<a href="https://github.com/Geekyshubham/VibeRouter/releases"><img alt="Download VibeRouter" src="https://img.shields.io/github/v/release/Geekyshubham/VibeRouter?label=Download&color=6c5ce7"></a>
+<a href="https://github.com/Geekyshubham/VibeRouter/blob/main/LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-28a745"></a>
+<a href="https://github.com/Geekyshubham/VibeRouter/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/Geekyshubham/VibeRouter?style=social"></a>
+<a href="https://github.com/Geekyshubham/VibeRouter/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/Geekyshubham/VibeRouter/total?label=downloads"></a>
 </p>
 
 **VibeRouter** by **Geekyshubham** — use Claude Code, ChatGPT/Codex, Gemini, Antigravity, Kiro, Grok, Z.AI, OpenCode, and more with local tools. **No separate API keys** for OAuth providers. GitHub Copilot is tracked for usage only — the bundled proxy cannot route requests to it.
@@ -46,10 +46,10 @@ Also: one-click server start/stop, multi-account round-robin, provider enable/di
 
 | Architecture | DMG | ZIP |
 |--------------|-----|-----|
-| **Apple Silicon** (M1–M4) | [arm64.dmg](https://github.com/Geekyshubham/vibeproxy-ultra/releases/latest) | [arm64.zip](https://github.com/Geekyshubham/vibeproxy-ultra/releases/latest) |
-| **Intel** (x86_64) | [x86_64.dmg](https://github.com/Geekyshubham/vibeproxy-ultra/releases/latest) | [x86_64.zip](https://github.com/Geekyshubham/vibeproxy-ultra/releases/latest) |
+| **Apple Silicon** (M1–M4) | [arm64.dmg](https://github.com/Geekyshubham/VibeRouter/releases/latest) | [arm64.zip](https://github.com/Geekyshubham/VibeRouter/releases/latest) |
+| **Intel** (x86_64) | [x86_64.dmg](https://github.com/Geekyshubham/VibeRouter/releases/latest) | [x86_64.zip](https://github.com/Geekyshubham/VibeRouter/releases/latest) |
 
-**Releases:** [github.com/Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
+**Releases:** [github.com/Geekyshubham/VibeRouter/releases](https://github.com/Geekyshubham/VibeRouter/releases)
 
 Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications/VibeRouter.app`.
 
@@ -57,22 +57,22 @@ Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications
 
 ## Requirements
 
-- macOS 13.0 (Ventura) or later  
+- macOS 13.0 (Ventura) or later
 - Build from source: Xcode CLT / Swift 5.9+
 
 ## Installation
 
 ### Pre-built
 
-1. Open **[Releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)**
+1. Open **[Releases](https://github.com/Geekyshubham/VibeRouter/releases)**
 2. Download arm64 or x86_64 DMG/ZIP
 3. Drag `VibeRouter.app` to **Applications** → launch
 
 ### From source
 
 ```bash
-git clone https://github.com/Geekyshubham/vibeproxy-ultra.git
-cd vibeproxy-ultra
+git clone https://github.com/Geekyshubham/VibeRouter.git
+cd VibeRouter
 make app
 make run
 # or
@@ -89,10 +89,10 @@ See [INSTALLATION.md](INSTALLATION.md).
 
 ## Usage
 
-1. Launch — menu bar icon appears  
-2. Click for **Overview / Status / Analytics**  
-3. **Settings** → connect providers, import accounts, start proxy  
-4. Point coding tools (Factory, Amp, etc.) at the local proxy  
+1. Launch — menu bar icon appears
+2. Click for **Overview / Status / Analytics**
+3. **Settings** → connect providers, import accounts, start proxy
+4. Point coding tools (Factory, Amp, etc.) at the local proxy
 
 Guides: [Factory CLI](FACTORY_SETUP.md) · [Amp CLI](AMPCODE_SETUP.md)
 
@@ -117,13 +117,13 @@ server control, exit behavior, and completions.
 
 **MIT** · © 2026 Geekyshubham / VibeRouter — see [LICENSE](LICENSE).
 
-Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or other AI providers.  
+Not affiliated with OpenAI, Anthropic, Google, xAI, GitHub, or other AI providers.
 Proxying subscriptions may violate provider ToS — use at your own risk.
 
 ## Support
 
-- **Issues:** [Geekyshubham/vibeproxy-ultra/issues](https://github.com/Geekyshubham/vibeproxy-ultra/issues)  
-- **Releases:** [Geekyshubham/vibeproxy-ultra/releases](https://github.com/Geekyshubham/vibeproxy-ultra/releases)
+- **Issues:** [Geekyshubham/VibeRouter/issues](https://github.com/Geekyshubham/VibeRouter/issues)
+- **Releases:** [Geekyshubham/VibeRouter/releases](https://github.com/Geekyshubham/VibeRouter/releases)
 
 ---
 

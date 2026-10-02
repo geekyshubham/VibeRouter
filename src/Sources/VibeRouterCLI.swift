@@ -905,7 +905,8 @@ enum VibeRouterCLI {
     private static func proxyIsReachable() async -> Bool {
         guard let url = URL(string: "http://127.0.0.1:8317/v1/models") else { return false }
         var request = URLRequest(url: url)
-        request.timeoutInterval = 0.8
+        // The first catalog request can refresh Kiro CLI's model list (12s).
+        request.timeoutInterval = 15
         request.setValue("Bearer viberouter-cli", forHTTPHeaderField: "Authorization")
         do {
             let (_, response) = try await URLSession.shared.data(for: request)

@@ -2,7 +2,7 @@
 <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" xmlns:dc="http://purl.org/dc/elements/1.1/">
   <channel>
     <title>VibeRouter Updates</title>
-    <link>https://github.com/Geekyshubham/vibeproxy-ultra/releases</link>
+    <link>https://github.com/Geekyshubham/VibeRouter/releases</link>
     <description>VibeRouter release feed (Sparkle auto-update disabled in-app; install from GitHub Releases).</description>
     <language>en</language>
   </channel>
