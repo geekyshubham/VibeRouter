@@ -2836,13 +2836,12 @@ enum NativeUsageFetcher {
                 return .failure("Could not parse Grok billing usage")
             }
 
-            let label = grokUsageWindowLabel(resetsAt: parsed.resetsAt)
             let primary = RateWindow(
                 usedPercent: parsed.usedPercent,
-                windowMinutes: grokWindowMinutes(resetsAt: parsed.resetsAt),
+                windowMinutes: parsed.windowMinutes,
                 resetsAt: parsed.resetsAt,
                 resetDescription: parsed.resetsAt.map { ResetCountdownFormatter.resetLine(for: $0) },
-                label: label,
+                label: parsed.label,
                 displayStyle: .percent
             )
 
@@ -2877,22 +2876,6 @@ enum NativeUsageFetcher {
         } catch {
             return .failure(friendlyGrokError(error.localizedDescription))
         }
-    }
-
-    private static func grokUsageWindowLabel(resetsAt: Date?, now: Date = Date()) -> String {
-        guard let resetsAt else { return "Credits" }
-        let days = resetsAt.timeIntervalSince(now) / 86_400
-        if days <= 8 { return "Weekly" }
-        if days <= 40 { return "Monthly" }
-        return "Credits"
-    }
-
-    private static func grokWindowMinutes(resetsAt: Date?, now: Date = Date()) -> Int? {
-        guard let resetsAt else { return nil }
-        let days = resetsAt.timeIntervalSince(now) / 86_400
-        if days <= 8 { return 10_080 }
-        if days <= 40 { return 43_200 }
-        return nil
     }
 
     /// True when JWT `exp` or `expired` / `expires_at` is in the past.
@@ -3728,9 +3711,8 @@ extension NativeUsageFetcher {
     struct GrokBillingParseResult {
         let usedPercent: Double
         let resetsAt: Date?
-        /// Absolute remaining credits when the billing payload exposes them.
-        let remainingCredits: Double?
-        let totalCredits: Double?
+        let windowMinutes: Int?
+        let label: String
     }
 
     private static func grokGRPCError(
@@ -3793,42 +3775,59 @@ extension NativeUsageFetcher {
 
         let parsedPercent = scan.fixed32Fields
             .filter { field in
-                field.path.last == 1 && field.value.isFinite && field.value >= 0 && field.value <= 100
+                field.path == [1, 1] && field.value.isFinite && field.value >= 0 && field.value <= 100
             }
-            .min { lhs, rhs in
-                lhs.path.count == rhs.path.count ? lhs.order < rhs.order : lhs.path.count < rhs.path.count
-            }
+            .first
             .map { Double($0.value) }
 
-        let resetFields = scan.varintFields.compactMap { field -> (path: [UInt64], date: Date)? in
-            let raw = field.value
-            guard raw >= 1_700_000_000, raw <= 2_100_000_000 else { return nil }
-            return (field.path, Date(timeIntervalSince1970: TimeInterval(raw)))
+        func timestamp(_ path: [UInt64]) -> Date? {
+            guard let raw = scan.varintFields.first(where: { $0.path == path })?.value,
+                  raw >= 1_700_000_000, raw <= 2_100_000_000 else { return nil }
+            return Date(timeIntervalSince1970: TimeInterval(raw))
         }
-        let futureResetFields = resetFields.filter { $0.date > now }
-        let reset = futureResetFields
-            .filter { $0.path == [1, 5, 1] }
-            .map(\.date)
-            .min() ?? futureResetFields
-            .map(\.date)
-            .min()
 
-        let hasUsagePeriod = scan.varintFields.contains { field in
-            field.path.starts(with: [1, 6]) ||
-                (field.path == [1, 8, 1] && (field.value == 1 || field.value == 2))
+        // currentPeriod: type=1 monthly / 2 weekly, start=2, end=3.
+        // The time LEFT before a reset is not the duration of its quota window.
+        let periodType = scan.varintFields.first(where: { $0.path == [1, 8, 1] })?.value
+        let start = timestamp([1, 8, 2, 1]) ?? timestamp([1, 4, 1])
+        let reset = timestamp([1, 8, 3, 1]) ?? timestamp([1, 5, 1])
+        let duration = start.flatMap { start in reset.map { $0.timeIntervalSince(start) } }
+        let windowMinutes: Int?
+        let label: String
+        switch periodType {
+        case 1:
+            windowMinutes = 43_200
+            label = "Monthly"
+        case 2:
+            windowMinutes = 10_080
+            label = "Weekly"
+        default:
+            // Untyped/legacy periods can be identified by their full start/end span.
+            if let duration, abs(duration - 18_000) < 60 {
+                windowMinutes = 300
+                label = "5-hour"
+            } else if let duration, abs(duration - 604_800) < 60 {
+                windowMinutes = 10_080
+                label = "Weekly"
+            } else if let duration, (28 * 86_400...31 * 86_400).contains(duration) {
+                windowMinutes = 43_200
+                label = "Monthly"
+            } else {
+                windowMinutes = nil
+                label = "Credits"
+            }
         }
-        let noUsageYet = parsedPercent == nil &&
-            scan.fixed32Fields.isEmpty &&
-            reset != nil &&
-            hasUsagePeriod
 
-        // Grok product default is percentage (not absolute credits).
+        // Proto3 omits a zero total even when product breakdown floats are present.
+        // Never mistake a product percentage or unrelated timestamp for the quota.
+        let noUsageYet = !scan.fixed32Fields.contains(where: { $0.path == [1, 1] }) &&
+            reset.map { $0 > now } == true && windowMinutes != nil
         guard let percent = parsedPercent ?? (noUsageYet ? 0 : nil) else { return nil }
         return GrokBillingParseResult(
             usedPercent: percent,
             resetsAt: reset,
-            remainingCredits: nil,
-            totalCredits: nil
+            windowMinutes: windowMinutes,
+            label: label
         )
     }
 
