@@ -17,10 +17,10 @@ objects = [str(p) for target in ["CLIProxyMenuBar", "Yams", "CYaml"]
 compiler = ["swiftc", "-parse-as-library", "-I", str(build / "Modules"),
             "-I", str(root / "src/.build/checkouts/Yams/Sources/CYaml/include"),
             "-F", str(build), "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", str(build)]
-test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests"]
+test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests", "ClaudeUsagePollerTests"]
 test_sources = [(name, (root / f"src/Tests/{name}.swift").read_text()) for name in test_classes]
-methods = [(name, method, throwing) for name, source in test_sources
-           for method, throwing in re.findall(r"func (test\w+)\(\)( throws)?\s*\{", source)]
+methods = [(name, method, asynchronous, throwing) for name, source in test_sources
+           for method, asynchronous, throwing in re.findall(r"func (test\w+)\(\)( async)?( throws)?\s*\{", source)]
 shim = r'''
 import Foundation
 class XCTestCase {}
@@ -55,11 +55,11 @@ func XCTUnwrap<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) t
     return value
 }
 '''
-calls = "\n".join(f'        {"try " if throwing else ""}{name}().{method}()\n        print("Checked {method}")'
-                  for name, method, throwing in methods)
+calls = "\n".join(f'        {"try " if throwing else ""}{"await " if asynchronous else ""}{name}().{method}()\n        print("Checked {method}")'
+                  for name, method, asynchronous, throwing in methods)
 runner = '''
 @main struct AccountIsolationChecks {
-    static func main() throws {
+    static func main() async throws {
 ''' + calls + f'''
         if failures > 0 {{ exit(1) }}
         print("Passed {len(methods)} account isolation regression checks")

@@ -339,6 +339,14 @@ func nextRefreshCheckAt(now time.Time, auth *Auth, interval time.Duration) (time
 	if auth == nil {
 		return time.Time{}, false
 	}
+	// Native Claude Code owns imported sessions. An access-token-only copy
+	// cannot refresh; scheduling it rewrites expired credentials indefinitely.
+	if strings.EqualFold(auth.Provider, "claude") {
+		refresh, _ := auth.Metadata["refresh_token"].(string)
+		if strings.TrimSpace(refresh) == "" {
+			return time.Time{}, false
+		}
+	}
 	if hasUnauthorizedAuthFailure(auth) {
 		return time.Time{}, false
 	}

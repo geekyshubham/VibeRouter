@@ -192,6 +192,7 @@ class AuthManager: ObservableObject {
                 options: [.skipsHiddenFiles]
             )
             NSLog("[AuthStatus] Scanning %d files in auth directory", files.count)
+            let nativeClaude = NativeUsageFetcher.readClaudeAppPayload()
 
             for file in files where file.pathExtension == "json" {
                 guard let data = try? Data(contentsOf: file),
@@ -213,7 +214,7 @@ class AuthManager: ObservableObject {
                 // IMPORTANT: `expired` / `expires_at` in auth files is usually the short-lived
                 // *access token* expiry (~1h). CLIProxy refreshes via refresh_token automatically.
                 // Only treat the account as needing re-auth when the session cannot be refreshed.
-                let expiredDate = Self.sessionExpiryDate(from: json, serviceType: serviceType)
+                let expiredDate = Self.sessionExpiryDate(from: json, serviceType: serviceType, nativeClaude: nativeClaude)
 
                 let account = AuthAccount(
                     id: file.lastPathComponent,
@@ -430,13 +431,20 @@ class AuthManager: ObservableObject {
 
     /// Returns a date only when the *session* is truly unusable (needs re-login).
     /// Access-token timestamps alone do not count if a refresh token is present.
-    static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType) -> Date? {
+    static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType, nativeClaude: [String: Any]? = nil) -> Date? {
         // API-key providers never expire from access-token clocks.
         if serviceType == .zai || serviceType == .opencodeGo {
             return nil
         }
 
         let json = TokenRefreshService.flattenedAuth(json)
+        // Imported Claude files contain only an access token. Its expiry is not
+        // a logout while the matching native CLI still owns a refreshable session.
+        if serviceType == .claude, let nativeClaude,
+           AccountCredentialIdentity.sameAccount(json, nativeClaude),
+           TokenRefreshService.refreshToken(from: nativeClaude) != nil {
+            return nil
+        }
         let refreshToken = nonEmptyString(json["refresh_token"])
             ?? nonEmptyString(json["refreshToken"])
             ?? nonEmptyString(json["refresh"])

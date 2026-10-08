@@ -1199,14 +1199,11 @@ enum NativeUsageFetcher {
             let updatedFromCLI = overlayClaudeCLICredentialsIfFresher(onto: authFile)
             if updatedFromCLI {
                 payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
-                let retried = await fetchClaudeUsageOnce(
+                return await fetchClaudeUsageOnce(
                     authAccountID: authAccountID,
                     providerID: providerID,
                     payload: payload
                 )
-                if !retried.windows.isEmpty && retried.errorMessage == nil {
-                    return retried
-                }
             }
 
             // Do not force-rotate the Claude Code refresh token. A 401 here is often
@@ -1214,16 +1211,15 @@ enum NativeUsageFetcher {
             if TokenRefreshService.shouldNetworkRefreshClaude(
                 payload: payload,
                 native: readClaudeAppPayload()
-            ) {
-                _ = await TokenRefreshService.refreshAccountFile(authFile, force: true)
+            ), await TokenRefreshService.refreshAccountFile(authFile, force: true) {
                 _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
                 payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
+                return await fetchClaudeUsageOnce(
+                    authAccountID: authAccountID,
+                    providerID: providerID,
+                    payload: payload
+                )
             }
-            return await fetchClaudeUsageOnce(
-                authAccountID: authAccountID,
-                providerID: providerID,
-                payload: payload
-            )
         }
 
         return snapshot
@@ -1234,13 +1230,25 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
+        // Include identity so changing the account behind a file cannot reuse its quota.
+        let key = authAccountID + ":" + AccountCredentialIdentity.key(payload)
+        return await ClaudeUsagePoller.shared.fetch(key: key) {
+            await requestClaudeUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+        }
+    }
+
+    private static func requestClaudeUsage(
+        authAccountID: String,
+        providerID: String,
+        payload: [String: Any]
+    ) async -> ClaudeUsagePoller.Response {
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token")
+            return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing access token"))
         }
 
         let email = stringValue(payload, keys: ["email"])
         guard let url = URL(string: "https://api.anthropic.com/api/oauth/usage") else {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid usage URL")
+            return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid usage URL"))
         }
 
         var request = URLRequest(url: url)
@@ -1254,24 +1262,29 @@ enum NativeUsageFetcher {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid response")
+                return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: "Invalid response"))
             }
             if http.statusCode == 401 || http.statusCode == 403 {
-                return .empty(
+                return .init(snapshot: .empty(
                     authAccountID: authAccountID,
                     providerID: providerID,
-                    error: sessionInvalidMessage(payload: payload)
-                )
+                    error: !TokenRefreshService.shouldNetworkRefreshClaude(payload: payload, native: readClaudeAppPayload())
+                        ? "Claude Code access token expired — open Claude Code to refresh its session"
+                        : sessionInvalidMessage(payload: payload)
+                ))
             }
             if http.statusCode == 429 {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Rate limited — try again shortly")
+                return .init(
+                    snapshot: .empty(authAccountID: authAccountID, providerID: providerID, accountEmail: email),
+                    rateLimited: true, retryAfter: http.value(forHTTPHeaderField: "Retry-After")
+                )
             }
             guard (200...299).contains(http.statusCode) else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Usage API returned HTTP \(http.statusCode)")
+                return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: "Usage API returned HTTP \(http.statusCode)"))
             }
 
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return .empty(authAccountID: authAccountID, providerID: providerID, error: "Could not parse usage response")
+                return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: "Could not parse usage response"))
             }
 
             let primary = mapClaudeWindow(json["five_hour"] as? [String: Any], defaultMinutes: 300, label: "5-hour")
@@ -1291,7 +1304,7 @@ enum NativeUsageFetcher {
                 ? nil
                 : await RateLimitResetService.fetchClaudeBank(accessToken: accessToken)
 
-            return ProviderUsageSnapshot(
+            return .init(snapshot: ProviderUsageSnapshot(
                 id: authAccountID,
                 providerID: providerID,
                 source: "Claude OAuth",
@@ -1301,9 +1314,9 @@ enum NativeUsageFetcher {
                 updatedAt: Date(),
                 errorMessage: windows.isEmpty ? "No quota windows reported" : nil,
                 isRefreshing: false
-            )
+            ))
         } catch {
-            return .empty(authAccountID: authAccountID, providerID: providerID, error: error.localizedDescription)
+            return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: error.localizedDescription))
         }
     }
 
@@ -3085,11 +3098,11 @@ enum NativeUsageFetcher {
             }
         case .claude:
             if let local = readClaudeAppPayload(), AccountCredentialIdentity.sameAccount(payload, local) {
-                for (key, value) in local where merged[key] == nil {
+                for (key, value) in local where merged[key] == nil && key != "refresh_token" && key != "refreshToken" {
                     merged[key] = value
                 }
                 if shouldAdoptClaudeCLITokens(local: local, file: merged) {
-                    for key in ["access_token", "refresh_token", "expired", "expires_at", "email"] {
+                    for key in ["access_token", "expired", "expires_at", "email"] {
                         if let value = local[key] { merged[key] = value }
                     }
                 }
@@ -3266,9 +3279,9 @@ enum NativeUsageFetcher {
             return false
         }
         let fileToken = stringValue(fileFlat, keys: ["access_token"])
-        if fileToken == localToken,
-           stringValue(localFlat, keys: ["refresh_token"]) == stringValue(fileFlat, keys: ["refresh_token"])
-        {
+        // The proxy deliberately has no refresh token. That difference alone
+        // is not a new session and must not rewrite the file on every check.
+        if fileToken == localToken {
             return false
         }
 

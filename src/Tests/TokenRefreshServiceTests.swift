@@ -374,6 +374,25 @@ final class TokenRefreshServiceTests: XCTestCase {
         )
     }
 
+    func testClaudeAccessOnlyOverlayIsIdempotentAndNativeRefreshKeepsSessionAlive() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude.json")
+        let payload: [String: Any] = ["type": "claude", "email": "a@x.com", "access_token": "same-at",
+                                     "expired": "2020-01-01T00:00:00Z"]
+        var native = payload
+        native["refresh_token"] = "native-only-rt"
+        try JSONSerialization.data(withJSONObject: payload).write(to: file)
+        let before = try Data(contentsOf: file)
+        XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: native))
+        XCTAssertEqual(try Data(contentsOf: file), before)
+        XCTAssertNil(AuthManager.sessionExpiryDate(from: payload, serviceType: .claude, nativeClaude: native))
+        native["email"] = "someone-else@x.com"
+        XCTAssertNotNil(AuthManager.sessionExpiryDate(from: payload, serviceType: .claude, nativeClaude: native))
+        XCTAssertNotNil(AuthManager.sessionExpiryDate(from: payload, serviceType: .claude))
+    }
+
     func testCopyTokenFieldsIncludesCamelCaseAliases() {
         let original: [String: Any] = [
             "type": "cursor",
