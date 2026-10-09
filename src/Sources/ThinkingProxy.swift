@@ -301,12 +301,13 @@ class ThinkingProxy {
             modifiedBody = aliasRewrite.body
             matchedCopilotAlias = aliasRewrite.matchedAlias
 
-            if let result = processThinkingParameter(jsonString: modifiedBody) {
+            let preserveProtocol = Self.preservesClaudeProtocol(body: modifiedBody, headers: headers)
+            if !preserveProtocol, let result = processThinkingParameter(jsonString: modifiedBody) {
                 modifiedBody = result.0
                 thinkingEnabled = result.1
             }
             // Strip cache_control fields that cause 400 errors via the OAuth route
-            if let stripped = stripCacheControl(from: modifiedBody) {
+            if !preserveProtocol, let stripped = stripCacheControl(from: modifiedBody) {
                 modifiedBody = stripped
             }
         }
@@ -356,6 +357,16 @@ class ThinkingProxy {
     }
 
     // MARK: - Kiro direct route
+
+    static func preservesClaudeProtocol(body: String, headers: [(String, String)]) -> Bool {
+        if headers.contains(where: { name, value in
+            name.lowercased() == "user-agent"
+                && (value.hasPrefix("claude-cli/") || value.hasPrefix("claude-code/"))
+        }) { return true }
+        guard let data = body.data(using: .utf8),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return false }
+        return json["safeguards"] != nil
+    }
 
     private func serveKiro(_ translated: KiroDirectProvider.TranslatedRequest, connection: NWConnection) {
         if let error = translated.validationError {

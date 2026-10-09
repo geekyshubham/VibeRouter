@@ -17,7 +17,7 @@ objects = [str(p) for target in ["CLIProxyMenuBar", "Yams", "CYaml"]
 compiler = ["swiftc", "-parse-as-library", "-I", str(build / "Modules"),
             "-I", str(root / "src/.build/checkouts/Yams/Sources/CYaml/include"),
             "-F", str(build), "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", str(build)]
-test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests", "ClaudeUsagePollerTests"]
+test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests", "ClaudeUsagePollerTests", "ClaudeProtocolTests"]
 test_sources = [(name, (root / f"src/Tests/{name}.swift").read_text()) for name in test_classes]
 methods = [(name, method, asynchronous, throwing) for name, source in test_sources
            for method, asynchronous, throwing in re.findall(r"func (test\w+)\(\)( async)?( throws)?\s*\{", source)]

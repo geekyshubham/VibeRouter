@@ -200,6 +200,9 @@ enum ConfigComposer {
         managedZAIProviderName: String = "zai"
     ) -> [String: Any] {
         var mergedRoot = baseRoot
+        // Claude Code needs upstream retry and quota headers, including future
+        // protocol headers. The backend still filters hop-by-hop headers/cookies.
+        mergedRoot["passthrough-headers"] = true
         
         let oauthExcludedModels = buildOAuthExcludedModels(
             from: mergedRoot["oauth-excluded-models"],
