@@ -3,7 +3,8 @@ import Foundation
 /// Quota checks share a budget with other clients. Auth-file events and manual
 /// refreshes must not turn a throttled status endpoint into a retry loop.
 actor ClaudeUsagePoller {
-    static let shared = ClaudeUsagePoller()
+    static let shared = ClaudeUsagePoller(cacheFile: FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library/Caches/VibeRouter/claude-usage.json"))
     static let minimumInterval: TimeInterval = 5 * 60
 
     struct Response {
@@ -16,6 +17,20 @@ actor ClaudeUsagePoller {
     private var snapshots: [String: ProviderUsageSnapshot] = [:]
     private var deadlines: [String: Date] = [:]
     private var failures: [String: Int] = [:]
+    private let cacheFile: URL?
+    private var lastSuccessful: [String: SavedQuota]
+
+    // Store quota values only; OAuth credentials never enter this cache.
+    private struct SavedQuota: Codable {
+        let windows: [RateWindow]
+        let updatedAt: Date
+    }
+
+    init(cacheFile: URL? = nil) {
+        self.cacheFile = cacheFile
+        self.lastSuccessful = cacheFile.flatMap { try? Data(contentsOf: $0) }
+            .flatMap { try? JSONDecoder().decode([String: SavedQuota].self, from: $0) } ?? [:]
+    }
 
     func fetch(
         key: String,
@@ -44,21 +59,35 @@ actor ClaudeUsagePoller {
             let delay = max(backoff, Self.retryDelay(response.retryAfter, now: now))
             let deadline = now.addingTimeInterval(delay)
             deadlines[key] = deadline
-            let previous = snapshots[key]
+            let previous = lastSuccessful[key]
+            let notice: String
+            if let previous {
+                notice = "Claude usage check rate limited — showing last known limits.\nLast updated \(ResetCountdownFormatter.absoluteTime(previous.updatedAt))."
+            } else {
+                notice = "Claude usage check rate limited — no previous limits available yet."
+            }
             snapshot = ProviderUsageSnapshot(
                 id: snapshot.id, providerID: snapshot.providerID,
-                source: previous?.source ?? snapshot.source,
-                windows: previous?.windows ?? [], subAccounts: previous?.subAccounts ?? [],
-                accountEmail: snapshot.accountEmail ?? previous?.accountEmail,
-                planType: previous?.planType, planLabel: previous?.planLabel,
-                rateLimitResets: previous?.rateLimitResets, updatedAt: previous?.updatedAt,
-                errorMessage: "Claude usage check rate limited — retrying after \(ResetCountdownFormatter.shortDate(deadline))"
-                    + ((previous?.windows.isEmpty == false) ? " (showing last known limits)" : "")
+                source: previous == nil ? snapshot.source : "Claude OAuth (last known)",
+                windows: previous?.windows ?? [],
+                accountEmail: snapshot.accountEmail, updatedAt: previous?.updatedAt,
+                errorMessage: notice + "\nNext check after \(ResetCountdownFormatter.absoluteTime(deadline))."
             )
         } else {
             failures[key] = nil
             // Auth rejection must allow a retry with newly adopted credentials.
             deadlines[key] = now.addingTimeInterval(snapshot.errorMessage == nil ? Self.minimumInterval : 0)
+            if snapshot.errorMessage == nil, !snapshot.windows.isEmpty, let updatedAt = snapshot.updatedAt {
+                lastSuccessful[key] = SavedQuota(windows: snapshot.windows, updatedAt: updatedAt)
+                if let cacheFile {
+                    do {
+                        try FileManager.default.createDirectory(at: cacheFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+                        try JSONEncoder().encode(lastSuccessful).write(to: cacheFile, options: .atomic)
+                    } catch {
+                        NSLog("[ClaudeUsagePoller] Could not save last known quotas: %@", error.localizedDescription)
+                    }
+                }
+            }
         }
         snapshots[key] = snapshot
         return snapshot

@@ -92,6 +92,33 @@ final class ClaudeUsagePollerTests: XCTestCase {
         formatter.dateFormat = "EEE, dd MMM yyyy HH:mm:ss zzz"
         XCTAssertEqual(ClaudeUsagePoller.retryDelay(formatter.string(from: now.addingTimeInterval(600)), now: now), 600)
     }
+
+    func testLastSuccessfulQuotaSurvivesRestartAndFailedChecks() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cacheFile = directory.appendingPathComponent("claude-usage.json")
+        let original = quota(at: now)
+        let first = ClaudeUsagePoller(cacheFile: cacheFile)
+        _ = await first.fetch(key: "a", now: now) { .init(snapshot: original) }
+        let restarted = ClaudeUsagePoller(cacheFile: cacheFile)
+        _ = await restarted.fetch(key: "a", now: now.addingTimeInterval(300)) {
+            .init(snapshot: .empty(authAccountID: "claude", providerID: "claude", error: "Network unavailable"))
+        }
+        let throttled = await restarted.fetch(key: "a", now: now.addingTimeInterval(301)) {
+            .init(snapshot: .empty(authAccountID: "claude", providerID: "claude"), rateLimited: true)
+        }
+        XCTAssertEqual(throttled.windows, original.windows)
+        XCTAssertEqual(throttled.updatedAt, original.updatedAt)
+        XCTAssertTrue(throttled.errorMessage?.contains("Last updated " + ResetCountdownFormatter.absoluteTime(now)) == true)
+        XCTAssertTrue(throttled.errorMessage?.contains("rate limited — showing last known limits") == true)
+        XCTAssertTrue(throttled.errorMessage?.contains("Next check after ") == true)
+        let other = await restarted.fetch(key: "b", now: now) {
+            .init(snapshot: .empty(authAccountID: "other", providerID: "claude"), rateLimited: true)
+        }
+        XCTAssertTrue(other.windows.isEmpty)
+        XCTAssertNil(other.updatedAt)
+        XCTAssertTrue(other.errorMessage?.contains("no previous limits available") == true)
+    }
 }
 
 private actor RequestCounter {
