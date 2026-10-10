@@ -76,10 +76,12 @@ enum TokenRefreshService {
                 _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
                 payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
             } else if kind == "claude" {
+                _ = await refreshNativeClaudeSessionIfNeeded(account: payload, force: force)
                 _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file)
                 payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
             }
             payload = flattenedAuth(payload)
+            if kind == "claude", refreshToken(from: payload) == nil { continue }
             if force || shouldRefresh(payload: payload) {
                 jobs.append(
                     AuthRefreshJob(
@@ -168,8 +170,15 @@ enum TokenRefreshService {
             _ = NativeUsageFetcher.overlayCodexCLICredentialsIfFresher(onto: file)
             payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
         } else if kind == "claude" {
+            _ = await refreshNativeClaudeSessionIfNeeded(account: payload, force: force)
             _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file)
             payload = NativeUsageFetcher.readAuthPayload(at: file) ?? payload
+            if refreshToken(from: payload) == nil,
+               let expiry = accessTokenExpiry(from: payload), expiry <= Date() {
+                // An unchanged expired access-only file is not a successful
+                // renewal, even if the native CLI could not run or was throttled.
+                return false
+            }
         }
         payload = flattenedAuth(payload)
         if !force && !shouldRefresh(payload: payload) {
@@ -199,6 +208,22 @@ enum TokenRefreshService {
     }
 
     // MARK: - Decision
+
+    @discardableResult
+    static func refreshNativeClaudeSessionIfNeeded(account: [String: Any], force: Bool = false) async -> Bool {
+        guard ClaudeNativeSessionRefresh.shouldRefresh(
+            account: account, native: NativeUsageFetcher.readClaudeAppPayload(), force: force
+        ) else { return false }
+        _ = await ClaudeNativeSessionRefresh.shared.run {
+            await Task.detached(priority: .utility) {
+                ClaudeNativeSessionRefresh.requestNativeRefresh()
+            }.value
+        }
+        guard let native = NativeUsageFetcher.readClaudeAppPayload(),
+              AccountCredentialIdentity.sameAccount(account, native),
+              let expiry = accessTokenExpiry(from: native), expiry > Date() else { return false }
+        return true
+    }
 
     /// True when the access token is near/past expiry, or when a Codex-style session is old
     /// enough that its refresh token would otherwise hit OpenAI's idle-expiry wall.
@@ -654,6 +679,10 @@ enum TokenRefreshService {
             return false
         }
         let flat = flattenedAuth(payload)
+        if (flat["type"] as? String)?.lowercased() == "claude",
+           let native = NativeUsageFetcher.readClaudeAppPayload(),
+           AccountCredentialIdentity.sameAccount(flat, native),
+           refreshToken(from: native) != nil { return true }
         return refreshToken(from: flat) != nil
     }
 

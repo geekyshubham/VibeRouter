@@ -1169,14 +1169,11 @@ enum NativeUsageFetcher {
         payload: [String: Any],
         authFile: URL
     ) async -> ProviderUsageSnapshot {
+        // Imported files intentionally have no refresh token. Renew through
+        // Claude Code before reading the proxy copy, including on manual checks.
+        _ = await TokenRefreshService.refreshAccountFile(authFile)
         _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
         var payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
-
-        if TokenRefreshService.shouldRefresh(payload: payload) {
-            _ = await TokenRefreshService.refreshAccountFile(authFile)
-            _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
-            payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
-        }
 
         let snapshot = await fetchClaudeUsageOnce(
             authAccountID: authAccountID,
@@ -1206,19 +1203,19 @@ enum NativeUsageFetcher {
                 )
             }
 
-            // Do not force-rotate the Claude Code refresh token. A 401 here is often
-            // a stale proxy copy; POSTing the leftover RT logs Claude Code out.
-            if TokenRefreshService.shouldNetworkRefreshClaude(
-                payload: payload,
-                native: readClaudeAppPayload()
-            ), await TokenRefreshService.refreshAccountFile(authFile, force: true) {
+            // Native sessions refresh through the CLI and its OAuth lock.
+            // Only retry the usage request if the access token actually changed.
+            let rejectedToken = stringValue(payload, keys: ["access_token"])
+            if await TokenRefreshService.refreshAccountFile(authFile, force: true) {
                 _ = overlayClaudeCLICredentialsIfFresher(onto: authFile)
                 payload = enrichPayload(readAuthPayload(at: authFile) ?? payload, for: .claude)
-                return await fetchClaudeUsageOnce(
-                    authAccountID: authAccountID,
-                    providerID: providerID,
-                    payload: payload
-                )
+                if stringValue(payload, keys: ["access_token"]) != rejectedToken {
+                    return await fetchClaudeUsageOnce(
+                        authAccountID: authAccountID,
+                        providerID: providerID,
+                        payload: payload
+                    )
+                }
             }
         }
 
