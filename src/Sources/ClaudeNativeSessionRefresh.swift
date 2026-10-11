@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 
 /// Ask Claude Code to refresh its own Keychain session. The native client owns
 /// the cross-process OAuth locks; VibeRouter never posts its refresh token.
@@ -59,6 +60,15 @@ actor ClaudeNativeSessionRefresh {
                           home.appendingPathComponent(".claude/local/claude").path]
             + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/claude" }
         guard let executable = override ?? candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
+        // One helper per native credential store, including separate app/CLI
+        // processes. Keep the lease until the child exits, even after a timeout.
+        let leaseURL = home.appendingPathComponent("Library/Caches/VibeRouter/claude-native-refresh.lock")
+        guard let lease = acquireLease(at: leaseURL) else {
+            NSLog("[ClaudeNativeRefresh] Another native renewal is still running; deferring")
+            return false
+        }
+        var leaseHandedToChild = false
+        defer { if !leaseHandedToChild { releaseLease(lease) } }
         let directory = fm.temporaryDirectory.appendingPathComponent("viberouter-claude-refresh-\(UUID().uuidString)")
         do { try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
         catch { return false }
@@ -78,16 +88,17 @@ actor ClaudeNativeSessionRefresh {
         process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         let exited = DispatchSemaphore(value: 0)
-        process.terminationHandler = { _ in exited.signal() }
+        process.terminationHandler = { _ in
+            releaseLease(lease)
+            try? FileManager.default.removeItem(at: directory)
+            exited.signal()
+        }
         defer {
             try? pipe.fileHandleForWriting.close()
             try? output.close()
             // Never SIGKILL a client during OAuth rotation: the server may have
             // invalidated the old grant before the client persists its successor.
             // EOF lets the native client drain its request and release its lock.
-            if process.isRunning {
-                process.terminationHandler = { _ in try? FileManager.default.removeItem(at: directory) }
-            }
             if !process.isRunning { try? fm.removeItem(at: directory) }
         }
         let deadline = Date().addingTimeInterval(timeout)
@@ -104,6 +115,7 @@ actor ClaudeNativeSessionRefresh {
         }
         do {
             try process.run()
+            leaseHandedToChild = true
             let messages = input.split(separator: "\n")
             try pipe.fileHandleForWriting.write(contentsOf: Data((messages[0] + "\n").utf8))
             guard let initialized = waitForReply("viberouter-init"), initialized["subtype"] as? String == "success" else {
@@ -125,6 +137,44 @@ actor ClaudeNativeSessionRefresh {
             NSLog("[ClaudeNativeRefresh] Could not complete native control requests")
             return false
         }
+    }
+
+    static func acquireLease(at url: URL) -> Int32? {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let fd = open(url.path, O_CREAT | O_RDWR | O_CLOEXEC, S_IRUSR | S_IWUSR)
+        guard fd >= 0 else { return nil }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); return nil }
+        return fd
+    }
+
+    static func releaseLease(_ fd: Int32) {
+        flock(fd, LOCK_UN)
+        close(fd)
+    }
+
+    static func recordOutcome(completed: Bool, before: [String: Any]?, after: [String: Any]?) {
+        let oldExpiry = before.flatMap(TokenRefreshService.accessTokenExpiry)
+        let newExpiry = after.flatMap(TokenRefreshService.accessTokenExpiry)
+        let state: String
+        if after == nil { state = "native_credentials_missing_after_attempt" }
+        else if let newExpiry, newExpiry > Date(), newExpiry != oldExpiry { state = "renewed" }
+        else if completed { state = "native_check_completed_without_rotation" }
+        else { state = "native_check_failed_or_deferred" }
+        let formatter = ISO8601DateFormatter()
+        let entry: [String: Any] = [
+            "checked_at": formatter.string(from: Date()), "outcome": state,
+            "previous_access_expiry": oldExpiry.map(formatter.string) ?? "unknown",
+            "current_access_expiry": newExpiry.map(formatter.string) ?? "missing",
+        ]
+        // Only dates and fixed status labels. Never credentials, native error
+        // bodies, account emails, prompts, or transcript contents.
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/VibeRouter/claude-renewal-status.json")
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? JSONSerialization.data(withJSONObject: entry, options: [.sortedKeys]) {
+            try? data.write(to: url, options: .atomic)
+        }
+        NSLog("[ClaudeNativeRefresh] %@", state)
     }
 
     static func reply(id: String, output: Data) -> [String: Any]? {

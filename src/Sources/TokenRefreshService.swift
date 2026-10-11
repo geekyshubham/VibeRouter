@@ -211,15 +211,20 @@ enum TokenRefreshService {
 
     @discardableResult
     static func refreshNativeClaudeSessionIfNeeded(account: [String: Any], force: Bool = false) async -> Bool {
+        let before = NativeUsageFetcher.readClaudeAppPayload()
         guard ClaudeNativeSessionRefresh.shouldRefresh(
-            account: account, native: NativeUsageFetcher.readClaudeAppPayload(), force: force
+            account: account, native: before, force: force
         ) else { return false }
-        _ = await ClaudeNativeSessionRefresh.shared.run {
+        let completed = await ClaudeNativeSessionRefresh.shared.run {
             await Task.detached(priority: .utility) {
                 ClaudeNativeSessionRefresh.requestNativeRefresh()
             }.value
         }
-        guard let native = NativeUsageFetcher.readClaudeAppPayload(),
+        let native = NativeUsageFetcher.readClaudeAppPayload()
+        ClaudeNativeSessionRefresh.recordOutcome(
+            completed: completed, before: before, after: native
+        )
+        guard let native,
               AccountCredentialIdentity.sameAccount(account, native),
               let expiry = accessTokenExpiry(from: native), expiry > Date() else { return false }
         return true

@@ -111,6 +111,45 @@ final class ClaudeNativeSessionRefreshTests: XCTestCase {
         """)
         XCTAssertTrue(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2))
     }
+
+    func testCrossProcessLeaseCannotOverlapAndReleasesAfterOwnerExits() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("renewal.lock")
+        let first = try XCTUnwrap(ClaudeNativeSessionRefresh.acquireLease(at: file))
+        XCTAssertNil(ClaudeNativeSessionRefresh.acquireLease(at: file))
+        ClaudeNativeSessionRefresh.releaseLease(first)
+        let second = try XCTUnwrap(ClaudeNativeSessionRefresh.acquireLease(at: file))
+        ClaudeNativeSessionRefresh.releaseLease(second)
+    }
+
+    func testTimedOutChildRetainsLeaseUntilItFinishes() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-claude")
+        let marker = directory.appendingPathComponent("attempts")
+        let contents = """
+        #!/bin/sh
+        printf 'started\\n' >> "\(marker.path)"
+        IFS= read -r initialize
+        printf '%s\\n' '{"type":"control_response","response":{"request_id":"viberouter-init","subtype":"success","response":{}}}'
+        IFS= read -r usage
+        sleep 3
+        exit 0
+
+        """
+        try contents.write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        XCTAssertFalse(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2))
+        XCTAssertFalse(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2))
+        XCTAssertEqual(try String(contentsOf: marker), "started\n", "timeout must not spawn another helper")
+        Thread.sleep(forTimeInterval: 3.5)
+        XCTAssertFalse(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2))
+        XCTAssertEqual(try String(contentsOf: marker), "started\nstarted\n", "lease must release after native exit")
+        Thread.sleep(forTimeInterval: 3.5)
+    }
 }
 
 private actor NativeRefreshCounter {
