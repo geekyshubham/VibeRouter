@@ -76,6 +76,41 @@ final class ClaudeNativeSessionRefreshTests: XCTestCase {
         XCTAssertFalse(refreshed)
         XCTAssertEqual(try Data(contentsOf: file), bytes)
     }
+
+    func testNativeControlRepliesAreRequiredBeforeSuccessAndEOF() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let script = directory.appendingPathComponent("fake-claude")
+        func write(_ content: String) throws {
+            try content.write(to: script, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: script.path)
+        }
+        try write("#!/bin/sh\nexit 0\n")
+        XCTAssertFalse(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2), "exit zero without a control reply is not renewal")
+        try write("""
+        #!/bin/sh
+        IFS= read -r initialize || exit 1
+        printf '%s\n' '{"type":"control_response","response":{"request_id":"viberouter-init","subtype":"success","response":{}}}'
+        IFS= read -r usage || exit 1
+        printf '%s\n' '{"type":"control_response","response":{"request_id":"viberouter-usage","subtype":"success","response":{"rate_limits_available":false}}}'
+        exit 0
+
+        """)
+        XCTAssertFalse(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2), "missing native login must be reported")
+        try write("""
+        #!/bin/sh
+        IFS= read -r initialize || exit 1
+        printf '%s\n' '{"type":"control_response","response":{"request_id":"viberouter-init","subtype":"success","response":{}}}'
+        IFS= read -r usage || exit 1
+        sleep 0.2
+        printf '%s\n' '{"type":"control_response","response":{"request_id":"viberouter-usage","subtype":"success","response":{"rate_limits_available":true}}}'
+        if IFS= read -r unexpected; then exit 1; fi
+        exit 0
+
+        """)
+        XCTAssertTrue(ClaudeNativeSessionRefresh.requestNativeRefresh(executable: script.path, timeout: 2))
+    }
 }
 
 private actor NativeRefreshCounter {

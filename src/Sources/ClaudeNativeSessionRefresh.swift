@@ -1,5 +1,4 @@
 import Foundation
-import Darwin
 
 /// Ask Claude Code to refresh its own Keychain session. The native client owns
 /// the cross-process OAuth locks; VibeRouter never posts its refresh token.
@@ -52,45 +51,89 @@ actor ClaudeNativeSessionRefresh {
 
     """
 
-    static func requestNativeRefresh(timeout: TimeInterval = 45) -> Bool {
+    static func requestNativeRefresh(executable override: String? = nil, timeout: TimeInterval = 45) -> Bool {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         let candidates = [home.appendingPathComponent(".local/bin/claude").path,
                           "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
                           home.appendingPathComponent(".claude/local/claude").path]
             + (ProcessInfo.processInfo.environment["PATH"] ?? "").split(separator: ":").map { "\($0)/claude" }
-        guard let executable = candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
+        guard let executable = override ?? candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
         let directory = fm.temporaryDirectory.appendingPathComponent("viberouter-claude-refresh-\(UUID().uuidString)")
         do { try fm.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700]) }
         catch { return false }
-        defer { try? fm.removeItem(at: directory) }
-
+        let outputURL = directory.appendingPathComponent("control.jsonl")
+        guard fm.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]),
+              let output = try? FileHandle(forWritingTo: outputURL) else {
+            try? fm.removeItem(at: directory)
+            return false
+        }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
         process.environment = environment(from: ProcessInfo.processInfo.environment)
         process.currentDirectoryURL = directory
-        // Only two control requests are sent. No user message, prompt, tools,
-        // hooks, MCP servers, or model inference are part of this operation.
         let pipe = Pipe()
         process.standardInput = pipe
-        process.standardOutput = FileHandle.nullDevice
+        process.standardOutput = output
         process.standardError = FileHandle.nullDevice
         let exited = DispatchSemaphore(value: 0)
         process.terminationHandler = { _ in exited.signal() }
+        defer {
+            try? pipe.fileHandleForWriting.close()
+            try? output.close()
+            // Never SIGKILL a client during OAuth rotation: the server may have
+            // invalidated the old grant before the client persists its successor.
+            // EOF lets the native client drain its request and release its lock.
+            if process.isRunning {
+                process.terminationHandler = { _ in try? FileManager.default.removeItem(at: directory) }
+            }
+            if !process.isRunning { try? fm.removeItem(at: directory) }
+        }
+        let deadline = Date().addingTimeInterval(timeout)
+        func waitForReply(_ id: String) -> [String: Any]? {
+            while Date() < deadline {
+                if let data = try? Data(contentsOf: outputURL) {
+                    if data.count > 1_048_576 { return nil }
+                    if let reply = Self.reply(id: id, output: data) { return reply }
+                }
+                if !process.isRunning { return nil }
+                Thread.sleep(forTimeInterval: 0.1)
+            }
+            return nil
+        }
         do {
             try process.run()
-            try pipe.fileHandleForWriting.write(contentsOf: Data(input.utf8))
+            let messages = input.split(separator: "\n")
+            try pipe.fileHandleForWriting.write(contentsOf: Data((messages[0] + "\n").utf8))
+            guard let initialized = waitForReply("viberouter-init"), initialized["subtype"] as? String == "success" else {
+                NSLog("[ClaudeNativeRefresh] Native initialization failed or timed out")
+                return false
+            }
+            try pipe.fileHandleForWriting.write(contentsOf: Data((messages[1] + "\n").utf8))
+            guard let usage = waitForReply("viberouter-usage"), usage["subtype"] as? String == "success",
+                  let body = usage["response"] as? [String: Any], body["rate_limits_available"] as? Bool == true else {
+                NSLog("[ClaudeNativeRefresh] Native usage check failed or has no signed-in session")
+                return false
+            }
+            // Keep stdin open until the reply arrives, rather than exiting while
+            // the native client's token refresh or Keychain write is in flight.
             try pipe.fileHandleForWriting.close()
+            _ = exited.wait(timeout: .now() + 2)
+            return true
         } catch {
-            if process.isRunning { process.terminate() }
+            NSLog("[ClaudeNativeRefresh] Could not complete native control requests")
             return false
         }
-        if exited.wait(timeout: .now() + timeout) == .timedOut {
-            process.terminate()
-            if exited.wait(timeout: .now() + 2) == .timedOut { kill(process.processIdentifier, SIGKILL) }
-            return false
+    }
+
+    static func reply(id: String, output: Data) -> [String: Any]? {
+        for line in output.split(separator: 10) {
+            guard let message = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  message["type"] as? String == "control_response",
+                  let reply = message["response"] as? [String: Any], reply["request_id"] as? String == id else { continue }
+            return reply
         }
-        return process.terminationStatus == 0
+        return nil
     }
 }
