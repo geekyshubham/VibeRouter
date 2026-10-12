@@ -272,7 +272,21 @@ enum CLIHarnessAutoconfigure {
         let binDir = home.appendingPathComponent("bin")
         try FileManager.default.createDirectory(at: binDir, withIntermediateDirectories: true)
         let script = binDir.appendingPathComponent("claude-viberouter")
-        let contents = """
+        try claudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
+            .write(to: script, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+        let localBin = home.appendingPathComponent(".local/bin")
+        try? FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
+        let link = localBin.appendingPathComponent("claude-viberouter")
+        if FileManager.default.fileExists(atPath: link.path) {
+            try? FileManager.default.removeItem(at: link)
+        }
+        try? FileManager.default.copyItem(at: script, to: link)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: link.path)
+    }
+
+    static func claudeVibeRouterLauncher(baseURL: String, apiKey: String) -> String {
+        """
         #!/bin/bash
         # Launch Claude Code via VibeRouter (Kiro, OpenCode Go, Codex, etc.).
         # Does NOT touch your Anthropic subscription — use `claude` for that.
@@ -287,21 +301,15 @@ enum CLIHarnessAutoconfigure {
         mkdir -p "$CLAUDE_CONFIG_DIR"
         unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
         export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+        # Kiro/GPT and other translated routes cannot return Anthropic safety
+        # verdicts. Keep auto mode's local classifier enabled without the billing
+        # notice. Opt into server review with 1 for a compatible Claude upstream.
+        export CLAUDE_CODE_AUTO_MODE_SERVER="${CLAUDE_CODE_AUTO_MODE_SERVER:-0}"
         export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1800000}"
         export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-20}"
         echo "Starting Claude Code via VibeRouter (\(baseURL)). Anthropic subscription: claude"
         exec claude --settings "$HOME/.claude/settings.viberouter.json" "$@"
         """
-        try contents.write(to: script, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
-        let localBin = home.appendingPathComponent(".local/bin")
-        try? FileManager.default.createDirectory(at: localBin, withIntermediateDirectories: true)
-        let link = localBin.appendingPathComponent("claude-viberouter")
-        if FileManager.default.fileExists(atPath: link.path) {
-            try? FileManager.default.removeItem(at: link)
-        }
-        try? FileManager.default.copyItem(at: script, to: link)
-        try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: link.path)
     }
 
     private static func configureCodex(baseURL: String, apiKey: String) throws {

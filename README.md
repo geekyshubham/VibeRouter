@@ -96,6 +96,21 @@ See [INSTALLATION.md](INSTALLATION.md).
 
 Guides: [Factory CLI](FACTORY_SETUP.md) · [Amp CLI](AMPCODE_SETUP.md)
 
+### Claude Code auto mode
+
+`claude-viberouter --permission-mode auto` defaults to Claude Code's local safety
+classifier because translated routes such as Kiro and GPT cannot return Anthropic's
+server-side safety verdicts. Auto mode remains active without the gateway billing
+notice; local classifier requests still use the provider's tokens or credits.
+
+For a compatible native Claude upstream, opt into server review with
+`CLAUDE_CODE_AUTO_MODE_SERVER=1 claude-viberouter --permission-mode auto`.
+VibeRouter forwards Claude's safeguards and results; no-charge checks depend on
+the upstream's rollout and credential eligibility. See Anthropic's
+[classifier billing guide](https://code.claude.com/docs/en/auto-mode-classifier-billing).
+Restart Claude Code after updating the launcher; an existing session retains its
+classifier fallback.
+
 ### Command line
 
 Install the optional shell command from an installed app:
