@@ -330,7 +330,9 @@ final class NativeSessionManager: ObservableObject {
             _ = await quitApps(for: type)
         }
 
-        let writeError: String? = await Task.detached(priority: .userInitiated) { [self] in
+        let (writeError, cliResult): (String?, AntigravityCLISwitchResult?) = await Task.detached(
+            priority: .userInitiated
+        ) { [self] in
             do {
                 switch type {
                 case .codex:
@@ -342,13 +344,13 @@ final class NativeSessionManager: ObservableObject {
                     )
                 case .claude: try writeClaudeAuth(from: src)
                 case .gemini: try writeGoogleAuth(from: src, email: email)
-                case .antigravity: try writeAntigravityAuth(from: src, email: email)
+                case .antigravity: return (nil, try writeAntigravityAuth(from: src, email: email))
                 case .cursor: try writeCursorAuth(from: src)
-                default: return "Switching \(type.displayName) is not supported yet."
+                default: return ("Switching \(type.displayName) is not supported yet.", nil)
                 }
-                return nil
+                return (nil, nil)
             } catch {
-                return "Switch failed: \(error.localizedDescription)"
+                return ("Switch failed: \(error.localizedDescription)", nil)
             }
         }.value
 
@@ -390,6 +392,16 @@ final class NativeSessionManager: ObservableObject {
             }
         } else {
             msg += " Restart the app (or enable restart-on-switch in Settings) to load it."
+        }
+        switch cliResult {
+        case .updated:
+            msg += " agy CLI switched too; restart running agy sessions to load it."
+        case .unrecognized:
+            msg += " agy CLI token format was not recognized, so agy was left on its previous account."
+        case .writeFailed:
+            msg += " Could not update the agy CLI token, so agy was left on its previous account."
+        case .notSignedIn, nil:
+            break
         }
         return .switched(message: msg)
     }
@@ -585,7 +597,7 @@ final class NativeSessionManager: ObservableObject {
 
     /// Inject OAuth into Antigravity IDE `state.vscdb` (same wire format Cockpit uses) and
     /// update Cockpit's `current_account.json` pointer for detection.
-    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws {
+    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws -> AntigravityCLISwitchResult {
         guard let access = nonEmpty(src["access_token"]) else {
             throw SwitchError.missingToken("access_token")
         }
@@ -610,6 +622,54 @@ final class NativeSessionManager: ObservableObject {
             ]
             try backupThenWrite(json: payload, to: url)
         }
+
+        return writeAntigravityCLIAuth(
+            accessToken: access,
+            refreshToken: refresh,
+            idToken: nonEmpty(src["id_token"]),
+            email: email,
+            expiry: Date(timeIntervalSince1970: TimeInterval(expirySeconds))
+        )
+    }
+
+    // MARK: - Antigravity CLI (`agy`)
+
+    private var antigravityCLITokenURL: URL {
+        home.appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token")
+    }
+
+    enum AntigravityCLISwitchResult: Equatable {
+        case notSignedIn
+        case updated
+        case unrecognized
+        case writeFailed
+    }
+
+    /// Rewrite the `agy` CLI's saved OAuth token in place so the CLI follows the IDE switch.
+    /// Skipped when `agy` has never signed in; refuses to touch a token format it can't parse.
+    private func writeAntigravityCLIAuth(
+        accessToken: String,
+        refreshToken: String?,
+        idToken: String?,
+        email: String?,
+        expiry: Date
+    ) -> AntigravityCLISwitchResult {
+        let url = antigravityCLITokenURL
+        guard let existing = try? Data(contentsOf: url) else { return .notSignedIn }
+        guard let updated = AntigravityCLIToken.update(
+            existing,
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            idToken: idToken,
+            email: email,
+            expiry: expiry
+        ) else { return .unrecognized }
+        do {
+            try backupThenWrite(data: updated, to: url)
+        } catch {
+            return .writeFailed
+        }
+        return .updated
     }
 
     private func writeCursorAuth(from src: [String: Any]) throws {
@@ -1269,6 +1329,11 @@ final class NativeSessionManager: ObservableObject {
     /// Back up the existing native file once, then write the new JSON atomically.
     /// These files hold OAuth tokens, so keep them owner-only (0600).
     private func backupThenWrite(json: [String: Any], to url: URL) throws {
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try backupThenWrite(data: data, to: url)
+    }
+
+    private func backupThenWrite(data: Data, to url: URL) throws {
         if fileManager.fileExists(atPath: url.path) {
             let backup = url.appendingPathExtension("viberouter-bak")
             if !fileManager.fileExists(atPath: backup.path) {
@@ -1276,7 +1341,6 @@ final class NativeSessionManager: ObservableObject {
                 try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
             }
         }
-        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
         // atomic write replaces the file, resetting perms to the umask default (often 0644);
         // restore owner-only so tokens aren't world/group readable.
