@@ -103,10 +103,17 @@ enum AntigravityCLIToken {
         return value
     }
 
+    /// `security -i` reads one command line per stdin line and truncates past 4,095 bytes.
+    private static let securityInteractiveLineLimit = 4_000
+
+    /// Sends the secret over stdin so it never appears in a process argument list.
     private static func writeKeychain(_ value: String) -> Bool {
+        guard let line = keychainWriteCommand(value) else { return false }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["add-generic-password", "-U", "-a", keychainAccount, "-s", keychainService, "-w", value]
+        process.arguments = ["-i"]
+        let input = Pipe()
+        process.standardInput = input
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
         do {
@@ -114,8 +121,20 @@ enum AntigravityCLIToken {
         } catch {
             return false
         }
+        input.fileHandleForWriting.write(Data(line.utf8))
+        try? input.fileHandleForWriting.close()
         process.waitUntilExit()
         return process.terminationStatus == 0
+    }
+
+    /// Build the `security -i` line for a Keychain update; nil when the value can't be sent safely.
+    static func keychainWriteCommand(_ value: String) -> String? {
+        guard !value.isEmpty, !value.contains(where: \.isNewline) else { return nil }
+        let quoted = "\"" + value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+        let line = "add-generic-password -U -a \(keychainAccount) -s \(keychainService) -w \(quoted)\n"
+        return line.utf8.count <= securityInteractiveLineLimit ? line : nil
     }
 
     /// Back up the original once, write atomically, and keep both owner-only.

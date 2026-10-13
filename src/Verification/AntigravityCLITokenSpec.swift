@@ -141,6 +141,13 @@ struct AntigravityCLITokenSpec {
         )!))!
         precondition(renewed == .init(accessToken: "ya29.renewed", refreshToken: "1//r", idToken: "keep.me.ok", expiry: expiry))
 
+        let command = AntigravityCLIToken.keychainWriteCommand(#"a\b"c"#)!
+        precondition(command == #"add-generic-password -U -a antigravity -s gemini -w "a\\b\"c""# + "\n")
+        precondition(AntigravityCLIToken.keychainWriteCommand("line1\nline2") == nil, "newline would split the command")
+        precondition(AntigravityCLIToken.keychainWriteCommand("") == nil)
+        precondition(AntigravityCLIToken.keychainWriteCommand(String(repeating: "x", count: 1_900)) != nil)
+        precondition(AntigravityCLIToken.keychainWriteCommand(String(repeating: "x", count: 4_000)) == nil, "over the stdin line cap")
+
         print("AntigravityCLITokenSpec: OK")
     }
 }
