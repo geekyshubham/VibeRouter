@@ -493,9 +493,7 @@ struct ProviderUsageCardView: View {
     }
 
     private func peakUsed(_ account: AuthAccount) -> Double {
-        guard let usage = usageForAccount(account) else { return 0 }
-        let windows = usage.windows + usage.subAccounts.flatMap(\.windows)
-        return windows.map(\.usedPercent).max() ?? 0
+        usageForAccount(account)?.headlineUsedPercent() ?? 0
     }
 
     private func accountLabel(for account: AuthAccount) -> String {
@@ -697,7 +695,7 @@ private struct AccountUsageBlock: View {
                 .font(.caption2.monospacedDigit().weight(.bold))
                 .foregroundStyle(MenuBarDesign.usageTint(remainingPercent: 100 - used))
                 .help(serviceType == .antigravity || serviceType == .gemini
-                    ? "Lowest remaining window (Cockpit-style)"
+                    ? "Best available model pool — see rows for each pool's 5h/weekly limit"
                     : "Peak window usage")
         }
     }
@@ -721,10 +719,7 @@ private struct AccountUsageBlock: View {
     }
 
     private var peakUsed: Double? {
-        guard let usage else { return nil }
-        let windows = usage.windows + usage.subAccounts.flatMap(\.windows)
-        guard !windows.isEmpty else { return nil }
-        return windows.map(\.usedPercent).max()
+        usage?.headlineUsedPercent()
     }
 
     /// Cloud Code (Antigravity/Gemini): Cockpit-style remaining%.

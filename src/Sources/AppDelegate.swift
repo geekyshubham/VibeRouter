@@ -213,8 +213,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private func worstUsedPercent() -> Double {
         var worst = 0.0
         for (_, snapshot) in usageStore.usageByAccountID {
-            let windows = snapshot.windows + snapshot.subAccounts.flatMap(\.windows)
-            worst = max(worst, windows.map(\.usedPercent).max() ?? 0)
+            worst = max(worst, snapshot.headlineUsedPercent() ?? 0)
         }
         return worst
     }

@@ -333,10 +333,7 @@ struct AppInstancesView: View {
     }
 
     private func peakUsed(_ account: AuthAccount) -> Double? {
-        guard let snap = usageStore?.snapshot(for: account) else { return nil }
-        let windows = snap.windows + snap.subAccounts.flatMap(\.windows)
-        guard !windows.isEmpty else { return nil }
-        return windows.map(\.usedPercent).max()
+        usageStore?.snapshot(for: account)?.headlineUsedPercent()
     }
 
     private func boundQuotaBadge(_ instance: ManagedAppInstance) -> String? {

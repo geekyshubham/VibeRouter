@@ -158,6 +158,49 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertEqual(groups[0].windows.count, 2)
     }
 
+    func testAntigravityHeadlineShowsBestPoolWhenClaudePoolIsExhausted() {
+        let future = "2099-01-01T00:00:00Z"
+        let summary: [String: Any] = [
+            "groups": [
+                [
+                    "displayName": "Gemini Models",
+                    "buckets": [
+                        ["bucketId": "gemini-weekly", "window": "weekly", "resetTime": future, "remainingFraction": 0.8],
+                        ["bucketId": "gemini-5h", "window": "5h", "resetTime": future, "remainingFraction": 0.6],
+                    ],
+                ],
+                [
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        ["bucketId": "3p-weekly", "window": "weekly", "resetTime": future, "remainingFraction": 0.49],
+                        ["bucketId": "3p-5h", "window": "5h", "resetTime": future, "remainingFraction": 0],
+                    ],
+                ],
+            ]
+        ]
+        let groups = NativeUsageFetcher.cloudCodeQuotaGroups(from: summary)
+        let snapshot = ProviderUsageSnapshot(
+            id: "acct",
+            providerID: "antigravity",
+            windows: groups.flatMap(\.windows),
+            subAccounts: groups
+        )
+        XCTAssertEqual(snapshot.headlineUsedPercent() ?? -1, 40, accuracy: 0.5)
+
+        let codex = ProviderUsageSnapshot(id: "acct", providerID: "codex", windows: groups.flatMap(\.windows))
+        XCTAssertEqual(codex.headlineUsedPercent() ?? -1, 100, accuracy: 0.5)
+    }
+
+    func testHeadlineTreatsElapsedResetAsRefilled() {
+        let past = Date().addingTimeInterval(-60)
+        let snapshot = ProviderUsageSnapshot(
+            id: "acct",
+            providerID: "antigravity",
+            windows: [RateWindow(usedPercent: 100, windowMinutes: 300, resetsAt: past)]
+        )
+        XCTAssertEqual(snapshot.headlineUsedPercent(), 0)
+    }
+
     func testCodexWindowLabelUsesDurationNotRole() {
         // ChatGPT Go primary is often a 30-day window — must not be labeled "Session".
         let monthly: [String: Any] = [

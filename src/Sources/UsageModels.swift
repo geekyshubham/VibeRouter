@@ -194,6 +194,26 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
     var secondary: RateWindow? { windows.count > 1 ? windows[1] : nil }
     var tertiary: RateWindow? { windows.count > 2 ? windows[2] : nil }
 
+    /// Cloud Code pools (Gemini vs Claude/GPT) are independent, so one exhausted pool must not read as "0% left".
+    var hasIndependentQuotaPools: Bool {
+        providerID == ServiceType.antigravity.rawValue || providerID == ServiceType.gemini.rawValue
+    }
+
+    /// Headline used% for badges: worst window for single-pool providers, best usable pool for Cloud Code.
+    func headlineUsedPercent(at now: Date = Date()) -> Double? {
+        func used(_ window: RateWindow) -> Double {
+            if let resetsAt = window.resetsAt, resetsAt <= now { return 0 }
+            return window.usedPercent
+        }
+        let all = windows + subAccounts.flatMap(\.windows)
+        guard !all.isEmpty else { return nil }
+        guard hasIndependentQuotaPools else { return all.map(used).max() }
+        let poolPeaks = subAccounts.isEmpty
+            ? windows.map(used)
+            : subAccounts.compactMap { $0.windows.map(used).max() }
+        return poolPeaks.min() ?? all.map(used).max()
+    }
+
     init(
         id: String,
         providerID: String,
