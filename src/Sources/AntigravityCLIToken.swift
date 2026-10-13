@@ -2,6 +2,63 @@ import Foundation
 
 /// In-place rewrite of the `agy` CLI's saved OAuth token, keeping every unrelated field.
 enum AntigravityCLIToken {
+    static let keychainService = "gemini"
+    static let keychainAccount = "antigravity"
+    private static let keyringBase64Prefix = "go-keyring-base64:"
+    private static let keyringHexPrefix = "go-keyring-encoded:"
+
+    /// Update a go-keyring stored value, re-encoding it with the same scheme it was read with.
+    static func updateKeyringValue(
+        _ stored: String,
+        accessToken: String,
+        refreshToken: String?,
+        idToken: String?,
+        email: String?,
+        expiry: Date
+    ) -> String? {
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        let prefix: String
+        let payload: Data?
+        if trimmed.hasPrefix(keyringBase64Prefix) {
+            prefix = keyringBase64Prefix
+            payload = Data(base64Encoded: String(trimmed.dropFirst(prefix.count)))
+        } else if trimmed.hasPrefix(keyringHexPrefix) {
+            prefix = keyringHexPrefix
+            payload = hexDecode(String(trimmed.dropFirst(prefix.count)))
+        } else {
+            prefix = ""
+            payload = Data(trimmed.utf8)
+        }
+        guard let payload,
+              let updated = update(
+                  payload,
+                  accessToken: accessToken,
+                  refreshToken: refreshToken,
+                  idToken: idToken,
+                  email: email,
+                  expiry: expiry
+              )
+        else { return nil }
+        switch prefix {
+        case keyringBase64Prefix: return prefix + updated.base64EncodedString()
+        case keyringHexPrefix: return prefix + updated.map { String(format: "%02x", $0) }.joined()
+        default: return String(decoding: updated, as: UTF8.self)
+        }
+    }
+
+    private static func hexDecode(_ hex: String) -> Data? {
+        let chars = Array(hex.utf8)
+        guard chars.count.isMultiple(of: 2) else { return nil }
+        var out = Data(capacity: chars.count / 2)
+        var i = 0
+        while i < chars.count {
+            guard let byte = UInt8(String(decoding: chars[i..<i + 2], as: UTF8.self), radix: 16) else { return nil }
+            out.append(byte)
+            i += 2
+        }
+        return out
+    }
+
     private static let accessTokenKeys = ["access_token", "accessToken"]
     private static let refreshTokenKeys = ["refresh_token", "refreshToken"]
     private static let idTokenKeys = ["id_token", "idToken"]

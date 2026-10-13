@@ -645,7 +645,8 @@ final class NativeSessionManager: ObservableObject {
         case writeFailed
     }
 
-    /// Rewrite the `agy` CLI's saved OAuth token in place so the CLI follows the IDE switch.
+    /// Rewrite the `agy` CLI's saved OAuth token so the CLI follows the IDE switch.
+    /// On macOS `agy` reads the Keychain first and falls back to the token file, so both are updated.
     /// Skipped when `agy` has never signed in; refuses to touch a token format it can't parse.
     private func writeAntigravityCLIAuth(
         accessToken: String,
@@ -654,22 +655,47 @@ final class NativeSessionManager: ObservableObject {
         email: String?,
         expiry: Date
     ) -> AntigravityCLISwitchResult {
-        let url = antigravityCLITokenURL
-        guard let existing = try? Data(contentsOf: url) else { return .notSignedIn }
-        guard let updated = AntigravityCLIToken.update(
-            existing,
-            accessToken: accessToken,
-            refreshToken: refreshToken,
-            idToken: idToken,
-            email: email,
-            expiry: expiry
-        ) else { return .unrecognized }
-        do {
-            try backupThenWrite(data: updated, to: url)
-        } catch {
-            return .writeFailed
+        var keychainResult = AntigravityCLISwitchResult.notSignedIn
+        if let stored = readGenericPassword(
+            service: AntigravityCLIToken.keychainService,
+            account: AntigravityCLIToken.keychainAccount
+        ) {
+            if let updated = AntigravityCLIToken.updateKeyringValue(
+                stored,
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                idToken: idToken,
+                email: email,
+                expiry: expiry
+            ) {
+                keychainResult = writeGenericPassword(
+                    service: AntigravityCLIToken.keychainService,
+                    account: AntigravityCLIToken.keychainAccount,
+                    value: updated
+                ) ? .updated : .writeFailed
+            } else {
+                keychainResult = .unrecognized
+            }
         }
-        return .updated
+
+        var fileResult = AntigravityCLISwitchResult.notSignedIn
+        let url = antigravityCLITokenURL
+        if let existing = try? Data(contentsOf: url) {
+            if let updated = AntigravityCLIToken.update(
+                existing,
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                idToken: idToken,
+                email: email,
+                expiry: expiry
+            ) {
+                fileResult = (try? backupThenWrite(data: updated, to: url)) != nil ? .updated : .writeFailed
+            } else {
+                fileResult = .unrecognized
+            }
+        }
+
+        return keychainResult == .notSignedIn ? fileResult : keychainResult
     }
 
     private func writeCursorAuth(from src: [String: Any]) throws {
@@ -1282,6 +1308,42 @@ final class NativeSessionManager: ObservableObject {
         process.standardError = FileHandle.nullDevice
         try? process.run()
         process.waitUntilExit()
+    }
+
+    private func readGenericPassword(service: String, account: String) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-a", account, "-s", service, "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    private func writeGenericPassword(service: String, account: String, value: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["add-generic-password", "-U", "-a", account, "-s", service, "-w", value]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
     }
 
     private func readClaudeCredentials() -> [String: Any]? {

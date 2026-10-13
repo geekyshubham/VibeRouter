@@ -80,6 +80,36 @@ struct AntigravityCLITokenSpec {
             expiry: expiry
         ) == nil, "non-JSON → refuse")
 
+        let plainJSON = #"{"access_token":"ya29.old","refresh_token":"1//old","expiry":"2026-01-01T00:00:00Z"}"#
+        func keyring(_ stored: String) -> String? {
+            AntigravityCLIToken.updateKeyringValue(
+                stored,
+                accessToken: "ya29.new_access",
+                refreshToken: "1//new_refresh",
+                idToken: nil,
+                email: nil,
+                expiry: expiry
+            )
+        }
+        func accessToken(in json: Data) -> String? {
+            (try? JSONSerialization.jsonObject(with: json) as? [String: Any])?["access_token"] as? String
+        }
+
+        let b64 = keyring("go-keyring-base64:" + Data(plainJSON.utf8).base64EncodedString())!
+        precondition(b64.hasPrefix("go-keyring-base64:"), "base64 scheme preserved")
+        precondition(accessToken(in: Data(base64Encoded: String(b64.dropFirst(18)))!) == "ya29.new_access")
+
+        let hexStored = "go-keyring-encoded:" + Data(plainJSON.utf8).map { String(format: "%02x", $0) }.joined()
+        let hex = keyring(hexStored)!
+        precondition(hex.hasPrefix("go-keyring-encoded:"), "hex scheme preserved")
+        precondition(hex.dropFirst(19).allSatisfy(\.isHexDigit))
+
+        let plain = keyring(plainJSON)!
+        precondition(accessToken(in: Data(plain.utf8)) == "ya29.new_access", "plain JSON stays plain")
+
+        precondition(keyring("go-keyring-base64:!!notbase64") == nil, "bad base64 → refuse")
+        precondition(keyring("opaque-secret") == nil, "non-JSON keyring value → refuse")
+
         print("AntigravityCLITokenSpec: OK")
     }
 }
