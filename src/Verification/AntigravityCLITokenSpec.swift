@@ -110,6 +110,37 @@ struct AntigravityCLITokenSpec {
         precondition(keyring("go-keyring-base64:!!notbase64") == nil, "bad base64 → refuse")
         precondition(keyring("opaque-secret") == nil, "non-JSON keyring value → refuse")
 
+        let goSnapshot = AntigravityCLIToken.snapshot(of: Data(
+            #"{"access_token":"ya29.a","refresh_token":"1//r","id_token":"h.p.s","expiry":"2026-10-13T16:44:41.02521+05:30"}"#.utf8
+        ))!
+        precondition(goSnapshot.accessToken == "ya29.a")
+        precondition(goSnapshot.refreshToken == "1//r")
+        precondition(goSnapshot.idToken == "h.p.s")
+        precondition(goSnapshot.expiry == Date(timeIntervalSince1970: 1_791_890_081), "Go RFC 3339 with nanoseconds")
+
+        let msSnapshot = AntigravityCLIToken.snapshot(of: Data(
+            #"{"token":{"accessToken":"ya29.b","expiresAt":1800000000000}}"#.utf8
+        ))!
+        precondition(msSnapshot.accessToken == "ya29.b" && msSnapshot.refreshToken == nil)
+        precondition(msSnapshot.expiry == expiry, "millisecond epoch expiry")
+
+        let keyringSnapshot = AntigravityCLIToken.snapshot(
+            ofKeyringValue: "go-keyring-base64:" + Data(plainJSON.utf8).base64EncodedString()
+        )!
+        precondition(keyringSnapshot.refreshToken == "1//old")
+        precondition(AntigravityCLIToken.snapshot(ofKeyringValue: hexStored)?.accessToken == "ya29.old")
+        precondition(AntigravityCLIToken.snapshot(ofKeyringValue: "opaque-secret") == nil)
+
+        let renewed = AntigravityCLIToken.snapshot(of: Data(AntigravityCLIToken.update(
+            Data(#"{"access_token":"ya29.old","refresh_token":"1//r","id_token":"keep.me.ok"}"#.utf8),
+            accessToken: "ya29.renewed",
+            refreshToken: "1//r",
+            idToken: "keep.me.ok",
+            email: nil,
+            expiry: expiry
+        )!))!
+        precondition(renewed == .init(accessToken: "ya29.renewed", refreshToken: "1//r", idToken: "keep.me.ok", expiry: expiry))
+
         print("AntigravityCLITokenSpec: OK")
     }
 }

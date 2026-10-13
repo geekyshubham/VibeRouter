@@ -153,6 +153,8 @@ enum TokenRefreshService {
             }
         }
 
+        pushAntigravityTokensToCLIIfFresher(authDirectory: authDir)
+
         if refreshed > 0 {
             await MainActor.run {
                 NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
@@ -199,6 +201,12 @@ enum TokenRefreshService {
                     skipping: [file.path]
                 )
                 syncNativeCredentialStores(type: kind, oldRefresh: oldRefresh, updated: updated)
+            }
+            let realAuthDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".cli-proxy-api")
+            if kind == "antigravity",
+               file.deletingLastPathComponent().standardizedFileURL == realAuthDir.standardizedFileURL {
+                pushAntigravityTokensToCLIIfFresher(authDirectory: realAuthDir)
             }
             await MainActor.run {
                 NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
@@ -332,6 +340,45 @@ enum TokenRefreshService {
             wrote += syncCockpitCodexAccounts(oldRefresh: trimmed, updated: updated)
         }
         return wrote
+    }
+
+    /// `agy` can't renew a token minted for VibeRouter's OAuth client, so VibeRouter renews it and
+    /// hands the newest access token to `agy` for the account it is signed into.
+    @discardableResult
+    static func pushAntigravityTokensToCLIIfFresher(authDirectory: URL) -> Bool {
+        guard let cli = AntigravityCLIToken.currentSnapshot(),
+              let cliRefresh = cli.refreshToken,
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: authDirectory,
+                  includingPropertiesForKeys: nil
+              )
+        else { return false }
+
+        for file in files where file.pathExtension == "json" {
+            guard let raw = NativeUsageFetcher.readAuthPayload(at: file),
+                  (raw["type"] as? String)?.lowercased() == "antigravity"
+            else { continue }
+            let payload = flattenedAuth(raw)
+            guard refreshToken(from: payload) == cliRefresh,
+                  let access = stringValue(payload, keys: ["access_token"]),
+                  access != cli.accessToken,
+                  let expiry = accessTokenExpiry(from: payload),
+                  expiry > Date(),
+                  expiry > (cli.expiry ?? .distantPast)
+            else { continue }
+            let result = AntigravityCLIToken.apply(
+                accessToken: access,
+                refreshToken: cliRefresh,
+                idToken: stringValue(payload, keys: ["id_token"]) ?? cli.idToken,
+                email: nil,
+                expiry: expiry
+            )
+            if result == .updated {
+                NSLog("[TokenRefresh] Handed renewed Antigravity token to agy CLI (%@)", file.lastPathComponent)
+            }
+            return result == .updated
+        }
+        return false
     }
 
     /// Official Codex CLI/desktop share the same rotating token via ~/.codex/auth.json + keychain.

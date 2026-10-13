@@ -330,7 +330,7 @@ final class NativeSessionManager: ObservableObject {
             _ = await quitApps(for: type)
         }
 
-        let (writeError, cliResult): (String?, AntigravityCLISwitchResult?) = await Task.detached(
+        let (writeError, cliResult): (String?, AntigravityCLIToken.WriteResult?) = await Task.detached(
             priority: .userInitiated
         ) { [self] in
             do {
@@ -597,7 +597,7 @@ final class NativeSessionManager: ObservableObject {
 
     /// Inject OAuth into Antigravity IDE `state.vscdb` (same wire format Cockpit uses) and
     /// update Cockpit's `current_account.json` pointer for detection.
-    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws -> AntigravityCLISwitchResult {
+    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws -> AntigravityCLIToken.WriteResult {
         guard let access = nonEmpty(src["access_token"]) else {
             throw SwitchError.missingToken("access_token")
         }
@@ -623,79 +623,13 @@ final class NativeSessionManager: ObservableObject {
             try backupThenWrite(json: payload, to: url)
         }
 
-        return writeAntigravityCLIAuth(
+        return AntigravityCLIToken.apply(
             accessToken: access,
             refreshToken: refresh,
             idToken: nonEmpty(src["id_token"]),
             email: email,
             expiry: Date(timeIntervalSince1970: TimeInterval(expirySeconds))
         )
-    }
-
-    // MARK: - Antigravity CLI (`agy`)
-
-    private var antigravityCLITokenURL: URL {
-        home.appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token")
-    }
-
-    enum AntigravityCLISwitchResult: Equatable {
-        case notSignedIn
-        case updated
-        case unrecognized
-        case writeFailed
-    }
-
-    /// Rewrite the `agy` CLI's saved OAuth token so the CLI follows the IDE switch.
-    /// On macOS `agy` reads the Keychain first and falls back to the token file, so both are updated.
-    /// Skipped when `agy` has never signed in; refuses to touch a token format it can't parse.
-    private func writeAntigravityCLIAuth(
-        accessToken: String,
-        refreshToken: String?,
-        idToken: String?,
-        email: String?,
-        expiry: Date
-    ) -> AntigravityCLISwitchResult {
-        var keychainResult = AntigravityCLISwitchResult.notSignedIn
-        if let stored = readGenericPassword(
-            service: AntigravityCLIToken.keychainService,
-            account: AntigravityCLIToken.keychainAccount
-        ) {
-            if let updated = AntigravityCLIToken.updateKeyringValue(
-                stored,
-                accessToken: accessToken,
-                refreshToken: refreshToken,
-                idToken: idToken,
-                email: email,
-                expiry: expiry
-            ) {
-                keychainResult = writeGenericPassword(
-                    service: AntigravityCLIToken.keychainService,
-                    account: AntigravityCLIToken.keychainAccount,
-                    value: updated
-                ) ? .updated : .writeFailed
-            } else {
-                keychainResult = .unrecognized
-            }
-        }
-
-        var fileResult = AntigravityCLISwitchResult.notSignedIn
-        let url = antigravityCLITokenURL
-        if let existing = try? Data(contentsOf: url) {
-            if let updated = AntigravityCLIToken.update(
-                existing,
-                accessToken: accessToken,
-                refreshToken: refreshToken,
-                idToken: idToken,
-                email: email,
-                expiry: expiry
-            ) {
-                fileResult = (try? backupThenWrite(data: updated, to: url)) != nil ? .updated : .writeFailed
-            } else {
-                fileResult = .unrecognized
-            }
-        }
-
-        return keychainResult == .notSignedIn ? fileResult : keychainResult
     }
 
     private func writeCursorAuth(from src: [String: Any]) throws {
@@ -1310,42 +1244,6 @@ final class NativeSessionManager: ObservableObject {
         process.waitUntilExit()
     }
 
-    private func readGenericPassword(service: String, account: String) -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-a", account, "-s", service, "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
-              let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty
-        else { return nil }
-        return value
-    }
-
-    private func writeGenericPassword(service: String, account: String, value: String) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["add-generic-password", "-U", "-a", account, "-s", service, "-w", value]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    }
-
     private func readClaudeCredentials() -> [String: Any]? {
         // Try Keychain first, then plaintext file.
         let user = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
@@ -1391,11 +1289,6 @@ final class NativeSessionManager: ObservableObject {
     /// Back up the existing native file once, then write the new JSON atomically.
     /// These files hold OAuth tokens, so keep them owner-only (0600).
     private func backupThenWrite(json: [String: Any], to url: URL) throws {
-        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
-        try backupThenWrite(data: data, to: url)
-    }
-
-    private func backupThenWrite(data: Data, to url: URL) throws {
         if fileManager.fileExists(atPath: url.path) {
             let backup = url.appendingPathExtension("viberouter-bak")
             if !fileManager.fileExists(atPath: backup.path) {
@@ -1403,6 +1296,7 @@ final class NativeSessionManager: ObservableObject {
                 try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
             }
         }
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: url, options: .atomic)
         // atomic write replaces the file, resetting perms to the umask default (often 0644);
         // restore owner-only so tokens aren't world/group readable.

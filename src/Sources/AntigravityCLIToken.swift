@@ -1,11 +1,185 @@
 import Foundation
 
-/// In-place rewrite of the `agy` CLI's saved OAuth token, keeping every unrelated field.
+/// The `agy` CLI's saved OAuth login: macOS Keychain first (go-keyring), token file as fallback.
+/// Updates are in place, keeping every unrelated field and the stored encoding.
 enum AntigravityCLIToken {
     static let keychainService = "gemini"
     static let keychainAccount = "antigravity"
     private static let keyringBase64Prefix = "go-keyring-base64:"
     private static let keyringHexPrefix = "go-keyring-encoded:"
+
+    enum WriteResult: Equatable {
+        case notSignedIn
+        case updated
+        case unrecognized
+        case writeFailed
+    }
+
+    struct Snapshot: Equatable {
+        let accessToken: String
+        let refreshToken: String?
+        let idToken: String?
+        let expiry: Date?
+    }
+
+    static var tokenFileURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".gemini/antigravity-cli/antigravity-oauth-token")
+    }
+
+    // MARK: - Live store
+
+    /// The login `agy` will use next, read in the same precedence `agy` applies.
+    static func currentSnapshot() -> Snapshot? {
+        if let stored = readKeychain() {
+            return snapshot(ofKeyringValue: stored)
+        }
+        guard let data = try? Data(contentsOf: tokenFileURL) else { return nil }
+        return snapshot(of: data)
+    }
+
+    /// Write a token into both `agy` stores. The Keychain result wins because `agy` reads it first.
+    static func apply(
+        accessToken: String,
+        refreshToken: String?,
+        idToken: String?,
+        email: String?,
+        expiry: Date
+    ) -> WriteResult {
+        var keychainResult = WriteResult.notSignedIn
+        if let stored = readKeychain() {
+            if let updated = updateKeyringValue(
+                stored,
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                idToken: idToken,
+                email: email,
+                expiry: expiry
+            ) {
+                keychainResult = writeKeychain(updated) ? .updated : .writeFailed
+            } else {
+                keychainResult = .unrecognized
+            }
+        }
+
+        var fileResult = WriteResult.notSignedIn
+        let url = tokenFileURL
+        if let existing = try? Data(contentsOf: url) {
+            if let updated = update(
+                existing,
+                accessToken: accessToken,
+                refreshToken: refreshToken,
+                idToken: idToken,
+                email: email,
+                expiry: expiry
+            ) {
+                fileResult = writeFile(updated, to: url) ? .updated : .writeFailed
+            } else {
+                fileResult = .unrecognized
+            }
+        }
+
+        return keychainResult == .notSignedIn ? fileResult : keychainResult
+    }
+
+    private static func readKeychain() -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["find-generic-password", "-a", keychainAccount, "-s", keychainService, "-w"]
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !value.isEmpty
+        else { return nil }
+        return value
+    }
+
+    private static func writeKeychain(_ value: String) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        process.arguments = ["add-generic-password", "-U", "-a", keychainAccount, "-s", keychainService, "-w", value]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        process.waitUntilExit()
+        return process.terminationStatus == 0
+    }
+
+    /// Back up the original once, write atomically, and keep both owner-only.
+    private static func writeFile(_ data: Data, to url: URL) -> Bool {
+        let fm = FileManager.default
+        let backup = url.appendingPathExtension("viberouter-bak")
+        if fm.fileExists(atPath: url.path), !fm.fileExists(atPath: backup.path) {
+            try? fm.copyItem(at: url, to: backup)
+            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+        }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            return false
+        }
+        try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        return true
+    }
+
+    // MARK: - Parsing
+
+    static func snapshot(ofKeyringValue stored: String) -> Snapshot? {
+        guard let (_, payload) = decodeKeyringValue(stored) else { return nil }
+        return snapshot(of: payload)
+    }
+
+    static func snapshot(of data: Data) -> Snapshot? {
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = tokenObject(in: root),
+              let accessKey = accessTokenKeys.first(where: { token[$0] is String }),
+              let access = token[accessKey] as? String
+        else { return nil }
+        let refresh = refreshTokenKeys.lazy.compactMap { token[$0] as? String }.first
+        let idToken = idTokenKeys.lazy.compactMap { token[$0] as? String }.first
+        let expiry = expiryKeys.lazy.compactMap { parseExpiry(token[$0]) }.first
+        return Snapshot(accessToken: access, refreshToken: refresh, idToken: idToken, expiry: expiry)
+    }
+
+    private static func tokenObject(in object: [String: Any]) -> [String: Any]? {
+        if accessTokenKeys.contains(where: { object[$0] is String }) { return object }
+        for value in object.values {
+            if let child = value as? [String: Any], let found = tokenObject(in: child) { return found }
+        }
+        return nil
+    }
+
+    private static func parseExpiry(_ value: Any?) -> Date? {
+        if let number = value as? NSNumber {
+            let raw = number.doubleValue
+            guard raw > 0 else { return nil }
+            return Date(timeIntervalSince1970: raw > 100_000_000_000 ? raw / 1000 : raw)
+        }
+        guard let string = value as? String else { return nil }
+        let withoutFraction = string.replacingOccurrences(
+            of: #"\.\d+"#,
+            with: "",
+            options: .regularExpression
+        )
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f.date(from: withoutFraction)
+    }
+
+    // MARK: - Updating
 
     /// Update a go-keyring stored value, re-encoding it with the same scheme it was read with.
     static func updateKeyringValue(
@@ -16,20 +190,7 @@ enum AntigravityCLIToken {
         email: String?,
         expiry: Date
     ) -> String? {
-        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefix: String
-        let payload: Data?
-        if trimmed.hasPrefix(keyringBase64Prefix) {
-            prefix = keyringBase64Prefix
-            payload = Data(base64Encoded: String(trimmed.dropFirst(prefix.count)))
-        } else if trimmed.hasPrefix(keyringHexPrefix) {
-            prefix = keyringHexPrefix
-            payload = hexDecode(String(trimmed.dropFirst(prefix.count)))
-        } else {
-            prefix = ""
-            payload = Data(trimmed.utf8)
-        }
-        guard let payload,
+        guard let (prefix, payload) = decodeKeyringValue(stored),
               let updated = update(
                   payload,
                   accessToken: accessToken,
@@ -44,6 +205,19 @@ enum AntigravityCLIToken {
         case keyringHexPrefix: return prefix + updated.map { String(format: "%02x", $0) }.joined()
         default: return String(decoding: updated, as: UTF8.self)
         }
+    }
+
+    private static func decodeKeyringValue(_ stored: String) -> (prefix: String, payload: Data)? {
+        let trimmed = stored.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(keyringBase64Prefix) {
+            guard let data = Data(base64Encoded: String(trimmed.dropFirst(keyringBase64Prefix.count))) else { return nil }
+            return (keyringBase64Prefix, data)
+        }
+        if trimmed.hasPrefix(keyringHexPrefix) {
+            guard let data = hexDecode(String(trimmed.dropFirst(keyringHexPrefix.count))) else { return nil }
+            return (keyringHexPrefix, data)
+        }
+        return ("", Data(trimmed.utf8))
     }
 
     private static func hexDecode(_ hex: String) -> Data? {
