@@ -53,6 +53,12 @@ class ThinkingProxy {
             NSLog("[ThinkingProxy] Already running")
             return
         }
+        // A failed listen leaves the NWListener installed. The next start has
+        // to drop it, or the port stays unbound while we report "already running".
+        stateQueue.sync {
+            listener?.cancel()
+            listener = nil
+        }
         
         do {
             let parameters = NWParameters.tcp
@@ -73,13 +79,14 @@ class ThinkingProxy {
                     NSLog("[ThinkingProxy] Listening on port \(self?.proxyPort ?? 0)")
                 case .failed(let error):
                     NSLog("[ThinkingProxy] Failed: \(error)")
-                    DispatchQueue.main.async {
-                        self?.isRunning = false
-                    }
+                    self?.releaseFailedListener(self?.listener)
                 case .cancelled:
                     NSLog("[ThinkingProxy] Cancelled")
                     DispatchQueue.main.async {
-                        self?.isRunning = false
+                        // stop() and a retry already drop the listener. Ignore a
+                        // cancel for the listener we just replaced.
+                        guard let self, self.listener == nil else { return }
+                        self.isRunning = false
                     }
                 default:
                     break
@@ -97,12 +104,19 @@ class ThinkingProxy {
         }
     }
     
-    /**
-     Stops the thinking proxy server
-     */
+    /// Drop a listener that never became ready so `start()` can bind again.
+    private func releaseFailedListener(_ failed: NWListener?) {
+        stateQueue.async { [weak self] in
+            guard let self, self.listener === failed else { return }
+            self.listener = nil
+            DispatchQueue.main.async { self.isRunning = false }
+        }
+    }
+
+    /// Stops the thinking proxy server.
     func stop() {
         stateQueue.sync {
-            guard isRunning else { return }
+            guard listener != nil else { return }
             
             listener?.cancel()
             listener = nil
@@ -465,33 +479,14 @@ class ThinkingProxy {
                     models = list
                 }
             }
-            models = models.map(Self.tagVibeRouterModel)
-            let existing = Set(models.compactMap { $0["id"] as? String })
-            for model in KiroDirectProvider.catalog() {
-                let entry = KiroDirectProvider.catalogEntry(for: model)
-                guard let id = entry["id"] as? String, !existing.contains(id) else { continue }
-                models.append(entry)
-            }
+            models = models.map(ModelProviderLabel.tag)
+            // The backend registers the Kiro bridge too. Re-adding its raw
+            // catalog here would resurrect disabled models and providers.
             var payload: [String: Any] = ["object": "list", "data": models, "has_more": false]
             if let first = models.first?["id"] as? String { payload["first_id"] = first }
             if let last = models.last?["id"] as? String { payload["last_id"] = last }
             self.sendJSON(payload, status: 200, to: connection)
         }
-    }
-
-    /// Claude Code's `/model` picker shows `display_name` and `description`.
-    /// Without a description the row just says "From gateway".
-    private static func tagVibeRouterModel(_ entry: [String: Any]) -> [String: Any] {
-        var entry = entry
-        guard let id = entry["id"] as? String, !id.isEmpty else { return entry }
-        if (entry["display_name"] as? String)?.isEmpty != false {
-            entry["display_name"] = "[VibeRouter] \(id)"
-        }
-        if (entry["description"] as? String)?.isEmpty != false {
-            entry["description"] = "via VibeRouter"
-        }
-        if entry["type"] == nil { entry["type"] = "model" }
-        return entry
     }
 
     private func sendJSON(_ object: [String: Any], status: Int, to connection: NWConnection) {

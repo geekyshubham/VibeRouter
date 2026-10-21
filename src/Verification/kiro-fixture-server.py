@@ -20,10 +20,23 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        if self.path == "/account-failover":
+            token = self.headers.get("Authorization", "")
+            failure = (402, "MONTHLY_REQUEST_COUNT") if token.endswith("old") else (400, "INVALID_MODEL_ID") if token.endswith("free") else None
+            if failure:
+                self.send_response(failure[0])
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(json.dumps({"reason": failure[1]}).encode())
+                return
         self.send_response(200)
         self.send_header("Content-Type", "application/vnd.amazon.eventstream")
         self.send_header("Connection", "close")
         self.end_headers()
+        if self.path == "/monthly-exception":
+            self.wfile.write(frame("ServiceQuotaExceededException", {"reason": "MONTHLY_REQUEST_COUNT"}, True))
+            return
         if self.path == "/exception":
             self.wfile.write(frame("ValidationException", {"reason": "CONTENT_LENGTH_EXCEEDS_THRESHOLD"}, True))
             return

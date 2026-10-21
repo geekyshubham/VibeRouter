@@ -1761,7 +1761,14 @@ enum NativeUsageFetcher {
         }
 
         if let summaryBody = summary.json {
-            let groups = cloudCodeQuotaGroups(from: summaryBody)
+            // Summary often lists only Claude/GPT at 100% remaining. Gemini weekly
+            // lives on the per-model quota and is what the outside badge shows.
+            var groups = cloudCodeQuotaGroups(from: summaryBody)
+            if !groups.contains(where: { Self.isGoogleQuotaGroup($0.title) }),
+               let detailBody = detail.json,
+               let google = googleModelWeeklyGroup(from: detailBody) {
+                groups.insert(google, at: 0)
+            }
             if !groups.isEmpty {
                 // Flatten primary windows for the top-level bars (most important first).
                 var flatWindows: [RateWindow] = []
@@ -2032,6 +2039,52 @@ enum NativeUsageFetcher {
         return name.isEmpty ? "Limit" : name
     }
 
+    private static func isGoogleQuotaGroup(_ title: String) -> Bool {
+        let lower = title.lowercased()
+        return lower.contains("gemini") || lower.contains("google")
+    }
+
+    /// Shared Gemini remaining from `retrieveUserQuota`. Summary omits this pool,
+    /// and every model in it resets together — that is the weekly Google quota.
+    static func googleModelWeeklyGroup(from json: [String: Any]) -> ProviderUsageSubAccount? {
+        guard let buckets = json["buckets"] as? [[String: Any]] else { return nil }
+        struct Row {
+            var used: Double
+            var reset: Date?
+        }
+        var rows: [Row] = []
+        for bucket in buckets {
+            guard let modelID = stringValue(bucket, keys: ["modelId", "model_id", "name"])?.lowercased(),
+                  modelID.contains("gemini")
+            else { continue }
+            if let resetTime = stringValue(bucket, keys: ["resetTime"]), resetTime.hasPrefix("1970-") {
+                continue
+            }
+            let exhausted = bucket["isExhausted"] as? Bool == true
+            guard exhausted || doubleValue(bucket, keys: ["remainingFraction"]) != nil else { continue }
+            let used = exhausted
+                ? 100.0
+                : cloudCodeUsedPercent(remainingFraction: doubleValue(bucket, keys: ["remainingFraction"]))
+            rows.append(Row(used: used, reset: parseISO8601(stringValue(bucket, keys: ["resetTime"]))))
+        }
+        guard let worst = rows.max(by: { $0.used < $1.used }) else { return nil }
+        let window = RateWindow(
+            usedPercent: worst.used,
+            windowMinutes: 10_080,
+            resetsAt: worst.reset,
+            resetDescription: worst.reset.map { ResetCountdownFormatter.resetLine(for: $0) },
+            label: "Gemini · Weekly"
+        )
+        return ProviderUsageSubAccount(
+            id: "Gemini Models",
+            title: "Gemini Models",
+            subtitle: "Google",
+            planType: nil,
+            windows: [window],
+            errorMessage: nil
+        )
+    }
+
     private static func cloudCodeShortGroupName(_ groupTitle: String) -> String {
         let lower = groupTitle.lowercased()
         if lower.contains("claude") || lower.contains("gpt") || lower.contains("3p") {
@@ -2096,7 +2149,10 @@ enum NativeUsageFetcher {
         providerID: String,
         payload: [String: Any]
     ) async -> ProviderUsageSnapshot {
-        guard let apiKey = stringValue(payload, keys: ["api_key", "apiKey", "key"]) else {
+        let apiKey = OpenCodeConsoleSession.bearer(
+            stored: stringValue(payload, keys: ["api_key", "apiKey", "key"]) ?? ""
+        )
+        guard !apiKey.isEmpty else {
             return .empty(
                 authAccountID: authAccountID,
                 providerID: providerID,
@@ -2122,21 +2178,15 @@ enum NativeUsageFetcher {
             guard let http = response as? HTTPURLResponse else {
                 return .empty(authAccountID: authAccountID, providerID: providerID, accountEmail: label, error: "No response from OpenCode Zen")
             }
-            if http.statusCode == 401 {
-                NSLog("[OpenCodeGo] %@ → 401 rejected", label)
+            if let authError = openCodeGoHTTPError(statusCode: http.statusCode, body: data) {
+                if http.statusCode == 401 {
+                    NSLog("[OpenCodeGo] %@ → 401 %@", label, authError)
+                }
                 return .empty(
                     authAccountID: authAccountID,
                     providerID: providerID,
                     accountEmail: label,
-                    error: "API key rejected — replace this OpenCode Go key in Settings"
-                )
-            }
-            if http.statusCode == 403 {
-                return .empty(
-                    authAccountID: authAccountID,
-                    providerID: providerID,
-                    accountEmail: label,
-                    error: "This key has no active OpenCode Go subscription"
+                    error: authError
                 )
             }
             guard (200...299).contains(http.statusCode),
@@ -2203,6 +2253,20 @@ enum NativeUsageFetcher {
         default:
             return "Could not load OpenCode Go limits"
         }
+    }
+
+    static func openCodeGoHTTPError(statusCode: Int, body: Data) -> String? {
+        let text = String(data: body, encoding: .utf8) ?? ""
+        if text.contains("api_key_expired") {
+            return "OpenCode Go key expired. Sign in again in OpenCode — VibeRouter uses that Console session."
+        }
+        if statusCode == 401 {
+            return "API key rejected — replace this OpenCode Go key in Settings"
+        }
+        if statusCode == 403 {
+            return "This key has no active OpenCode Go subscription"
+        }
+        return nil
     }
 
     /// Order matters — the card shows the first window as the headline.

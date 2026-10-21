@@ -134,7 +134,7 @@ enum KiroDirectProvider {
 
     /// Picker title. Claude Code shows this instead of the raw id.
     static func pickerLabel(forUpstreamID id: String) -> String {
-        "[VibeRouter] Kiro · \(prettyModelName(id))"
+        "[VibeRouter] [Kiro] \(prettyModelName(id))"
     }
 
     static func catalogEntry(for model: CatalogModel) -> [String: Any] {
@@ -142,7 +142,8 @@ enum KiroDirectProvider {
             "id": modelPrefix + model.id,
             "object": "model",
             "type": "model",
-            "owned_by": "viberouter",
+            "owned_by": "kiro",
+            "providers": ["kiro"],
             "display_name": pickerLabel(forUpstreamID: model.id),
             "description": "Kiro via VibeRouter — \(model.blurb)",
         ]
@@ -271,8 +272,24 @@ enum KiroDirectProvider {
     /// The kiro-cli social login is the Power subscription. The builder-id file
     /// in ~/.cli-proxy-api can be a different, already-limited account.
     private actor CredentialGate {
+        private var candidateLoad: (id: UUID, force: Credential?, task: Task<[KiroAccountPool.Candidate], Never>)?
+
         func accessToken(forceCLIRefresh: Bool) async -> (token: String, credential: Credential)? {
             await resolveAccessToken(forceCLIRefresh: forceCLIRefresh)
+        }
+
+        func candidates(forceRefresh: Credential?) async -> [KiroAccountPool.Candidate] {
+            // Share discovery/refresh across concurrent Claude sessions.
+            if let candidateLoad {
+                let result = await candidateLoad.task.value
+                if forceRefresh == nil || forceRefresh == candidateLoad.force { return result }
+            }
+            let id = UUID()
+            let task = Task { await loadAccountCandidates(forceRefresh: forceRefresh) }
+            candidateLoad = (id, forceRefresh, task)
+            let result = await task.value
+            if candidateLoad?.id == id { candidateLoad = nil }
+            return result
         }
     }
 
@@ -281,6 +298,81 @@ enum KiroDirectProvider {
     static func accessToken(forceCLIRefresh: Bool = false) async -> (token: String, credential: Credential)? {
         // Concurrent Claude sessions must not run competing CLI refreshes.
         await credentialGate.accessToken(forceCLIRefresh: forceCLIRefresh)
+    }
+
+    static func accountCandidates(forceRefresh: Credential? = nil) async -> [KiroAccountPool.Candidate] {
+        let enabled = UserDefaults.standard.dictionary(forKey: "enabledProviders") as? [String: Bool] ?? [:]
+        guard enabled["kiro"] != false else { return [] }
+        return await credentialGate.candidates(forceRefresh: forceRefresh)
+    }
+
+    /// Discover every enabled credential on each turn, so newly added accounts
+    /// join the pool without a restart. Refresh each login through its own source.
+    static func loadAccountCandidates(
+        forceRefresh: Credential? = nil,
+        authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api"),
+        readSocial: @escaping () -> [String: Any]? = cliSocialPayload,
+        readOIDC: @escaping () -> [String: Any]? = cliOIDCPayload,
+        refreshCLI: () -> Bool = refreshCLISession,
+        refreshFile: (URL) async -> Bool = { await TokenRefreshService.refreshAccountFile($0, force: true) },
+        now: Date = Date()
+    ) async -> [KiroAccountPool.Candidate] {
+        func read(_ file: URL) -> [String: Any]? {
+            guard let data = try? Data(contentsOf: file) else { return nil }
+            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        }
+        func candidate(_ payload: [String: Any], _ credential: Credential) -> KiroAccountPool.Candidate? {
+            guard payload["disabled"] as? Bool != true,
+                  let token = usableToken(payload, minimumValidity: 0, now: now) else { return nil }
+            return KiroAccountPool.Candidate(
+                token: token, credential: credential,
+                refreshToken: payload["refresh_token"] as? String ?? payload["refreshToken"] as? String,
+                region: payload["region"] as? String ?? "us-east-1",
+                profileArn: payload["profile_arn"] as? String ?? payload["profileArn"] as? String
+            )
+        }
+        let files = ((try? FileManager.default.contentsOfDirectory(at: authDirectory, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+            .filter { $0.pathExtension == "json" && $0.lastPathComponent.hasPrefix("kiro-") }
+            .sorted {
+                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+                return a == b ? $0.lastPathComponent < $1.lastPathComponent : a > b
+            }
+        // A disabled imported copy must not sneak back into the pool via CLI.
+        let disabled = files.compactMap { file -> [String: Any]? in
+            guard let payload = read(file), payload["disabled"] as? Bool == true else { return nil }
+            return payload
+        }
+        func disabledCLI(_ payload: [String: Any]) -> Bool {
+            disabled.contains { record in
+                for key in ["access_token", "refresh_token"] {
+                    if let value = payload[key] as? String, !value.isEmpty, value == record[key] as? String { return true }
+                }
+                return false
+            }
+        }
+        var result: [KiroAccountPool.Candidate] = []
+        var cliRefreshed = false
+        for (credential, reader) in [(Credential.cliSocial, readSocial), (.cliOIDC, readOIDC)] {
+            guard var payload = reader(), !disabledCLI(payload) else { continue }
+            if forceRefresh == credential || isExpired(payload, minimumValidity: 120, now: now) {
+                if !cliRefreshed { _ = refreshCLI(); cliRefreshed = true }
+                payload = reader() ?? payload
+            }
+            if !disabledCLI(payload), let value = candidate(payload, credential) { result.append(value) }
+        }
+        for file in files {
+            guard var payload = read(file), payload["disabled"] as? Bool != true else { continue }
+            let credential = Credential.authFile(file.lastPathComponent)
+            if forceRefresh == credential || isExpired(payload, minimumValidity: 120, now: now) {
+                _ = await refreshFile(file)
+                guard let updated = read(file) else { continue }
+                payload = updated
+            }
+            if let value = candidate(payload, credential) { result.append(value) }
+        }
+        var seen = Set<String>()
+        return result.filter { seen.insert($0.tokenDigest).inserted }
     }
 
     static func resolveAccessToken(
@@ -1298,72 +1390,90 @@ enum KiroDirectProvider {
         case failure(status: Int, message: String)
     }
 
-    static func send(
-        conversationState: [String: Any], systemPrompt: String = "",
-        onFrame: ((Frame) async throws -> Void)? = nil
-    ) async -> CallResult {
-        guard let access = await accessToken() else {
-            return .failure(status: 401, message: "No usable Kiro credentials — add a Kiro account in VibeRouter")
-        }
-        var (token, credential) = access
-        var payload = requestPayload(conversationState: conversationState)
-        guard let url = URL(string: endpoint) else {
+    typealias FrameSink = (Frame) async throws -> Void
+    typealias AccountPost = (KiroAccountPool.Candidate, [String: Any], @escaping FrameSink) async -> CallResult
+
+    static func postAccount(_ account: KiroAccountPool.Candidate, payload: [String: Any], onFrame: @escaping FrameSink) async -> CallResult {
+        guard let url = URL(string: "https://codewhisperer.\(account.region).amazonaws.com/generateAssistantResponse") else {
             return .failure(status: 500, message: "Could not build the Kiro request")
         }
-        // Kiro limits the complete request, including history, tool results and
-        // schemas. Its limit can be lower than the model's advertised context.
-        // Keep the current turn and the newest history, then shrink further if
-        // Kiro's own content-length check still rejects the estimate.
-        payload = trimHistory(in: payload, systemPrompt: systemPrompt, maxBytes: maxRequestBytes)
-        for attempt in 0...3 {
-            if Task.isCancelled { return .failure(status: 499, message: "Request cancelled") }
-            guard payloadByteCount(payload) <= maxRequestBytes else {
-                return .failure(status: 413, message: "The current message or attachments exceed Kiro's input limit. Compact the conversation or split the message and retry.")
-            }
-            var delivered = false
-            let result = await postKiro(url: url, token: token, credential: credential, payload: payload, onFrame: { frame in
-                delivered = true
-                try await onFrame?(frame)
-            })
-            guard case .failure(let status, let message) = result else { return result }
-            // Replaying a turn after visible output could duplicate content or tools.
-            if delivered || Task.isCancelled { return result }
-            if status == 401, attempt == 0 {
-                if case .authFile(let name) = credential {
-                    let file = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api").appendingPathComponent(name)
-                    if let data = try? Data(contentsOf: file),
-                       let old = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                       let updated = await KiroAWSAuth.refresh(old),
-                       let data = try? JSONSerialization.data(withJSONObject: updated) { try? data.write(to: file, options: .atomic) }
+        var body = payload
+        if let arn = account.profileArn, !arn.isEmpty { body["profileArn"] = arn }
+        return await postKiro(url: url, token: account.token, credential: account.credential, payload: body, onFrame: onFrame)
+    }
+
+    static func send(
+        conversationState: [String: Any], systemPrompt: String = "",
+        onFrame: FrameSink? = nil,
+        pool: KiroAccountPool = .shared,
+        readCandidates: (Credential?) async -> [KiroAccountPool.Candidate] = { await accountCandidates(forceRefresh: $0) },
+        post: AccountPost = postAccount
+    ) async -> CallResult {
+        var candidates = await readCandidates(nil)
+        let current = conversationState["currentMessage"] as? [String: Any]
+        let user = current?["userInputMessage"] as? [String: Any]
+        let model = user?["modelId"] as? String ?? "auto"
+        let originalPayload = trimHistory(in: requestPayload(conversationState: conversationState), systemPrompt: systemPrompt, maxBytes: maxRequestBytes)
+        var tried = Set<String>()
+        while var account = await pool.select(candidates, model: model, excluding: tried) {
+            tried.insert(account.identity)
+            var payload = originalPayload
+            var refreshed = false
+            for attempt in 0...3 {
+                if Task.isCancelled { return .failure(status: 499, message: "Request cancelled") }
+                guard payloadByteCount(payload) <= maxRequestBytes else {
+                    return .failure(status: 413, message: "The current message or attachments exceed Kiro's input limit. Compact the conversation or split the message and retry.")
                 }
-                if let fresh = await accessToken(forceCLIRefresh: credential.isCLI),
-                   fresh.credential == credential {
-                    (token, credential) = fresh
+                var delivered = false
+                let result = await post(account, payload, { frame in
+                    // Metadata/heartbeats do not expose content and cannot prevent failover.
+                    if frame.eventType == "toolUseEvent"
+                        || (frame.eventType == "assistantResponseEvent" && !(frame.payload["content"] as? String ?? "").isEmpty) {
+                        delivered = true
+                    }
+                    try await onFrame?(frame)
+                })
+                guard case .failure(let status, let message) = result else {
+                    await pool.succeeded(account, model: model)
+                    return result
+                }
+                if Task.isCancelled { return result }
+                // Cool down even a partially delivered failure, but never replay
+                // that response: it could duplicate visible content or tool calls.
+                if delivered {
+                    await pool.failed(account, model: model, status: status, message: message)
+                    return result
+                }
+                if status == 401, !refreshed, attempt < 3 {
+                    refreshed = true
+                    candidates = await readCandidates(account.credential)
+                    if let fresh = candidates.first(where: { $0.credential == account.credential }) {
+                        account = fresh
+                        tried.insert(account.identity)
+                        continue
+                    }
+                }
+                if payload["additionalModelRequestFields"] != nil,
+                   message.contains("additionalModelRequestFields"), attempt < 3 {
+                    payload.removeValue(forKey: "additionalModelRequestFields")
                     continue
                 }
+                if message.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") || message.contains("PROMPT_TOO_LONG") {
+                    guard attempt < 3 else { return result }
+                    let bytes = payloadByteCount(payload)
+                    let smaller = trimHistory(in: payload, systemPrompt: systemPrompt, maxBytes: max(80_000, bytes * 7 / 10))
+                    guard payloadByteCount(smaller) < bytes else {
+                        return .failure(status: 413, message: "The current message exceeds Kiro's input limit. Shorten the message or tool output and retry.")
+                    }
+                    payload = smaller
+                    continue
+                }
+                guard await pool.failed(account, model: model, status: status, message: message) else { return result }
+                NSLog("[Kiro] %@ failed (%d); trying the next enabled account for %@", account.credential.ledgerAccount, status, model)
+                break
             }
-            if payload["additionalModelRequestFields"] != nil,
-               message.contains("additionalModelRequestFields") {
-                payload.removeValue(forKey: "additionalModelRequestFields")
-                continue
-            }
-            guard (message.contains("CONTENT_LENGTH_EXCEEDS_THRESHOLD") || message.contains("PROMPT_TOO_LONG")), attempt < 3 else {
-                return result
-            }
-            let bytes = payloadByteCount(payload)
-            let smaller = trimHistory(
-                in: payload, systemPrompt: systemPrompt,
-                maxBytes: max(80_000, bytes * 7 / 10)
-            )
-            guard payloadByteCount(smaller) < bytes else {
-                return .failure(
-                    status: 413,
-                    message: "The current message exceeds Kiro's input limit. Shorten the message or tool output and retry."
-                )
-            }
-            payload = smaller
         }
-        return .failure(status: 413, message: "The Kiro request is still too large after trimming history")
+        return await pool.unavailable(candidates, model: model)
     }
 
     static func payloadByteCount(_ payload: [String: Any]) -> Int {

@@ -199,7 +199,8 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         providerID == ServiceType.antigravity.rawValue || providerID == ServiceType.gemini.rawValue
     }
 
-    /// Headline used% for badges: worst window for single-pool providers, best usable pool for Cloud Code.
+    /// Outside badge. One pool: worst window. Cloud Code: Google weekly, so a full
+    /// Claude pool does not read as 100% while Gemini weekly is still open.
     func headlineUsedPercent(at now: Date = Date()) -> Double? {
         func used(_ window: RateWindow) -> Double {
             if let resetsAt = window.resetsAt, resetsAt <= now { return 0 }
@@ -207,11 +208,29 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         }
         let all = windows + subAccounts.flatMap(\.windows)
         guard !all.isEmpty else { return nil }
+        if hasIndependentQuotaPools, let google = Self.googleWeeklyUsedPercent(in: all, used: used) {
+            return google
+        }
         guard hasIndependentQuotaPools else { return all.map(used).max() }
         let poolPeaks = subAccounts.isEmpty
             ? windows.map(used)
             : subAccounts.compactMap { $0.windows.map(used).max() }
         return poolPeaks.min() ?? all.map(used).max()
+    }
+
+    /// Gemini/Google weekly row. `nil` when the snapshot has no such window.
+    private static func googleWeeklyUsedPercent(
+        in windows: [RateWindow],
+        used: (RateWindow) -> Double
+    ) -> Double? {
+        let weekly = windows.filter { window in
+            let label = (window.label ?? "").lowercased()
+            let google = label.contains("gemini") || label.contains("google")
+            guard google else { return false }
+            return window.windowMinutes == 10_080 || label.contains("weekly")
+        }
+        guard !weekly.isEmpty else { return nil }
+        return weekly.map(used).max()
     }
 
     init(

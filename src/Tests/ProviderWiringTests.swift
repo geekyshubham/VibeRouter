@@ -21,6 +21,51 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertNotNil(windows[1].resetsAt)
     }
 
+    func testOpenCodeConsoleSessionPrefersLiveOAuth() {
+        let now = Date(timeIntervalSince1970: 1_792_500_000)
+        let live = """
+        {"type":"oauth","access":"st_live","expires":1795170317002}
+        """
+        let expired = """
+        {"type":"oauth","access":"st_old","expires":1700000000000}
+        """
+        let apiKey = """
+        {"type":"key","key":"sk-expired"}
+        """
+        let token = OpenCodeConsoleSession.selectAccessToken(from: [
+            .init(json: apiKey, updated: 300, active: false),
+            .init(json: expired, updated: 400, active: true),
+            .init(json: live, updated: 100, active: true),
+        ], now: now)
+        XCTAssertEqual(token, "st_live")
+
+        let inactiveNewer = """
+        {"type":"oauth","access":"st_newer","expires":1795170317002}
+        """
+        let preferred = OpenCodeConsoleSession.selectAccessToken(from: [
+            .init(json: live, updated: 100, active: true),
+            .init(json: inactiveNewer, updated: 500, active: false),
+        ], now: now)
+        XCTAssertEqual(preferred, "st_live")
+
+        let missing = URL(fileURLWithPath: "/tmp/no-such-opencode-\(UUID().uuidString).db")
+        XCTAssertEqual(
+            OpenCodeConsoleSession.bearer(stored: "sk-stored", databaseURL: missing),
+            "sk-stored"
+        )
+        XCTAssertEqual(
+            OpenCodeConsoleSession.bearer(stored: "sk-other", providerID: "other", databaseURL: missing),
+            "sk-other"
+        )
+        XCTAssertEqual(
+            NativeUsageFetcher.openCodeGoHTTPError(
+                statusCode: 401,
+                body: Data("{\"error\":{\"code\":\"api_key_expired\"}}".utf8)
+            ),
+            "OpenCode Go key expired. Sign in again in OpenCode — VibeRouter uses that Console session."
+        )
+    }
+
     func testOpenCodeGoAuthFileMapsToServiceType() {
         let raw: [String: Any] = ["type": "openai-compat", "provider": "opencode-go"]
         XCTAssertEqual(AuthManager.serviceType(forAuthType: "openai-compat", raw: raw), .opencodeGo)
@@ -185,10 +230,48 @@ final class ProviderWiringTests: XCTestCase {
             windows: groups.flatMap(\.windows),
             subAccounts: groups
         )
-        XCTAssertEqual(snapshot.headlineUsedPercent() ?? -1, 40, accuracy: 0.5)
+        // Outside number is Gemini weekly (remaining 0.8 → 20% used), not the
+        // 5h bucket and not the exhausted Claude pool.
+        XCTAssertEqual(snapshot.headlineUsedPercent() ?? -1, 20, accuracy: 0.5)
 
         let codex = ProviderUsageSnapshot(id: "acct", providerID: "codex", windows: groups.flatMap(\.windows))
         XCTAssertEqual(codex.headlineUsedPercent() ?? -1, 100, accuracy: 0.5)
+    }
+
+    func testGoogleWeeklyGroupBeatsFullClaudePoolOnTheOutside() {
+        let detail: [String: Any] = [
+            "buckets": [
+                [
+                    "modelId": "gemini-2.5-pro",
+                    "remainingFraction": 0.027289486,
+                    "resetTime": "2026-10-27T10:28:31Z",
+                ],
+                ["modelId": "tab_flash_lite_preview", "remainingFraction": 1],
+                [
+                    "modelId": "claude-opus-4-6-thinking",
+                    "remainingFraction": 1,
+                    "resetTime": "2026-10-21T15:51:42Z",
+                ],
+            ],
+        ]
+        let google = NativeUsageFetcher.googleModelWeeklyGroup(from: detail)
+        XCTAssertEqual(google?.title, "Gemini Models")
+        XCTAssertEqual(google?.windows.first?.windowMinutes, 10_080)
+        XCTAssertEqual(google?.windows.first?.label, "Gemini · Weekly")
+        XCTAssertEqual(google?.windows.first?.usedPercent ?? -1, 97.27, accuracy: 0.05)
+
+        let claude = RateWindow(usedPercent: 0, windowMinutes: 10_080, label: "Claude/GPT · Weekly Limit")
+        let snapshot = ProviderUsageSnapshot(
+            id: "acct",
+            providerID: "antigravity",
+            windows: (google?.windows ?? []) + [claude],
+            subAccounts: [
+                google ?? ProviderUsageSubAccount(
+                    id: "missing", title: "missing", subtitle: nil, planType: nil, windows: [], errorMessage: nil
+                ),
+            ]
+        )
+        XCTAssertEqual(snapshot.headlineUsedPercent() ?? -1, 97.27, accuracy: 0.05)
     }
 
     func testHeadlineTreatsElapsedResetAsRefilled() {

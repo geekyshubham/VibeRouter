@@ -152,6 +152,9 @@ enum CLIHarnessAutoconfigure {
     // MARK: - Per-tool writers
 
     private static func configureClaudeCode(baseURL: String, apiKey: String, proxyPort: Int) throws {
+        let catalog = fetchProxyModels(port: proxyPort).filter { ModelProviderLabel.pickerOption(for: $0) != nil }
+        let ids = catalog.compactMap { $0["id"] as? String }
+        guard let first = ids.first else { throw AutoconfigureError.noModels }
         let home = FileManager.default.homeDirectoryForCurrentUser
         let claudeDir = home.appendingPathComponent(".claude")
         try FileManager.default.createDirectory(at: claudeDir, withIntermediateDirectories: true)
@@ -163,48 +166,42 @@ enum CLIHarnessAutoconfigure {
 
         let url = claudeDir.appendingPathComponent("settings.viberouter.json")
         try backupIfNeeded(url)
-        let kiro = KiroDirectProvider.catalog()
-        func kiroID(_ match: (String) -> Bool, fallback: String) -> String {
-            if let id = kiro.first(where: { match($0.id) })?.id { return "kiro/\(id)" }
-            return fallback
+        func available(_ preferences: [String], fallback: String) -> String {
+            preferences.first(where: ids.contains) ?? fallback
         }
-        let opus = kiroID({ $0.contains("opus") }, fallback: "kiro/claude-opus-5.5")
-        let sonnet = kiroID({ $0.contains("sonnet") }, fallback: "kiro/claude-sonnet-4.5")
-        let haiku = kiroID({ $0.contains("haiku") }, fallback: sonnet)
-        let main = kiro.contains(where: { $0.id == "claude-opus-5.5" }) ? "kiro/claude-opus-5.5" : opus
-        var options: [[String: Any]] = kiro.map { model in
-            [
-                "model": "kiro/\(model.id)",
-                "label": KiroDirectProvider.pickerLabel(forUpstreamID: model.id),
-                "description": "Kiro via VibeRouter",
-            ]
+        let previous = (try? readJSONForMerge(url))?["model"] as? String
+        let main = previous.flatMap { ids.contains($0) ? $0 : nil }
+            ?? available(["gpt-6.1-sol", "gpt-6-sol", "gpt-5.5"], fallback: first)
+        let opus = available(["kiro/claude-opus-5.5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"], fallback: main)
+        let sonnet = available(["kiro/claude-sonnet-5.5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6"], fallback: main)
+        let haiku = available(["kiro/claude-haiku-4.5", "claude-haiku-5-5", "claude-haiku-4-5-20251001"], fallback: sonnet)
+        func metadata(_ id: String, key: String) -> String {
+            let entry = catalog.first { $0["id"] as? String == id } ?? ["id": id]
+            return ModelProviderLabel.tag(entry)[key] as? String ?? id
         }
-        let kiroIDs = Set(options.compactMap { $0["model"] as? String })
-        for id in fetchProxyModelIDs(port: proxyPort) where !kiroIDs.contains(id) && !id.hasPrefix("kiro/") {
-            options.append([
-                "model": id,
-                "label": "[VibeRouter] \(id)",
-                "description": "via VibeRouter",
-            ])
-        }
+        let options = catalog.compactMap(ModelProviderLabel.pickerOption)
         let root: [String: Any] = [
             "env": [
                 "ANTHROPIC_BASE_URL": baseURL,
                 "ANTHROPIC_API_KEY": apiKey,
                 "ANTHROPIC_AUTH_TOKEN": apiKey,
                 "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
+                // Identify maintenance requests so Codex can use low effort for
+                // compaction while keeping the user's coding effort intact.
+                "CLAUDE_CODE_GATEWAY_HINT_HEADERS": "1",
                 "API_TIMEOUT_MS": "1800000",
-                // Kiro's HTTP payload ceiling is below its 1M model window.
-                "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "20",
+                // Let Claude Code choose the selected model's compaction window.
+                // A global percentage tuned for Kiro causes premature compaction
+                // and repeated refills when switching to GPT or other providers.
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": "[VibeRouter] \(opus)",
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": "Kiro via VibeRouter",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": metadata(opus, key: "display_name"),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": metadata(opus, key: "description"),
                 "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": "[VibeRouter] \(sonnet)",
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": "Kiro via VibeRouter",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": metadata(sonnet, key: "display_name"),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": metadata(sonnet, key: "description"),
                 "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": "[VibeRouter] \(haiku)",
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": "Kiro via VibeRouter",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": metadata(haiku, key: "display_name"),
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": metadata(haiku, key: "description"),
             ],
             "model": main,
             // This file is passed with --settings, which is allowed to set the picker.
@@ -291,8 +288,22 @@ enum CLIHarnessAutoconfigure {
         # Launch Claude Code via VibeRouter (Kiro, OpenCode Go, Codex, etc.).
         # Does NOT touch your Anthropic subscription — use `claude` for that.
         set -e
-        if ! curl --connect-timeout 2 --max-time 20 -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" \(baseURL)/v1/models; then
-          echo "VibeRouter is not running. Start VibeRouter.app first." >&2
+        proxy_ready() {
+          curl --noproxy '*' --connect-timeout 1 --max-time 3 -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" http://127.0.0.1:8318/v1/models &&
+          curl --noproxy '*' --connect-timeout 1 --max-time 15 -sf -o /dev/null -H "Authorization: Bearer \(apiKey)" \(baseURL)/v1/models
+        }
+        if ! proxy_ready; then
+          echo "Starting VibeRouter and waiting for the proxy..." >&2
+          if [ -x /Applications/VibeRouter.app/Contents/MacOS/viberouter ]; then
+            /Applications/VibeRouter.app/Contents/MacOS/viberouter server start --json >/dev/null || true
+          fi
+          for attempt in {1..20}; do
+            if proxy_ready; then break; fi
+            sleep 1
+          done
+        fi
+        if ! proxy_ready; then
+          echo "VibeRouter could not bring both proxy services online. Open /Applications/VibeRouter.app and check its server status." >&2
           exit 1
         fi
         # Claude Code saves /model choices in its config directory. Keep proxy
@@ -301,12 +312,12 @@ enum CLIHarnessAutoconfigure {
         mkdir -p "$CLAUDE_CONFIG_DIR"
         unset CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC
         export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1
+        export CLAUDE_CODE_GATEWAY_HINT_HEADERS=1
         # Kiro/GPT and other translated routes cannot return Anthropic safety
         # verdicts. Keep auto mode's local classifier enabled without the billing
         # notice. Opt into server review with 1 for a compatible Claude upstream.
         export CLAUDE_CODE_AUTO_MODE_SERVER="${CLAUDE_CODE_AUTO_MODE_SERVER:-0}"
         export API_TIMEOUT_MS="${API_TIMEOUT_MS:-1800000}"
-        export CLAUDE_AUTOCOMPACT_PCT_OVERRIDE="${CLAUDE_AUTOCOMPACT_PCT_OVERRIDE:-20}"
         echo "Starting Claude Code via VibeRouter (\(baseURL)). Anthropic subscription: claude"
         exec claude --settings "$HOME/.claude/settings.viberouter.json" "$@"
         """
@@ -381,20 +392,23 @@ enum CLIHarnessAutoconfigure {
         // Fetch live model ids when proxy is up; fall back to common aliases.
         // The whole catalog is published: truncating it is what hides models
         // like gpt-5.6-* and claude-opus-5 from the OpenCode picker.
-        var modelIDs = fetchProxyModelIDs(port: proxyPort)
-        if modelIDs.isEmpty {
-            modelIDs = Array(anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1))
+        var catalog = fetchProxyModels(port: proxyPort)
+        if catalog.isEmpty {
+            catalog = Array(anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1)).map { ["id": $0] }
         }
+        let modelIDs = catalog.compactMap { $0["id"] as? String }
         var models: [String: Any] = [:]
-        for id in modelIDs {
-            models[openCodeModelKey(id)] = openCodeModelEntry(id: id, displayName: id)
+        for entry in catalog {
+            guard let id = entry["id"] as? String, !id.isEmpty else { continue }
+            let name = ModelProviderLabel.tag(entry)["display_name"] as? String ?? id
+            models[openCodeModelKey(id)] = openCodeModelEntry(id: id, displayName: name)
             // Reasoning budget is expressed as a model suffix the proxy strips
             // before forwarding, so each effort level needs its own entry.
             for effort in thinkingEfforts(for: id) {
                 let variant = "\(id)-thinking-\(effort.budget)"
                 models[openCodeModelKey(variant)] = openCodeModelEntry(
                     id: variant,
-                    displayName: "\(id) (\(effort.label) reasoning)"
+                    displayName: "\(name) (\(effort.label) reasoning)"
                 )
             }
         }
@@ -659,21 +673,25 @@ enum CLIHarnessAutoconfigure {
     }
 
     private static func fetchProxyModelIDs(port: Int) -> [String] {
+        fetchProxyModels(port: port).compactMap { $0["id"] as? String }
+    }
+
+    private static func fetchProxyModels(port: Int) -> [[String: Any]] {
         guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else { return [] }
         var request = URLRequest(url: url, timeoutInterval: 2)
         request.setValue("Bearer \(dummyAPIKey)", forHTTPHeaderField: "Authorization")
         let sem = DispatchSemaphore(value: 0)
-        var ids: [String] = []
+        var models: [[String: Any]] = []
         URLSession.shared.dataTask(with: request) { data, _, _ in
             defer { sem.signal() }
             guard let data,
                   let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let list = json["data"] as? [[String: Any]]
             else { return }
-            ids = list.compactMap { $0["id"] as? String }
+            models = list
         }.resume()
         _ = sem.wait(timeout: .now() + 2.5)
-        return ids
+        return models
     }
 
     // MARK: - IO
@@ -743,10 +761,13 @@ enum CLIHarnessAutoconfigure {
     enum AutoconfigureError: LocalizedError {
         case notSupported(String)
         case unparseableConfig(String)
+        case noModels
         var errorDescription: String? {
             switch self {
             case .notSupported(let name):
                 return "\(name) is not autoconfigured as a client harness"
+            case .noModels:
+                return "No available text models were returned by VibeRouter. Start the proxy and enable a working provider first."
             case .unparseableConfig(let name):
                 return "\(name) exists but couldn't be parsed (comments, trailing commas, or malformed JSON). Refusing to overwrite it — edit or remove it manually, then retry."
             }

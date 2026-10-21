@@ -15,6 +15,8 @@ var Scopes = []string{
 	"https://www.googleapis.com/auth/userinfo.profile",
 	"https://www.googleapis.com/auth/cclog",
 	"https://www.googleapis.com/auth/experimentsandconfigs",
+	// The agy ACP server renews stored logins with this scope; without it renewal fails.
+	"https://www.googleapis.com/auth/aicode",
 }
 
 // OAuth2 endpoints for Google authentication

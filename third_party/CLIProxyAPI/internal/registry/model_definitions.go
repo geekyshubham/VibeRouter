@@ -93,7 +93,7 @@ func GetXAIModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexBuiltinImageModelInfo(), codexBuiltinSolModelInfo())
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
@@ -111,6 +111,21 @@ func codexBuiltinImageModelInfo() *ModelInfo {
 		Type:        "openai",
 		DisplayName: "GPT Image 2",
 		Version:     codexBuiltinImageModelID,
+	}
+}
+
+// Keep the native Codex model available when the remote catalog lags behind.
+// Metadata matches the Codex client catalog fetched on 2026-10-08.
+func codexBuiltinSolModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:            "gpt-6.1-sol",
+		Object:        "model",
+		OwnedBy:       "openai",
+		Type:          "openai",
+		DisplayName:   "GPT-6.1-Sol",
+		Description:   "Latest workhorse model for coding and everyday work.",
+		ContextLength: 272000,
+		Thinking:      &ThinkingSupport{Levels: []string{"low", "medium", "high", "xhigh", "max", "ultra"}},
 	}
 }
 

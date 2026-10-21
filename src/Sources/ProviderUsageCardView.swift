@@ -192,13 +192,6 @@ struct ProviderUsageCardView: View {
         }
     }
 
-    /// Antigravity/Gemini Cloud Code UIs (Cockpit) speak in **remaining%**.
-    /// Showing bare used% made full accounts look like "0%" and a 5%-used
-    /// weekly pool look exhausted next to Cockpit's "95% left".
-    private var showsRemainingPrimary: Bool {
-        serviceType == .antigravity || serviceType == .gemini
-    }
-
     private var subtitleText: String {
         if accounts.isEmpty { return "Not connected" }
         let active = activeAccounts.count
@@ -212,11 +205,7 @@ struct ProviderUsageCardView: View {
         if let credits = firstCreditMetric() {
             parts.append(credits)
         } else if pressure > 0 {
-            if showsRemainingPrimary {
-                parts.append("peak \(Int((100 - pressure).rounded()))% left")
-            } else {
-                parts.append("peak \(Int(pressure.rounded()))% used")
-            }
+            parts.append("peak \(Int(pressure.rounded()))% used")
         }
         return parts.joined(separator: " · ")
     }
@@ -512,12 +501,9 @@ struct ProviderUsageCardView: View {
             if let usage = usageForAccount(account),
                !(usage.windows.isEmpty && usage.subAccounts.isEmpty)
             {
-                return showsRemainingPrimary ? "100% left" : "0%"
+                return "0%"
             }
             return nil
-        }
-        if showsRemainingPrimary {
-            return "\(Int((100 - used).rounded()))% left"
         }
         return "\(Int(used.rounded()))%"
     }
@@ -695,7 +681,7 @@ private struct AccountUsageBlock: View {
                 .font(.caption2.monospacedDigit().weight(.bold))
                 .foregroundStyle(MenuBarDesign.usageTint(remainingPercent: 100 - used))
                 .help(serviceType == .antigravity || serviceType == .gemini
-                    ? "Best available model pool — see rows for each pool's 5h/weekly limit"
+                    ? "Google weekly usage"
                     : "Peak window usage")
         }
     }
@@ -722,14 +708,9 @@ private struct AccountUsageBlock: View {
         usage?.headlineUsedPercent()
     }
 
-    /// Cloud Code (Antigravity/Gemini): Cockpit-style remaining%.
-    /// Codex/Claude keep used% so a stuck stale "5%" is obviously used.
+    /// Same used% as Codex/Claude. For Antigravity this is the Google weekly window.
     private func peakBadgeLabel(used: Double) -> String {
-        if serviceType == .antigravity || serviceType == .gemini {
-            let left = max(0, 100 - used)
-            return left >= 99.5 ? "100% left" : "\(Int(left.rounded()))% left"
-        }
-        return "\(Int(used.rounded()))%"
+        "\(Int(used.rounded()))%"
     }
 
     private var nextResetText: String? {
@@ -1186,8 +1167,7 @@ private struct AccountUsageBlock: View {
                                         usedPercent: window.usedPercent,
                                         resetText: resetText(for: window),
                                         tint: tint,
-                                        metricText: quotaMetric(window),
-                                        showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
+                                        metricText: quotaMetric(window)
                                     )
                                 }
                             } else if let error = sub.errorMessage {
@@ -1220,8 +1200,7 @@ private struct AccountUsageBlock: View {
                             usedPercent: window.usedPercent,
                             resetText: resetText(for: window),
                             tint: tint,
-                            metricText: quotaMetric(window),
-                            showUsedPrimary: !(serviceType == .antigravity || serviceType == .gemini)
+                            metricText: quotaMetric(window)
                         )
                     }
                     if let error = usage.errorMessage, !error.isEmpty {

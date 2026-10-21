@@ -46,7 +46,21 @@ struct KiroEventDecoder {
         let message = frame.payload["message"] as? String ?? frame.payload["reason"] as? String ?? frame.eventType
         let data = try? JSONSerialization.data(withJSONObject: frame.payload)
         let details = data.flatMap { String(data: $0, encoding: .utf8) } ?? message
-        let status = kind.contains("throttl") ? 429 : kind.contains("validation") ? 400 : 502
+        let upper = details.uppercased()
+        let status: Int
+        if upper.contains("MONTHLY_REQUEST_COUNT") || upper.contains("MONTHLY REQUEST LIMIT") {
+            status = 402
+        } else if kind.contains("throttl") {
+            status = 429
+        } else if kind.contains("unauthor") {
+            status = 401
+        } else if kind.contains("accessdenied") {
+            status = 403
+        } else if kind.contains("validation") {
+            status = 400
+        } else {
+            status = 502
+        }
         return .failure(status: status, message: "\(frame.eventType): \(details)")
     }
 }

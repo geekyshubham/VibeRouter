@@ -28,6 +28,10 @@ struct KiroStabilitySpec {
     }
 
     static func main() async throws {
+        check(ModelProviderLabel.pickerOption(for: ["id": "gpt-image-2"]) == nil, "image-only models stay out of the Claude picker")
+        check(ModelProviderLabel.pickerOption(for: ["id": "grok-imagine-video"]) == nil, "video-only models stay out of the Claude picker")
+        check(ModelProviderLabel.pickerOption(for: ["id": "gpt-6.1-sol", "providers": ["codex"]]) != nil, "Codex text models remain selectable")
+        checks += try await KiroAccountFailoverSpec.run()
         // An unchanged token in the early-refresh window must never switch
         // the request onto an account with different model entitlements.
         let tokenNow = Date(timeIntervalSince1970: 1_800_000_000)
@@ -180,6 +184,30 @@ struct KiroStabilitySpec {
         process.standardOutput = output; process.standardError = Pipe()
         try process.run(); defer { process.terminate() }
         let port = Int(String(decoding: output.fileHandleForReading.availableData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))!
+        let httpAccounts = [
+            KiroAccountPool.Candidate(token: "synthetic-old", credential: .cliOIDC),
+            KiroAccountPool.Candidate(token: "synthetic-free", credential: .authFile("kiro-free.json")),
+            KiroAccountPool.Candidate(token: "synthetic-paid", credential: .authFile("kiro-paid.json")),
+        ]
+        var httpAttempts: [String] = []
+        let httpPool = KiroAccountPool()
+        let httpRequest = KiroDirectProvider.translateRequest(anthropicBody: body([["role": "user", "content": "continue"]]))!
+        for _ in 0..<2 {
+            let result = await KiroDirectProvider.send(conversationState: httpRequest.conversationState,
+                pool: httpPool, readCandidates: { _ in httpAccounts }, post: { account, payload, emit in
+                    httpAttempts.append(account.token)
+                    return await KiroDirectProvider.postKiro(url: URL(string: "http://127.0.0.1:\(port)/account-failover")!,
+                        token: account.token, credential: account.credential, payload: payload, onFrame: emit)
+                })
+            if case .success(let reply, let delivery) = result {
+                check(reply.text == "first second" && delivery.credential == httpAccounts[2].credential, "HTTP 402 and INVALID_MODEL_ID fail over through actual URLSession/AWS frames")
+            } else { preconditionFailure("HTTP account failover failed") }
+        }
+        check(httpAttempts == ["synthetic-old", "synthetic-free", "synthetic-paid", "synthetic-paid"], "real transport skips cooled accounts on subsequent turns")
+        let monthlyException = await KiroDirectProvider.postKiro(url: URL(string: "http://127.0.0.1:\(port)/monthly-exception")!,
+            token: "synthetic", credential: .cliOIDC, payload: [:]) { _ in }
+        if case .failure(let status, _) = monthlyException { check(status == 402, "AWS monthly quota exceptions use billing cooldown") }
+        else { preconditionFailure("monthly exception must fail") }
         let start = Date(); var first: TimeInterval = 999; var frames = 0
         let reply = await KiroDirectProvider.postKiro(url: URL(string: "http://127.0.0.1:\(port)/delayed")!, token: "synthetic", credential: .cliSocial, payload: [:]) { _ in
             first = min(first, Date().timeIntervalSince(start)); frames += 1

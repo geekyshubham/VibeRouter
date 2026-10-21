@@ -954,7 +954,7 @@ class ServerManager: ObservableObject {
             customProviderAuthRecords: customAuthRecords.map {
                 ConfigProviderAuthRecord(
                     providerID: $0.providerID,
-                    apiKey: $0.apiKey,
+                    apiKey: OpenCodeConsoleSession.bearer(stored: $0.apiKey, providerID: $0.providerID),
                     isDisabled: $0.isDisabled
                 )
             },

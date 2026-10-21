@@ -26,6 +26,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var configInputPoller: DispatchSourceTimer?
     private var pendingAuthRefresh: DispatchWorkItem?
     private var polledConfigInputsFingerprint = ""
+    private var isStartingServer = false
+    private var serverStartGeneration = 0
     
     override init() {
         // Sparkle auto-checks disabled (no feed configured for VibeRouter).
@@ -140,6 +142,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     @objc private func handleCLIServerRestart() {
+        isStartingServer = false
+        serverStartGeneration += 1
         thinkingProxy.stop()
         serverManager.stop { [weak self] in self?.startServer() }
     }
@@ -392,27 +396,35 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     }
 
     func startServer() {
+        // The app autostarts, and a CLI start can arrive while its listeners
+        // are still coming up. Share that startup instead of binding twice.
+        guard !isStartingServer, !serverManager.isRunning else { return }
+        isStartingServer = true
+        serverStartGeneration += 1
         // Start the thinking proxy first (port 8317)
         thinkingProxy.start()
         
         // Poll for thinking proxy readiness with timeout
-        pollForProxyReadiness(attempts: 0, maxAttempts: 60, intervalMs: 50)
+        pollForProxyReadiness(attempts: 0, maxAttempts: 60, intervalMs: 50, generation: serverStartGeneration)
     }
     
-    private func pollForProxyReadiness(attempts: Int, maxAttempts: Int, intervalMs: Int) {
+    private func pollForProxyReadiness(attempts: Int, maxAttempts: Int, intervalMs: Int, generation: Int) {
+        guard isStartingServer, generation == serverStartGeneration else { return }
         // Check if proxy is running
         if thinkingProxy.isRunning {
             // Success - proceed to start backend
             serverManager.start { [weak self] success in
                 DispatchQueue.main.async {
+                    guard let self, generation == self.serverStartGeneration else { return }
+                    self.isStartingServer = false
                     if success {
-                        self?.updateMenuBarStatus()
+                        self.updateMenuBarStatus()
                         // User always connects to 8317 (thinking proxy)
-                        self?.showNotification(title: "Server Started", body: "VibeRouter is now running")
+                        self.showNotification(title: "Server Started", body: "VibeRouter is now running")
                     } else {
                         // Backend failed - stop the proxy to keep state consistent
-                        self?.thinkingProxy.stop()
-                        self?.showNotification(title: "Server Failed", body: "Could not start backend server on port 8318")
+                        self.thinkingProxy.stop()
+                        self.showNotification(title: "Server Failed", body: "Could not start backend server on port 8318")
                     }
                 }
             }
@@ -422,9 +434,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // Check if we've exceeded timeout
         if attempts >= maxAttempts {
             DispatchQueue.main.async { [weak self] in
+                guard let self, generation == self.serverStartGeneration else { return }
+                self.isStartingServer = false
                 // Clean up partially initialized proxy
-                self?.thinkingProxy.stop()
-                self?.showNotification(title: "Server Failed", body: "Could not start thinking proxy on port 8317 (timeout)")
+                self.thinkingProxy.stop()
+                self.showNotification(title: "Server Failed", body: "Could not start thinking proxy on port 8317 (timeout)")
             }
             return
         }
@@ -432,11 +446,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // Schedule next poll
         let interval = Double(intervalMs) / 1000.0
         DispatchQueue.main.asyncAfter(deadline: .now() + interval) { [weak self] in
-            self?.pollForProxyReadiness(attempts: attempts + 1, maxAttempts: maxAttempts, intervalMs: intervalMs)
+            self?.pollForProxyReadiness(attempts: attempts + 1, maxAttempts: maxAttempts, intervalMs: intervalMs, generation: generation)
         }
     }
 
     func stopServer() {
+        isStartingServer = false
+        serverStartGeneration += 1
         // Stop the thinking proxy first to stop accepting new requests
         thinkingProxy.stop()
         

@@ -16,6 +16,12 @@ enum NativeSwitchOutcome: Equatable {
     case failure(message: String)
 }
 
+/// Where an Antigravity switch landed besides the IDE: the agy CLI and T3 Code's agy ACP profiles.
+struct AntigravitySideStores: Equatable {
+    let cli: AntigravityCLIToken.WriteResult
+    let acp: AntigravityACPToken.ApplyResult
+}
+
 /// Detects which account is active in the native CLI/desktop tools and switches the
 /// active session by rewriting the native auth files and (optionally) restarting the
 /// associated desktop app — the same technique Cockpit Tools uses.
@@ -330,7 +336,7 @@ final class NativeSessionManager: ObservableObject {
             _ = await quitApps(for: type)
         }
 
-        let (writeError, cliResult): (String?, AntigravityCLIToken.WriteResult?) = await Task.detached(
+        let (writeError, sideStores): (String?, AntigravitySideStores?) = await Task.detached(
             priority: .userInitiated
         ) { [self] in
             do {
@@ -393,7 +399,7 @@ final class NativeSessionManager: ObservableObject {
         } else {
             msg += " Restart the app (or enable restart-on-switch in Settings) to load it."
         }
-        switch cliResult {
+        switch sideStores?.cli {
         case .updated:
             msg += " agy CLI switched too; restart running agy sessions to load it."
         case .unrecognized:
@@ -401,6 +407,16 @@ final class NativeSessionManager: ObservableObject {
         case .writeFailed:
             msg += " Could not update the agy CLI token, so agy was left on its previous account."
         case .notSignedIn, nil:
+            break
+        }
+        switch sideStores?.acp {
+        case .updated:
+            msg += " T3 Code's Antigravity switched too; start a new T3 thread to use it."
+        case .missingRefreshToken:
+            msg += " T3 Code's Antigravity was left on its previous account because this login has no refresh token."
+        case .writeFailed:
+            msg += " Could not update T3 Code's Antigravity login, so it was left on its previous account."
+        case .noProfiles, nil:
             break
         }
         return .switched(message: msg)
@@ -597,7 +613,7 @@ final class NativeSessionManager: ObservableObject {
 
     /// Inject OAuth into Antigravity IDE `state.vscdb` (same wire format Cockpit uses) and
     /// update Cockpit's `current_account.json` pointer for detection.
-    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws -> AntigravityCLIToken.WriteResult {
+    private func writeAntigravityAuth(from src: [String: Any], email: String?) throws -> AntigravitySideStores {
         guard let access = nonEmpty(src["access_token"]) else {
             throw SwitchError.missingToken("access_token")
         }
@@ -623,13 +639,21 @@ final class NativeSessionManager: ObservableObject {
             try backupThenWrite(json: payload, to: url)
         }
 
-        return AntigravityCLIToken.apply(
+        let expiry = Date(timeIntervalSince1970: TimeInterval(expirySeconds))
+        let cli = AntigravityCLIToken.apply(
             accessToken: access,
             refreshToken: refresh,
             idToken: nonEmpty(src["id_token"]),
             email: email,
-            expiry: Date(timeIntervalSince1970: TimeInterval(expirySeconds))
+            expiry: expiry
         )
+        let acp = AntigravityACPToken.apply(
+            client: TokenRefreshService.antigravityACPClient,
+            accessToken: access,
+            refreshToken: refresh,
+            expiry: expiry
+        )
+        return AntigravitySideStores(cli: cli, acp: acp)
     }
 
     private func writeCursorAuth(from src: [String: Any]) throws {

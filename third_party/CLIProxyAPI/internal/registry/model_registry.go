@@ -835,6 +835,17 @@ func (r *ModelRegistry) buildAvailableModelsLocked(handlerType string, now time.
 		if effectiveClients > 0 || (availableClients > 0 && (expiredClients > 0 || cooldownSuspended > 0) && otherSuspended == 0) {
 			model := r.convertModelToMap(registration.Info, handlerType)
 			if model != nil {
+				// owned_by describes model metadata, which may name its author.
+				// Publish all serving providers so gateways can label shared IDs
+				// without attributing them to whichever client registered first.
+				providers := make([]string, 0, len(registration.Providers))
+				for provider, count := range registration.Providers {
+					if count > 0 {
+						providers = append(providers, provider)
+					}
+				}
+				sort.Strings(providers)
+				model["providers"] = providers
 				models = append(models, model)
 			}
 		}

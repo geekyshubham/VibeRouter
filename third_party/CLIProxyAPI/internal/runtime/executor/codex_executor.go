@@ -128,6 +128,13 @@ func codexTerminalStreamErr(eventData []byte) (statusErr, []byte, bool) {
 		if len(body) == 0 {
 			body = codexTerminalErrorBody(eventData, "error")
 		}
+	case "response.incomplete":
+		// Truncation (max_output_tokens) is the client's limit, not an upstream
+		// outage. 502 would cool this model for a minute in MarkResult.
+		reason := gjson.GetBytes(eventData, "response.incomplete_details.reason").String()
+		body = []byte(`{"error":{"type":"invalid_request_error","code":"incomplete_response"}}`)
+		body, _ = sjson.SetBytes(body, "error.message", "Codex response incomplete: "+reason)
+		return newCodexStatusErr(http.StatusBadRequest, body), body, true
 	default:
 		return statusErr{}, nil, false
 	}
@@ -815,6 +822,28 @@ func (e *CodexExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	return httpClient.Do(httpReq)
 }
 
+// Claude compaction is conversation maintenance. It otherwise inherits the
+// coding turn's high/adaptive reasoning effort, adding minutes to a long summary.
+// Use Claude's explicit request classification rather than inspecting user text.
+func applyCodexClaudeCompactionEffort(from sdktranslator.Format, headers http.Header, body []byte) []byte {
+	if !sourceFormatEqual(from, sdktranslator.FormatClaude) ||
+		!strings.EqualFold(strings.TrimSpace(headers.Get("X-Claude-Code-Request-Class")), "compaction") {
+		return body
+	}
+	switch gjson.GetBytes(body, "reasoning.effort").String() {
+	case "medium", "high", "xhigh", "max":
+		body, _ = sjson.SetBytes(body, "reasoning.effort", "low")
+	}
+	// GPT-5/6 support verbosity independently of reasoning. Compaction needs a
+	// compact continuation summary, rather than a long narrated reconstruction.
+	// Keep the full history and output budget; do not truncate the summary.
+	model := strings.ToLower(gjson.GetBytes(body, "model").String())
+	if strings.HasPrefix(model, "gpt-5") || strings.HasPrefix(model, "gpt-6") {
+		body, _ = sjson.SetBytes(body, "text.verbosity", "low")
+	}
+	return body
+}
+
 func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options) (resp cliproxyexecutor.Response, err error) {
 	if opts.Alt == "responses/compact" {
 		return e.executeCompact(ctx, auth, req, opts)
@@ -859,6 +888,7 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	if helps.ShouldInjectImageGenerationTool(e.cfg, requestPath, opts.Headers) {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = applyCodexClaudeCompactionEffort(from, opts.Headers, body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
@@ -913,18 +943,13 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		err = newCodexStatusErr(httpResp.StatusCode, b)
 		return resp, err
 	}
-	data, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		helps.RecordAPIResponseError(ctx, e.cfg, err)
-		return resp, err
-	}
-	upstreamData := applyCodexIdentityConfuseResponsePayload(data, identityState)
-	helps.AppendAPIResponseChunk(ctx, e.cfg, upstreamData)
-
-	lines := bytes.Split(upstreamData, []byte("\n"))
+	scanner := bufio.NewScanner(httpResp.Body)
+	scanner.Buffer(nil, 52_428_800) // Match the streaming path's 50MB event limit.
 	outputItemsByIndex := make(map[int64][]byte)
 	var outputItemsFallback [][]byte
-	for _, line := range lines {
+	for scanner.Scan() {
+		line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
+		helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 		if !bytes.HasPrefix(line, dataTag) {
 			continue
 		}
@@ -990,6 +1015,10 @@ func (e *CodexExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, originalPayload, body, clientCompletedData, &param)
 		resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 		return resp, nil
+	}
+	if errScan := scanner.Err(); errScan != nil {
+		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		return resp, errScan
 	}
 	err = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
 	return resp, err
@@ -1137,6 +1166,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	if helps.ShouldInjectImageGenerationTool(e.cfg, requestPath, opts.Headers) {
 		body = ensureImageGenerationTool(body, baseModel, auth)
 	}
+	body = applyCodexClaudeCompactionEffort(from, opts.Headers, body)
 	body = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "codex executor", body)
 	body, replayScope := applyCodexReasoningReplayCache(ctx, from, req, opts, body)
 	if sourceFormatEqual(from, sdktranslator.FormatClaude) {
@@ -1208,6 +1238,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		outputItemsByIndex := make(map[int64][]byte)
 		var outputItemsFallback [][]byte
 		for scanner.Scan() {
+			completed := false
 			line := applyCodexIdentityConfuseResponsePayload(scanner.Bytes(), identityState)
 			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
 			translatedLine := bytes.Clone(line)
@@ -1228,6 +1259,7 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 				case "response.output_item.done":
 					collectCodexOutputItemDone(data, outputItemsByIndex, &outputItemsFallback)
 				case "response.completed":
+					completed = true
 					if detail, ok := helps.ParseCodexUsage(data); ok {
 						reporter.Publish(ctx, detail)
 					}
@@ -1247,15 +1279,22 @@ func (e *CodexExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 					return
 				}
 			}
-		}
-		if errScan := scanner.Err(); errScan != nil {
-			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.PublishFailure(ctx, errScan)
-			select {
-			case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
-			case <-ctx.Done():
+			if completed {
+				return
 			}
 		}
+
+		errScan := scanner.Err()
+		if errScan == nil {
+			errScan = statusErr{code: 408, msg: "stream error: stream disconnected before completion: stream closed before response.completed"}
+		}
+		helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+		reporter.PublishFailure(ctx, errScan)
+		select {
+		case out <- cliproxyexecutor.StreamChunk{Err: errScan}:
+		case <-ctx.Done():
+		}
+
 	}()
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
 }

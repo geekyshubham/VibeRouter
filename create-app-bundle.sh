@@ -102,14 +102,13 @@ fi
 echo -e "${BLUE}Copying Info.plist...${NC}"
 cp "$SRC_DIR/Info.plist" "$APP_DIR/Contents/"
 
-# Inject version from git tag or environment variable
+# Use the version declared by this source tree. The nearest reachable tag may
+# belong to an older release when the release commit has not been tagged yet.
 VERSION="${APP_VERSION:-}"
 if [ -z "$VERSION" ]; then
-    # Try to get version from git tag
-    VERSION=$(git describe --tags --abbrev=0 2>/dev/null || echo "1.0.0")
-    # Remove 'v' prefix if present
-    VERSION="${VERSION#v}"
+    VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$SRC_DIR/Info.plist")
 fi
+VERSION="${VERSION#v}"
 
 # Extract build number from full git describe (e.g., v1.0.0-5-g1234567 -> 5, or just use commit count)
 BUILD_NUMBER=$(git rev-list --count HEAD 2>/dev/null || echo "1")
@@ -138,7 +137,7 @@ if [ -z "$CODESIGN_IDENTITY" ]; then
     CODESIGN_IDENTITY=$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/')
 fi
 
-if [ -n "$CODESIGN_IDENTITY" ]; then
+if [ -n "$CODESIGN_IDENTITY" ] && [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo -e "${GREEN}Signing with: $CODESIGN_IDENTITY${NC}"
     
     # Clean up extended attributes and resource forks that prevent signing

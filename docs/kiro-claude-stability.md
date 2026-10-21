@@ -1,5 +1,63 @@
 # Claude Code through Kiro: stability repair
 
+## Automatic account failover repair on 2026-10-05
+
+The October 5 session's HTTP 402 (`MONTHLY_REQUEST_COUNT`) came from the
+previous Kiro CLI login. The successful delivery ledger changed account identity
+at 07:39 UTC after the native CLI login changed. Adding a saved account alone
+could not cause that switch: Kiro's Swift direct handler bypassed the Go auth
+manager, selected only the preferred CLI token, and returned 402/429 failures
+without trying the remaining configured credentials. The quota card could show
+another login's remaining credits while execution remained on the CLI login.
+
+The execution route now discovers both native CLI credential sources and every
+enabled `kiro-*.json` account on each turn. It deduplicates tokens, respects
+disabled accounts and the Kiro provider toggle, refreshes credentials through
+their original source, and supports each account's region/profile ARN.
+`KiroAccountPool` maintains shared cooldowns across concurrent sessions and keeps
+using the account that successfully served the requested model. Newly added
+accounts join without restarting the app.
+
+Before response content arrives, monthly quota failures (402), rate limits
+(429), failed authentication/permission checks (401/403), transient upstream
+failures and `INVALID_MODEL_ID` try the next enabled Kiro account. The requested
+model, conversation ID, history, tool schemas and tool results remain intact.
+An account-specific model rejection does not disable that account's other models.
+401 first refreshes the original credential once. Monthly quota/auth failures
+cool down for 30 minutes, model entitlement failures for 12 hours, and rate or
+transient failures for one minute. Freshly configured credentials can recover
+without inheriting the previous login's cooldown. Cooldowns are process-local.
+
+Metadata-only events do not prevent failover. After text or a tool event has
+arrived, a failure cools down the account for future turns but does not replay
+the partially delivered response. Malformed and oversized requests keep their
+existing validation/compaction behavior. There is no automatic model downgrade
+or switch to another provider for a `kiro/` model.
+
+The existing single-login `accessToken` helper remains for callers that need
+that login specifically; execution uses the account pool. Its older isolation
+tests therefore still apply to refresh behavior rather than execution failover.
+
+Verification: `python3 scripts/verify-kiro-stability.py` exercises production
+Swift objects, synthetic enabled/disabled accounts in temporary directories,
+concurrent cooldown selection, authentication refresh, no replay after content,
+and real local HTTP 402/model-denial/AWS-event-stream failover. The shared Go
+router is covered by 90 provider/status/transport combinations in
+`TestProviderAccountsFailOverWithoutLosingConversation`, covering Codex, Claude,
+Gemini, Antigravity, xAI and OpenAI-compatible providers. Those paths already
+perform account failover and did not require production changes for this issue.
+
+The completed checks passed: 89 Kiro regressions (including 32 new failover
+checks), 58 account-isolation regressions and the 90 shared-router combinations
+with Go race detection. The release app was ad-hoc signed, signature-verified,
+installed at `/Applications/VibeRouter.app` and restarted between requests.
+The installed binary matches the generated bundle. A live
+`claude-viberouter -p --model kiro/claude-opus-5.5` request returned
+`VIBEROUTER_FAILOVER_BUILD_OK`. Native Claude settings retained their SHA-256.
+Source snapshots and the previous installed app are backed up under
+`~/.local/share/viberouter-recovery/20261005-account-failover-152352/`.
+
+
 The `claude-viberouter` session used for the regression investigation
 reported stalls on long or large-context tasks, image failures, and identical
 status for two different Codex workspace members. The route uses

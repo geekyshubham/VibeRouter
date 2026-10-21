@@ -19,6 +19,8 @@ enum TokenRefreshService {
     private static let googleClientID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
     private static let googleClientSecret = "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"
     private static let kimiClientID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+    /// The agy ACP server refreshes stored logins with the client that minted them.
+    static let antigravityACPClient = AntigravityACPToken.OAuthClient(id: googleClientID, secret: googleClientSecret)
     /// Public Cursor desktop OAuth client (same one Cockpit Tools uses).
     private static let cursorClientID = "KbZUR41cY7W6zRSdpSUJ7I7mLYBKOCmB"
 
@@ -154,6 +156,7 @@ enum TokenRefreshService {
         }
 
         pushAntigravityTokensToCLIIfFresher(authDirectory: authDir)
+        pushAntigravityTokensToACPIfFresher(authDirectory: authDir)
 
         if refreshed > 0 {
             await MainActor.run {
@@ -207,6 +210,7 @@ enum TokenRefreshService {
             if kind == "antigravity",
                file.deletingLastPathComponent().standardizedFileURL == realAuthDir.standardizedFileURL {
                 pushAntigravityTokensToCLIIfFresher(authDirectory: realAuthDir)
+                pushAntigravityTokensToACPIfFresher(authDirectory: realAuthDir)
             }
             await MainActor.run {
                 NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
@@ -379,6 +383,50 @@ enum TokenRefreshService {
             return result == .updated
         }
         return false
+    }
+
+    /// Keep T3 Code's agy ACP profiles on VibeRouter's newest access token for the login they hold.
+    /// A profile that was never signed in follows the account the agy CLI was switched to.
+    @discardableResult
+    static func pushAntigravityTokensToACPIfFresher(authDirectory: URL) -> Int {
+        let profiles = AntigravityACPToken.profiles()
+        guard !profiles.isEmpty,
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: authDirectory,
+                  includingPropertiesForKeys: nil
+              )
+        else { return 0 }
+        let accounts = files
+            .filter { $0.pathExtension == "json" }
+            .compactMap { NativeUsageFetcher.readAuthPayload(at: $0) }
+            .filter { ($0["type"] as? String)?.lowercased() == "antigravity" }
+            .map(flattenedAuth)
+        let activeRefresh = AntigravityCLIToken.currentSnapshot()?.refreshToken
+
+        var wrote = 0
+        for profile in profiles {
+            let current = AntigravityACPToken.snapshot(at: profile)
+            guard let target = current?.refreshToken ?? activeRefresh,
+                  let account = accounts.first(where: { refreshToken(from: $0) == target }),
+                  let access = stringValue(account, keys: ["access_token"]),
+                  access != current?.accessToken,
+                  let expiry = accessTokenExpiry(from: account),
+                  expiry > Date(),
+                  expiry > (current?.expiry ?? .distantPast)
+            else { continue }
+            if AntigravityACPToken.write(
+                profile: profile,
+                client: antigravityACPClient,
+                accessToken: access,
+                refreshToken: target,
+                expiry: expiry
+            ) {
+                wrote += 1
+                NSLog("[TokenRefresh] Handed Antigravity token to T3 Code ACP profile %@",
+                      String(profile.deletingLastPathComponent().lastPathComponent.prefix(12)))
+            }
+        }
+        return wrote
     }
 
     /// Official Codex CLI/desktop share the same rotating token via ~/.codex/auth.json + keychain.

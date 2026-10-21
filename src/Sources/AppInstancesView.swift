@@ -323,10 +323,6 @@ struct AppInstancesView: View {
 
     private func boundLabel(_ account: AuthAccount) -> String {
         if let peak = peakUsed(account) {
-            // Antigravity/Gemini: Cockpit-style remaining%.
-            if account.type == .antigravity || account.type == .gemini {
-                return "\(account.baseDisplayName) · \(Int((100 - peak).rounded()))% left"
-            }
             return "\(account.baseDisplayName) · \(Int(peak.rounded()))%"
         }
         return account.baseDisplayName
@@ -340,9 +336,6 @@ struct AppInstancesView: View {
         guard let account = boundAccount(for: instance),
               let peak = peakUsed(account)
         else { return nil }
-        if account.type == .antigravity || account.type == .gemini {
-            return "\(Int((100 - peak).rounded()))% left"
-        }
         return "\(Int(peak.rounded()))% used"
     }
 
