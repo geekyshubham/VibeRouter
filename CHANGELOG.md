@@ -6,6 +6,20 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.4] - 2026-10-21
+
+### Fixed
+- Antigravity and Gemini collapsed badges show Google weekly usage as a used percent. A full Claude or GPT pool no longer reads as 100% when Gemini weekly is the limit that matters.
+- OpenCode Go uses the signed-in Console session when the stored API key is expired.
+- A truncated Codex reply is a client error, so one incomplete response no longer cools that account.
+- The thinking proxy can start again after its listener fails.
+- Claude quota values survive a restart, polling backs off when the API is cooling down, and native session renewal no longer races the Claude CLI.
+- Claude auto mode keeps working on translated gateway routes, including the server-side safeguard protocol.
+- Grok quota labels follow the billing period the API reports.
+
+### Changed
+- Switching the Antigravity account updates the agy CLI login. The Keychain token is passed on standard input.
+
 ## [1.3.3] - 2026-10-02
 
 ### Fixed
@@ -216,6 +230,7 @@ Initial VibeRouter release — usage limits, account import, session reliability
 - Analytics accuracy (Codex deltas, model name validation, Gemini/Antigravity double-count)
 - False session expiry when refresh token remains valid
 
+[1.3.4]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.3.4
 [1.3.3]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.3.3
 [1.2.4]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.4
 [1.2.3]: https://github.com/Geekyshubham/VibeRouter/releases/tag/v1.2.3
