@@ -841,7 +841,7 @@ struct SettingsView: View {
                             NSPasteboard.general.setString(ManagementCredentials.secretKey, forType: .string)
                             NSWorkspace.shared.open(ManagementCredentials.managementHTMLURL)
                         }
-                        .help("Opens \(ManagementCredentials.backendBaseURL)/management.html — key: \(ManagementCredentials.secretKey)")
+                        .help("Opens \(ManagementCredentials.backendBaseURL)/management.html and copies the management key")
                     }
 
                     HStack {
@@ -850,6 +850,8 @@ struct SettingsView: View {
                         Text(ManagementCredentials.secretKey)
                             .font(.caption.monospaced())
                             .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                             .textSelection(.enabled)
                         Button("Copy") {
                             NSPasteboard.general.clearContents()

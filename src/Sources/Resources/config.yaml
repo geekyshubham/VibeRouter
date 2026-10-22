@@ -10,10 +10,11 @@ amp-restrict-management-to-localhost: true
 
 # Management API settings (required for /management.html)
 # Empty secret-key disables the Management API entirely (404 on /v0/management/*).
-# Plaintext is bcrypt-hashed by CLIProxyAPI on first load.
+# Plaintext is bcrypt-hashed by CLIProxyAPI on first load. VibeRouter fills in a
+# per-user key from ~/.cli-proxy-api/management-key.txt at startup.
 remote-management:
   allow-remote: false
-  secret-key: "viberouter-admin"
+  secret-key: ""
 
 # Authentication directory (stores OAuth tokens)
 auth-dir: "~/.cli-proxy-api"
