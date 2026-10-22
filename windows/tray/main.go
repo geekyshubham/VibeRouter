@@ -5,10 +5,14 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 	"unsafe"
 )
@@ -59,6 +63,11 @@ const (
 	idOpen = 1
 	idQuit = 2
 	idShow = 3
+	idKey  = 4
+
+	gmemMoveable   = 0x0002
+	cfUnicodeText  = 13
+	managementFile = "management-key.txt"
 
 	createNoWindow     = 0x08000000
 	errorAlreadyExists = 183
@@ -92,6 +101,10 @@ var (
 	pShowWindow    = user32.NewProc("ShowWindow")
 	pFindWindow    = user32.NewProc("FindWindowW")
 	pDestroyMenu   = user32.NewProc("DestroyMenu")
+	pOpenClipboard = user32.NewProc("OpenClipboard")
+	pEmptyClip     = user32.NewProc("EmptyClipboard")
+	pSetClipData   = user32.NewProc("SetClipboardData")
+	pCloseClip     = user32.NewProc("CloseClipboard")
 
 	pNotifyIcon = shell32.NewProc("Shell_NotifyIconW")
 	pShellExec  = shell32.NewProc("ShellExecuteW")
@@ -99,6 +112,11 @@ var (
 
 	pModule      = kernel32.NewProc("GetModuleHandleW")
 	pCreateMutex = kernel32.NewProc("CreateMutexW")
+	pGlobalAlloc = kernel32.NewProc("GlobalAlloc")
+	pGlobalLock  = kernel32.NewProc("GlobalLock")
+	pGlobalUnlck = kernel32.NewProc("GlobalUnlock")
+	pGlobalFree  = kernel32.NewProc("GlobalFree")
+	pMoveMemory  = kernel32.NewProc("RtlMoveMemory")
 	pStock       = gdi32.NewProc("GetStockObject")
 )
 
@@ -154,6 +172,9 @@ var (
 	appIcon    uintptr
 	proxy      *exec.Cmd
 	trayOn     bool
+	mgmtKey    string
+
+	secretKeyLine = regexp.MustCompile(`(?m)(^remote-management:[ \t]*\r?\n(?:[ \t]+[^\r\n]*\r?\n)*?[ \t]+secret-key:)[^\r\n]*`)
 )
 
 func main() {
@@ -246,9 +267,10 @@ func wndProc(hwnd syscall.Handle, msg uint32, wparam, lparam uintptr) uintptr {
 	case wmCreate:
 		font, _, _ := pStock.Call(defaultGUI)
 		statusText = syscall.Handle(child(hwnd, "STATIC", "Starting the proxy…", 16, 16, 400, 52, 0))
-		openBtn := child(hwnd, "BUTTON", "Open console", 16, 84, 140, 32, idOpen)
-		quitBtn := child(hwnd, "BUTTON", "Quit", 168, 84, 100, 32, idQuit)
-		for _, h := range []uintptr{uintptr(statusText), openBtn, quitBtn} {
+		openBtn := child(hwnd, "BUTTON", "Open console", 16, 84, 130, 32, idOpen)
+		keyBtn := child(hwnd, "BUTTON", "Copy key", 156, 84, 110, 32, idKey)
+		quitBtn := child(hwnd, "BUTTON", "Quit", 276, 84, 100, 32, idQuit)
+		for _, h := range []uintptr{uintptr(statusText), openBtn, keyBtn, quitBtn} {
 			pSendMessage.Call(h, wmSetFont, font, 1)
 		}
 		return 0
@@ -256,6 +278,12 @@ func wndProc(hwnd syscall.Handle, msg uint32, wparam, lparam uintptr) uintptr {
 		switch int(wparam & 0xffff) {
 		case idOpen:
 			openConsole()
+		case idKey:
+			if copyToClipboard(hwnd, mgmtKey) {
+				setStatus("Management key copied. Paste it on the console login.")
+			} else {
+				setStatus("Could not copy the management key. Try again.")
+			}
 		case idShow:
 			pShowWindow.Call(uintptr(hwnd), swRestore)
 			pSetForeground.Call(uintptr(hwnd))
@@ -345,6 +373,7 @@ func showMenu(hwnd syscall.Handle) {
 	}
 	defer pDestroyMenu.Call(menu)
 	appendItem(menu, idOpen, "Open console")
+	appendItem(menu, idKey, "Copy management key")
 	appendItem(menu, idShow, "Show window")
 	appendItem(menu, idQuit, "Quit")
 	var pt point
@@ -380,7 +409,7 @@ func startProxy() error {
 		return err
 	}
 	proxy = cmd
-	setStatus("Proxy is running.\r\nAPI  http://127.0.0.1:8318/v1")
+	setStatus("Proxy is running.\r\nAPI  http://127.0.0.1:8318/v1\r\nConsole login: Copy key")
 	go func(c *exec.Cmd, hwnd syscall.Handle) {
 		_ = c.Wait()
 		pPostMessage.Call(uintptr(hwnd), wmProxyEnd, 0, 0)
@@ -396,27 +425,84 @@ func stopProxy() {
 	proxy = nil
 }
 
+// The proxy bcrypt-hashes secret-key on load, so the plaintext lives in its own
+// file and is written back into the config on every launch.
 func ensureConfig() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 	dir := filepath.Join(home, ".cli-proxy-api")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	dst := filepath.Join(dir, "config.yaml")
-	if _, err := os.Stat(dst); err == nil {
-		return dst, nil
-	}
-	src, err := os.ReadFile(filepath.Join(exeDir(), "config.yaml"))
+	key, err := managementKey(filepath.Join(dir, managementFile))
 	if err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(dst, src, 0o644); err != nil {
+	dst := filepath.Join(dir, "config.yaml")
+	cfg, err := os.ReadFile(dst)
+	if os.IsNotExist(err) {
+		cfg, err = os.ReadFile(filepath.Join(exeDir(), "config.yaml"))
+	}
+	if err != nil {
 		return "", err
 	}
+	updated := secretKeyLine.ReplaceAllString(string(cfg), `${1} "`+key+`"`)
+	if err := os.WriteFile(dst, []byte(updated), 0o600); err != nil {
+		return "", err
+	}
+	mgmtKey = key
 	return dst, nil
+}
+
+func managementKey(path string) (string, error) {
+	if b, err := os.ReadFile(path); err == nil {
+		if key := strings.TrimSpace(string(b)); len(key) >= 32 && !strings.ContainsAny(key, "\"\\") {
+			return key, nil
+		}
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	key := hex.EncodeToString(buf)
+	if err := os.WriteFile(path, []byte(key+"\r\n"), 0o600); err != nil {
+		return "", err
+	}
+	return key, nil
+}
+
+func copyToClipboard(hwnd syscall.Handle, text string) bool {
+	if text == "" {
+		return false
+	}
+	encoded, err := syscall.UTF16FromString(text)
+	if err != nil {
+		return false
+	}
+	if r, _, _ := pOpenClipboard.Call(uintptr(hwnd)); r == 0 {
+		return false
+	}
+	defer pCloseClip.Call()
+	pEmptyClip.Call()
+	size := uintptr(len(encoded)) * unsafe.Sizeof(encoded[0])
+	mem, _, _ := pGlobalAlloc.Call(gmemMoveable, size)
+	if mem == 0 {
+		return false
+	}
+	dst, _, _ := pGlobalLock.Call(mem)
+	if dst == 0 {
+		pGlobalFree.Call(mem)
+		return false
+	}
+	pMoveMemory.Call(dst, uintptr(unsafe.Pointer(&encoded[0])), size)
+	pGlobalUnlck.Call(mem)
+	if r, _, _ := pSetClipData.Call(cfUnicodeText, mem); r == 0 {
+		pGlobalFree.Call(mem)
+		return false
+	}
+	return true
 }
 
 func openConsole() {
