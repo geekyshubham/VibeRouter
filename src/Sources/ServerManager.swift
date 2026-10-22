@@ -364,7 +364,13 @@ class ServerManager: ObservableObject {
         }
     }
     
-    func runAuthCommand(_ command: AuthCommand, completion: @escaping (Bool, String) -> Void) {
+    /// With `opensBrowser: false` the OAuth URL is handed to `onAuthURL` instead of the default browser.
+    func runAuthCommand(
+        _ command: AuthCommand,
+        opensBrowser: Bool = true,
+        onAuthURL: ((String) -> Void)? = nil,
+        completion: @escaping (Bool, String) -> Void
+    ) {
         terminateActiveAuthProcessIfNeeded(reason: "starting a new auth attempt")
         cleanupStaleAuthProcesses()
 
@@ -432,6 +438,9 @@ class ServerManager: ObservableObject {
             return
         }
         authProcess.arguments = ["--config", loginStaging.configURL.path, "-\(loginFlag)"]
+        if !opensBrowser {
+            authProcess.arguments?.append("-no-browser")
+        }
         
         // Create pipes for output
         let outputPipe = Pipe()
@@ -442,7 +451,9 @@ class ServerManager: ObservableObject {
         authProcess.standardInput = inputPipe
         
         let capture = OutputCapture()
-        
+        let stdoutCapture = OutputCapture()
+        let authURLReported = OnceFlag()
+
         // For Gemini login, automatically send newline to accept default project
         if case .geminiLogin = command {
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + Timing.geminiDefaultProjectAcceptDelay) {
@@ -478,6 +489,13 @@ class ServerManager: ObservableObject {
             }
             if let str = String(data: data, encoding: .utf8), !str.isEmpty {
                 capture.append(str)
+                stdoutCapture.append(str)
+                if let onAuthURL,
+                   let url = Self.extractAuthURL(from: stdoutCapture.text),
+                   authURLReported.claim()
+                {
+                    DispatchQueue.main.async { onAuthURL(url) }
+                }
                 if case .copilotLogin = command {
                     NSLog("[Auth] Copilot output: %@", str)
                 }
@@ -555,7 +573,9 @@ class ServerManager: ObservableObject {
             NSLog("[Auth] Starting process: %@ with args: %@", bundledPath, authProcess.arguments?.joined(separator: " ") ?? "none")
             activeAuthProcess = authProcess
             try authProcess.run()
-            addLog("✓ Authentication process started (PID: \(authProcess.processIdentifier)) - browser should open shortly")
+            addLog(opensBrowser
+                ? "✓ Authentication process started (PID: \(authProcess.processIdentifier)) - browser should open shortly"
+                : "✓ Authentication process started (PID: \(authProcess.processIdentifier)) - waiting for login link")
             NSLog("[Auth] Process started with PID: %d", authProcess.processIdentifier)
 
             // Early UX for Copilot device code only — final success still waits for credentials.
@@ -591,8 +611,7 @@ class ServerManager: ObservableObject {
 
     /// Ensures auth completion fires exactly once (timeout vs termination race).
     private final class AuthCompletionBox {
-        private let lock = NSLock()
-        private var done = false
+        private let once = OnceFlag()
         private let completion: (Bool, String) -> Void
 
         init(completion: @escaping (Bool, String) -> Void) {
@@ -600,14 +619,37 @@ class ServerManager: ObservableObject {
         }
 
         func finish(_ success: Bool, _ message: String) {
-            lock.lock()
-            defer { lock.unlock() }
-            guard !done else { return }
-            done = true
+            guard once.claim() else { return }
             DispatchQueue.main.async {
                 self.completion(success, message)
             }
         }
+    }
+
+    private final class OnceFlag {
+        private let lock = NSLock()
+        private var done = false
+
+        func claim() -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !done else { return false }
+            done = true
+            return true
+        }
+    }
+
+    /// First standalone `https://` line printed by a `-no-browser` login (the OAuth authorize URL).
+    static func extractAuthURL(from text: String) -> String? {
+        for line in text.components(separatedBy: "\n").dropLast() {
+            let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.hasPrefix("https://"),
+                  !trimmed.contains(" "),
+                  URL(string: trimmed) != nil
+            else { continue }
+            return trimmed
+        }
+        return nil
     }
 
     private static func extractCopilotDeviceCode(from text: String) -> String? {
@@ -1385,6 +1427,10 @@ enum AuthCommand: Equatable {
 
     var opensBrowser: Bool {
         proxyLoginFlag != nil || self == .kiroLogin
+    }
+
+    var supportsCopyLink: Bool {
+        proxyLoginFlag != nil
     }
 
     var missingOAuthMessage: String {
