@@ -53,6 +53,15 @@ Also: one-click server start/stop, multi-account round-robin, provider enable/di
 
 Ad-hoc signed. First open: **Right-click → Open**, or `xattr -cr /Applications/VibeRouter.app`.
 
+### Windows
+
+On Windows, double-click `VibeRouter.exe`. The app sits on the taskbar and starts the same local proxy. Open console is `http://127.0.0.1:8318/management.html`. The API is `http://127.0.0.1:8318/v1`. There is no Thinking Proxy on port 8317.
+
+```bash
+./scripts/build-windows.sh          # dist/VibeRouter-windows-amd64.zip
+./scripts/build-windows.sh arm64    # Windows on ARM
+```
+
 ---
 
 ## Requirements
