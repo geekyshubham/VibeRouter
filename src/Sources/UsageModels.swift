@@ -58,6 +58,11 @@ struct RateWindow: Codable, Equatable {
         return ""
     }
 
+    /// Gemini 4 Argon's own weekly pool (paid Google AI Pro). Exhausting it leaves Gemini and Claude usable.
+    var isArgonPool: Bool {
+        (label ?? "").lowercased().contains("argon")
+    }
+
     /// Prefer an explicit label, otherwise fall back to the window duration.
     var displayTitle: String {
         if let label, !label.isEmpty { return label }
@@ -224,6 +229,7 @@ struct ProviderUsageSnapshot: Equatable, Identifiable {
         used: (RateWindow) -> Double
     ) -> Double? {
         let weekly = windows.filter { window in
+            guard !window.isArgonPool else { return false }
             let label = (window.label ?? "").lowercased()
             let google = label.contains("gemini") || label.contains("google")
             guard google else { return false }

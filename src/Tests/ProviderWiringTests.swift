@@ -238,6 +238,58 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertEqual(codex.headlineUsedPercent() ?? -1, 100, accuracy: 0.5)
     }
 
+    func testArgonPoolIsShownSeparatelyAndDoesNotDriveGeminiOrExhaustion() {
+        let future = "2099-01-01T00:00:00Z"
+        let summary: [String: Any] = [
+            "groups": [
+                [
+                    "displayName": "Gemini Models",
+                    "description": "Models within this group: Gemini Flash, Gemini Pro",
+                    "buckets": [
+                        ["bucketId": "gemini-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "resetTime": future, "remainingFraction": 0.8],
+                    ],
+                ],
+                [
+                    "displayName": "Claude and GPT models",
+                    "buckets": [
+                        ["bucketId": "3p-weekly", "displayName": "Weekly Limit Remaining", "window": "weekly", "resetTime": future, "remainingFraction": 1],
+                    ],
+                ],
+                [
+                    "displayName": "Gemini 4 Argon",
+                    "description": "For paid Pro plans, Argon quota is separate. Higher Argon quota (included as part of the larger Gemini quota bucket) is available on Ultra plans.",
+                    "buckets": [
+                        ["bucketId": "gemini-argon-wtu-weekly", "displayName": "Gemini 4 Argon Weekly Limit", "window": "weekly", "resetTime": future, "remainingFraction": 0],
+                    ],
+                ],
+            ]
+        ]
+        let groups = NativeUsageFetcher.cloudCodeQuotaGroups(from: summary)
+        XCTAssertEqual(groups.map(\.title), ["Gemini Models", "Claude and GPT models", "Gemini 4 Argon"])
+        let argon = groups[2]
+        XCTAssertEqual(argon.subtitle, "For paid Pro plans, Argon quota is separate.")
+        XCTAssertEqual(argon.windows.first?.label, "Argon · Weekly Limit")
+        XCTAssertEqual(argon.windows.first?.windowMinutes, 10_080)
+        XCTAssertEqual(argon.windows.first?.usedPercent ?? -1, 100, accuracy: 0.5)
+        XCTAssertEqual(argon.windows.first?.isArgonPool, true)
+        XCTAssertEqual(groups[0].windows.first?.isArgonPool, false)
+
+        let snapshot = ProviderUsageSnapshot(
+            id: "acct",
+            providerID: "antigravity",
+            windows: groups.flatMap(\.windows),
+            subAccounts: groups
+        )
+        XCTAssertEqual(snapshot.headlineUsedPercent() ?? -1, 20, accuracy: 0.5)
+        XCTAssertEqual(AntigravityAutoRouter.peakUsed(snapshot) ?? -1, 20, accuracy: 0.5)
+        XCTAssertFalse(AntigravityAutoRouter.isExhausted(snapshot: snapshot, threshold: 95))
+    }
+
+    func testAntigravityCLIUserAgentShape() {
+        XCTAssertTrue(NativeUsageFetcher.antigravityCLIUserAgent.hasPrefix("antigravity/cli/"))
+        XCTAssertTrue(NativeUsageFetcher.antigravityCLIUserAgent.contains(" darwin/"))
+    }
+
     func testGoogleWeeklyGroupBeatsFullClaudePoolOnTheOutside() {
         let detail: [String: Any] = [
             "buckets": [

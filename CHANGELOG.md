@@ -6,6 +6,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- Antigravity shows the separate Gemini 4 Argon weekly limit that paid Google AI Pro accounts get. Running out of Argon no longer marks the account exhausted or changes the Gemini badge.
+
 ## [1.3.4] - 2026-10-21
 
 ### Fixed

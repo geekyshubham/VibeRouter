@@ -16,10 +16,10 @@ import Foundation
 ///   Antigravity IDE pointer (`current_account.json` + state.vscdb) to that
 ///   account so opening Antigravity keeps working after exhaustion.
 enum AntigravityAutoRouter {
-    /// Peak used% across summary + detail windows for one snapshot.
+    /// Peak used% across summary + detail windows for one snapshot, ignoring the Argon-only pool.
     static func peakUsed(_ snapshot: ProviderUsageSnapshot?) -> Double? {
         guard let snapshot else { return nil }
-        let windows = snapshot.windows + snapshot.subAccounts.flatMap(\.windows)
+        let windows = (snapshot.windows + snapshot.subAccounts.flatMap(\.windows)).filter { !$0.isArgonPool }
         guard !windows.isEmpty else { return nil }
         return windows.map(\.usedPercent).max()
     }

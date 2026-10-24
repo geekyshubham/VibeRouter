@@ -1730,10 +1730,12 @@ enum NativeUsageFetcher {
         // Cockpit-style: summary groups (Gemini vs Claude/Opus) are the accurate shared pools.
         // Per-model buckets are a fallback / detail layer. loadCodeAssist supplies the
         // Google AI Pro / Starter / credits badge Cockpit shows per account.
+        // The summary only lists the separate Gemini 4 Argon pool to the Antigravity CLI identity.
         async let summaryJSON = postCloudCodeJSON(
             path: "v1internal:retrieveUserQuotaSummary",
             accessToken: accessToken,
-            body: bodyData
+            body: bodyData,
+            userAgent: providerID == ServiceType.antigravity.rawValue ? antigravityCLIUserAgent : cloudCodeUserAgent
         )
         async let detailJSON = postCloudCodeJSON(
             path: "v1internal:retrieveUserQuota",
@@ -1933,12 +1935,23 @@ enum NativeUsageFetcher {
         return "antigravity/\(ver) darwin/\(arch)"
     }
 
+    /// Antigravity CLI (`agy`) UA shape: `antigravity/cli/<ver> darwin/arm64`.
+    static var antigravityCLIUserAgent: String {
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "amd64"
+        #endif
+        return "antigravity/cli/1.4.3 darwin/\(arch)"
+    }
+
     private static func postCloudCodeJSON(
         path: String,
         accessToken: String,
-        body: Data
+        body: Data,
+        userAgent: String = cloudCodeUserAgent
     ) async -> CloudCodeHTTPResult {
-        let ua = cloudCodeUserAgent
+        let ua = userAgent
         var last: CloudCodeHTTPResult = CloudCodeHTTPResult(status: nil, json: nil, error: "No Cloud Code host tried")
         for base in cloudCodeBaseURLs {
             guard let url = URL(string: "\(base)/\(path)") else { continue }
@@ -1987,11 +2000,13 @@ enum NativeUsageFetcher {
         return groups.compactMap { group -> ProviderUsageSubAccount? in
             let groupTitle = stringValue(group, keys: ["displayName", "name"])
                 ?? "Model group"
-            let description = stringValue(group, keys: ["description"])
+            let description = stringValue(group, keys: ["description"]).map(firstSentence)
             let buckets = group["buckets"] as? [[String: Any]] ?? []
             let shortGroup = cloudCodeShortGroupName(groupTitle)
 
-            let mapped = buckets.compactMap { mapCloudCodeSummaryBucket($0, shortGroup: shortGroup) }
+            let mapped = buckets.compactMap {
+                mapCloudCodeSummaryBucket($0, groupTitle: groupTitle, shortGroup: shortGroup)
+            }
             // Prefer pool windows (5h/weekly). Drop bare model rows when pools exist.
             let poolWindows = mapped.filter { $0.windowMinutes != nil }
             let windows = poolWindows.isEmpty ? mapped : poolWindows
@@ -2039,8 +2054,16 @@ enum NativeUsageFetcher {
         return name.isEmpty ? "Limit" : name
     }
 
+    /// Group descriptions can run to several sentences; the card subtitle keeps the first.
+    private static func firstSentence(_ text: String) -> String {
+        guard let end = text.range(of: ". ") else { return text }
+        return String(text[..<end.lowerBound]) + "."
+    }
+
+    /// Gemini 4 Argon is its own weekly pool on paid Pro plans, not the shared Gemini quota.
     private static func isGoogleQuotaGroup(_ title: String) -> Bool {
         let lower = title.lowercased()
+        guard !lower.contains("argon") else { return false }
         return lower.contains("gemini") || lower.contains("google")
     }
 
@@ -2090,13 +2113,20 @@ enum NativeUsageFetcher {
         if lower.contains("claude") || lower.contains("gpt") || lower.contains("3p") {
             return "Claude/GPT"
         }
+        if lower.contains("argon") {
+            return "Argon"
+        }
         if lower.contains("gemini") {
             return "Gemini"
         }
         return groupTitle
     }
 
-    private static func mapCloudCodeSummaryBucket(_ bucket: [String: Any], shortGroup: String) -> RateWindow? {
+    private static func mapCloudCodeSummaryBucket(
+        _ bucket: [String: Any],
+        groupTitle: String,
+        shortGroup: String
+    ) -> RateWindow? {
         let resetTime = stringValue(bucket, keys: ["resetTime"])
         if let resetTime, resetTime.hasPrefix("1970-") { return nil }
 
@@ -2109,7 +2139,11 @@ enum NativeUsageFetcher {
             usedPercent = cloudCodeUsedPercent(remainingFraction: remaining)
         }
 
-        let displayName = cloudCodeBucketTitle(stringValue(bucket, keys: ["displayName"]) ?? "Limit")
+        var displayName = cloudCodeBucketTitle(stringValue(bucket, keys: ["displayName"]) ?? "Limit")
+        // "Gemini 4 Argon Weekly Limit" in group "Gemini 4 Argon" → "Weekly Limit".
+        if let range = displayName.range(of: "\(groupTitle) ", options: [.caseInsensitive, .anchored]) {
+            displayName.removeSubrange(range)
+        }
         let bucketId = (stringValue(bucket, keys: ["bucketId", "id"]) ?? "").lowercased()
         let windowField = (stringValue(bucket, keys: ["window"]) ?? "").lowercased()
         let blob = "\(bucketId) \(windowField) \(displayName.lowercased())"
