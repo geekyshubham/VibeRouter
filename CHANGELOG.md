@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An Experiential Labs card on the Overview shows the credit balance, spend today, this week, and this month, and the key's daily limit when one is set.
 
 ### Fixed
+- Claude Code's VibeRouter model picker now refreshes from the live catalog each time the proxy starts, so newly added providers such as Experiential Labs appear without re-running setup.
 - Antigravity shows the separate Gemini 4 Argon weekly limit that paid Google AI Pro accounts get. Running out of Argon no longer marks the account exhausted or changes the Gemini badge.
 
 ## [1.3.4] - 2026-10-21

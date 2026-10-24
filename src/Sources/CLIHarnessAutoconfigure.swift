@@ -215,6 +215,25 @@ enum CLIHarnessAutoconfigure {
         try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
     }
 
+    /// Rebuilds the Claude Code picker from the live catalog so newly added providers appear without re-running setup.
+    @discardableResult
+    static func refreshClaudeCodePicker(proxyPort: Int = 8317) -> Bool {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/settings.viberouter.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return true }
+        guard var root = try? readJSONForMerge(url), !root.isEmpty else { return true }
+        let options = fetchProxyModels(port: proxyPort).compactMap(ModelProviderLabel.pickerOption)
+        guard !options.isEmpty else { return false }
+        var picker = root["modelPicker"] as? [String: Any] ?? ["replaceBuiltInOptions": true]
+        if let current = picker["options"] as? [[String: Any]],
+           NSArray(array: current).isEqual(to: options) {
+            return true
+        }
+        picker["options"] = options
+        root["modelPicker"] = picker
+        return (try? writeJSON(root, to: url)) != nil
+    }
+
     /// Removes proxy settings that may have been persisted by an older launcher.
     /// Keep native model choices and unrelated Claude preferences intact.
     static func stripProxySettingsFromMainClaudeSettings(in claudeDir: URL) throws {

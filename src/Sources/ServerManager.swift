@@ -218,6 +218,14 @@ class ServerManager: ObservableObject {
         killOrphanedProcesses()
     }
     
+    private static func refreshClaudeCodePickerWhenReady(attempt: Int = 0) {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + (attempt == 0 ? 1 : 3)) {
+            if !CLIHarnessAutoconfigure.refreshClaudeCodePicker(), attempt < 10 {
+                refreshClaudeCodePickerWhenReady(attempt: attempt + 1)
+            }
+        }
+    }
+
     func start(completion: @escaping (Bool) -> Void) {
         guard !isRunning else {
             completion(true)
@@ -309,6 +317,7 @@ class ServerManager: ObservableObject {
                 guard let self = self else { return }
                 if let process = self.process, process.isRunning {
                     NotificationCenter.default.post(name: .serverStatusChanged, object: nil)
+                    Self.refreshClaudeCodePickerWhenReady()
                     completion(true)
                 } else {
                     self.addLog("⚠️ Server exited before becoming ready")
