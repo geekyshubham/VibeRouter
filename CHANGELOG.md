@@ -8,6 +8,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 - Experiential Labs as a bundled OpenAI-compatible gateway with 12 models, including its uncensored and roleplay models. Sampling parameters the gateway refuses are stripped before they are sent. The API key lives in `~/.cli-proxy-api`, not in the config.
+- An Experiential Labs card on the Overview shows the credit balance, spend today, this week, and this month, and the key's daily limit when one is set.
 
 ### Fixed
 - Antigravity shows the separate Gemini 4 Argon weekly limit that paid Google AI Pro accounts get. Running out of Argon no longer marks the account exhausted or changes the Gemini badge.

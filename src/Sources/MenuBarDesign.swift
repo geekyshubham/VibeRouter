@@ -36,6 +36,7 @@ enum MenuBarDesign {
         case .trae: return Color(red: 0.20, green: 0.55, blue: 0.95)
         case .zed: return Color(red: 0.70, green: 0.55, blue: 0.35)
         case .opencodeGo: return Color(red: 0.20, green: 0.72, blue: 0.80)
+        case .experientialLabs: return Color(red: 0.62, green: 0.36, blue: 0.90)
         }
     }
 

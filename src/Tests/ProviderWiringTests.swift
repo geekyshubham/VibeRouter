@@ -285,6 +285,23 @@ final class ProviderWiringTests: XCTestCase {
         XCTAssertFalse(AntigravityAutoRouter.isExhausted(snapshot: snapshot, threshold: 95))
     }
 
+    func testExperientialLabsCreditsSpendAndDailyLimit() {
+        let credits: [String: Any] = ["total_credits": 40.0, "total_usage": 0.023772532]
+        let key: [String: Any] = [
+            "usage_daily": 0.5, "usage_weekly": 1.25, "usage_monthly": 0.004, "limit": 2.0, "limit_remaining": 1.5,
+        ]
+        let windows = NativeUsageFetcher.experientialLabsWindows(credits: credits, key: key)
+        XCTAssertEqual(windows.map(\.label), ["Credits", "Daily key limit"])
+        XCTAssertEqual(windows[0].primaryMetricText, "$0.02 used of $40.00 · $39.98 left")
+        XCTAssertEqual(windows[0].resetDescription, "Spent $0.50 today · $1.25 this week · <$0.01 this month")
+        XCTAssertEqual(windows[1].usedPercent, 25, accuracy: 0.01)
+        XCTAssertEqual(NativeUsageFetcher.experientialLabsWindows(credits: credits, key: ["limit": NSNull()]).count, 1)
+        XCTAssertEqual(
+            AuthManager.serviceType(forAuthType: "openai-compat", raw: ["provider": "experientiallabs"]),
+            .experientialLabs
+        )
+    }
+
     func testAntigravityCLIUserAgentShape() {
         XCTAssertTrue(NativeUsageFetcher.antigravityCLIUserAgent.hasPrefix("antigravity/cli/"))
         XCTAssertTrue(NativeUsageFetcher.antigravityCLIUserAgent.contains(" darwin/"))

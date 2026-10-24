@@ -75,11 +75,12 @@ struct RateWindow: Codable, Equatable {
         case .creditsRemaining:
             if let remaining = remainingValue {
                 let unit = unitLabel ?? "credits"
+                let amount: (Double) -> String = unit == Self.usdUnit ? UsageNumberFormatter.usd : formatAmount
                 if let total = totalValue, total > 0 {
                     let used = max(0, total - remaining)
-                    return "\(formatAmount(used)) used of \(formatAmount(total)) · \(formatAmount(remaining)) left"
+                    return "\(amount(used)) used of \(amount(total)) · \(amount(remaining)) left"
                 }
-                return "\(formatAmount(remaining)) \(unit) left"
+                return unit == Self.usdUnit ? "\(amount(remaining)) left" : "\(amount(remaining)) \(unit) left"
             }
             fallthrough
         case .percent:
@@ -90,6 +91,8 @@ struct RateWindow: Codable, Equatable {
             return "\(usedText) · \(leftText)"
         }
     }
+
+    static let usdUnit = "USD"
 
     private func formatAmount(_ value: Double) -> String {
         let whole = abs(value.rounded() - value) < 0.001
@@ -640,6 +643,7 @@ extension ServiceType {
         case .trae: return "trae"
         case .zed: return "zed"
         case .opencodeGo: return ProviderCatalog.openCodeGoProviderName
+        case .experientialLabs: return ProviderCatalog.experientialLabsProviderName
         case .qwen: return nil
         }
     }

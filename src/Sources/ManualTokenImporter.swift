@@ -125,10 +125,10 @@ enum ManualTokenImporter {
                 throw ImportError.missingField("api_key")
             }
             parsed = try normalizeZai(key: key)
-        case .opencodeGo:
+        case .opencodeGo, .experientialLabs:
             // Stored by CustomProviderCredentialStore, not as a pasted auth record.
             throw ImportError.message(
-                "Add \(ServiceType.opencodeGo.displayName) keys under Settings → Providers, not by pasting a token."
+                "Add \(detected.displayName) keys under Settings → Providers, not by pasting a token."
             )
         }
         return try preserveIdentity(parsed, from: unwrapped)

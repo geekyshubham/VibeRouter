@@ -62,6 +62,8 @@ enum NativeUsageFetcher {
             )
         case .opencodeGo:
             return await fetchOpenCodeGoUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
+        case .experientialLabs:
+            return await fetchExperientialLabsUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .zai:
             return await fetchZaiUsage(authAccountID: authAccountID, providerID: providerID, payload: payload)
         case .kimi:
@@ -2325,6 +2327,125 @@ enum NativeUsageFetcher {
                 label: bucket.label,
                 displayStyle: .percent
             )
+        }
+    }
+
+    // MARK: - Experiential Labs
+
+    /// Credit balance from `GET /api/v1/credits` and this key's spend from `GET /api/v1/key`, both in USD.
+    private static func fetchExperientialLabsUsage(
+        authAccountID: String,
+        providerID: String,
+        payload: [String: Any]
+    ) async -> ProviderUsageSnapshot {
+        let apiKey = stringValue(payload, keys: ["api_key", "apiKey", "key"]) ?? ""
+        guard !apiKey.isEmpty else {
+            return .empty(authAccountID: authAccountID, providerID: providerID, error: "Missing Experiential Labs API key")
+        }
+        let label = stringValue(payload, keys: ["label"]) ?? maskAPIKey(apiKey)
+
+        async let creditsResult = getExperientialLabsJSON(path: "/api/v1/credits", apiKey: apiKey)
+        async let keyResult = getExperientialLabsJSON(path: "/api/v1/key", apiKey: apiKey)
+        let (credits, key) = await (creditsResult, keyResult)
+
+        if credits.status == 401 || key.status == 401 {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: label,
+                error: "API key rejected — replace this Experiential Labs key in Settings"
+            )
+        }
+        guard let creditsData = credits.json?["data"] as? [String: Any] else {
+            return .empty(
+                authAccountID: authAccountID,
+                providerID: providerID,
+                accountEmail: label,
+                error: credits.status.map { "Could not read Experiential Labs credits (HTTP \($0))" }
+                    ?? credits.error ?? "Could not read Experiential Labs credits"
+            )
+        }
+
+        let keyData = key.json?["data"] as? [String: Any]
+        let windows = experientialLabsWindows(credits: creditsData, key: keyData)
+        return ProviderUsageSnapshot(
+            id: authAccountID,
+            providerID: providerID,
+            source: "Experiential Labs API",
+            windows: windows,
+            subAccounts: [],
+            accountEmail: label,
+            planType: nil,
+            planLabel: keyData?["is_free_tier"] as? Bool == true ? "Free tier" : nil,
+            updatedAt: Date(),
+            errorMessage: windows.isEmpty ? "No credit balance reported for this key" : nil,
+            isRefreshing: false
+        )
+    }
+
+    /// Credits first (the card headline), then the key's daily USD cap when one is set.
+    static func experientialLabsWindows(credits: [String: Any], key: [String: Any]?) -> [RateWindow] {
+        var windows: [RateWindow] = []
+        if let total = doubleValue(credits, keys: ["total_credits"]) {
+            let used = doubleValue(credits, keys: ["total_usage"]) ?? 0
+            windows.append(RateWindow(
+                usedPercent: total > 0 ? clampPercent(used / total * 100) : 100,
+                resetDescription: key.flatMap(experientialLabsSpendLine),
+                label: "Credits",
+                remainingValue: max(0, total - used),
+                totalValue: total,
+                unitLabel: RateWindow.usdUnit,
+                displayStyle: .creditsRemaining
+            ))
+        }
+        if let key, let limit = doubleValue(key, keys: ["limit"]), limit > 0 {
+            let remaining = doubleValue(key, keys: ["limit_remaining"])
+                ?? max(0, limit - (doubleValue(key, keys: ["usage_daily"]) ?? 0))
+            windows.append(RateWindow(
+                usedPercent: clampPercent((limit - remaining) / limit * 100),
+                windowMinutes: 1_440,
+                label: "Daily key limit",
+                remainingValue: max(0, remaining),
+                totalValue: limit,
+                unitLabel: RateWindow.usdUnit,
+                displayStyle: .creditsRemaining
+            ))
+        }
+        return windows
+    }
+
+    /// "Spent $0.02 today · $0.02 this week · $0.02 this month".
+    static func experientialLabsSpendLine(_ key: [String: Any]) -> String? {
+        let periods: [(key: String, name: String)] = [
+            ("usage_daily", "today"), ("usage_weekly", "this week"), ("usage_monthly", "this month"),
+        ]
+        let parts = periods.compactMap { period in
+            doubleValue(key, keys: [period.key]).map { "\(UsageNumberFormatter.usd($0)) \(period.name)" }
+        }
+        return parts.isEmpty ? nil : "Spent " + parts.joined(separator: " · ")
+    }
+
+    private static func getExperientialLabsJSON(path: String, apiKey: String) async -> CloudCodeHTTPResult {
+        guard let url = URL(string: "https://api.experientiallabs.ai\(path)") else {
+            return CloudCodeHTTPResult(status: nil, json: nil, error: "Invalid usage URL")
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode
+            guard let status, (200...299).contains(status) else {
+                return CloudCodeHTTPResult(status: status, json: nil, error: nil)
+            }
+            return CloudCodeHTTPResult(
+                status: status,
+                json: try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                error: nil
+            )
+        } catch {
+            return CloudCodeHTTPResult(status: nil, json: nil, error: error.localizedDescription)
         }
     }
 

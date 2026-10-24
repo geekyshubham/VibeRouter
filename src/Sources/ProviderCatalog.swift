@@ -5,6 +5,8 @@ enum ProviderCatalog {
     /// Bundled OpenAI-compatible provider (config.yaml openai-compatibility).
     /// Must NOT be in `reservedCustomProviderKeys` or Settings will hide it and validation fails.
     static let openCodeGoProviderName = "opencode-go"
+    static let experientialLabsProviderName = "experientiallabs"
+    static let experientialLabsDisplayName = "Experiential Labs"
 
     /// OAuth provider keys used in config.yaml oauth-excluded-models.
     static let oauthProviderKeys: [String: String] = [

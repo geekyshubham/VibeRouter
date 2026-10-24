@@ -40,7 +40,7 @@ extension ServiceType {
             return .authCommand(.gitlabLogin)
         case .kilo:
             return .authCommand(.kiloLogin)
-        case .opencodeGo:
+        case .opencodeGo, .experientialLabs:
             return .managedInSettings
         }
     }

@@ -26,6 +26,8 @@ enum ServiceType: String, CaseIterable {
     /// (`provider: opencode-go`), not an OAuth seat, but it has real quota
     /// windows so it gets a usage card like any other provider.
     case opencodeGo = "opencode-go"
+    /// Experiential Labs gateway key (`openai-compat`, `provider: experientiallabs`). Its card shows credits and spend.
+    case experientialLabs = "experientiallabs"
 
     var displayName: String {
         switch self {
@@ -49,7 +51,13 @@ enum ServiceType: String, CaseIterable {
         case .trae: return "Trae"
         case .zed: return "Zed"
         case .opencodeGo: return ProviderCatalog.openCodeGoDisplayName
+        case .experientialLabs: return ProviderCatalog.experientialLabsDisplayName
         }
+    }
+
+    /// API-key providers stored as `openai-compat` records that still get their own usage card.
+    var isAPIKeyProvider: Bool {
+        self == .zai || self == .opencodeGo || self == .experientialLabs
     }
 }
 
@@ -163,12 +171,15 @@ class AuthManager: ObservableObject {
 
     /// Maps an auth file's `type` to a ServiceType. Custom openai-compatibility
     /// credentials share `type: "openai-compat"`, so they are disambiguated by
-    /// their `provider` field — OpenCode Go is the one with real quota windows.
+    /// their `provider` field — OpenCode Go and Experiential Labs report usage.
     static func serviceType(forAuthType type: String, raw: [String: Any]) -> ServiceType? {
         let normalized = type.lowercased()
         if normalized == CustomProviderCredentialStore.authType {
-            let provider = (raw["provider"] as? String)?.lowercased()
-            return provider == ProviderCatalog.openCodeGoProviderName ? .opencodeGo : nil
+            switch (raw["provider"] as? String)?.lowercased() {
+            case ProviderCatalog.openCodeGoProviderName: return .opencodeGo
+            case ProviderCatalog.experientialLabsProviderName: return .experientialLabs
+            default: return nil
+            }
         }
         return ServiceType(rawValue: normalized)
     }
@@ -207,7 +218,7 @@ class AuthManager: ObservableObject {
                 let email = json["email"] as? String
                 let login = json["login"] as? String
                     ?? json["username"] as? String
-                    ?? (serviceType == .opencodeGo ? json["label"] as? String : nil)
+                    ?? (serviceType == .opencodeGo || serviceType == .experientialLabs ? json["label"] as? String : nil)
                 let isDisabled = json["disabled"] as? Bool ?? false
                 let planLabel = Self.extractPlanLabel(from: json, serviceType: serviceType)
 
@@ -433,7 +444,7 @@ class AuthManager: ObservableObject {
     /// Access-token timestamps alone do not count if a refresh token is present.
     static func sessionExpiryDate(from json: [String: Any], serviceType: ServiceType, nativeClaude: [String: Any]? = nil) -> Date? {
         // API-key providers never expire from access-token clocks.
-        if serviceType == .zai || serviceType == .opencodeGo {
+        if serviceType.isAPIKeyProvider {
             return nil
         }
 
