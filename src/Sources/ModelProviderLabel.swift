@@ -13,7 +13,7 @@ enum ModelProviderLabel {
         "zai": "Z.AI", "kimi": "Kimi", "qwen": "Qwen", "cursor": "Cursor",
         "codebuddy": "CodeBuddy", "gitlab": "GitLab", "kilo": "Kilo",
         "vertex": "Vertex AI", "vertex-ai": "Vertex AI",
-        "openai-compat": "OpenAI-compatible",
+        "openai-compat": "OpenAI-compatible", "experientiallabs": "Experiential Labs",
     ]
 
     static func source(for entry: [String: Any]) -> String {

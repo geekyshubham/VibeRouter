@@ -91,6 +91,36 @@ openai-compatibility:
         name: qwen3.7-max
       - alias: qwen3.7-plus
         name: qwen3.7-plus
+  - name: experientiallabs
+    display-name: Experiential Labs
+    base-url: https://api.experientiallabs.ai/v1
+    help-text: Experiential Labs model gateway. Use model ids exactly as GET /v1/models returns them.
+    icon-system: server.rack
+    models:
+      - alias: qwen3.8-27b
+        name: qwen3.8-27b
+      - alias: deepseek-v4.1-flash-uncensored
+        name: deepseek-v4.1-flash-uncensored
+      - alias: glm-5.3-uncensored
+        name: glm-5.3-uncensored
+      - alias: glm-5.3-flash-uncensored
+        name: glm-5.3-flash-uncensored
+      - alias: mimo-v2.6-flash-uncensored
+        name: mimo-v2.6-flash-uncensored
+      - alias: dolphin-mistral-24b-venice-edition
+        name: dolphin-mistral-24b-venice-edition
+      - alias: cydonia-24b-v4.1
+        name: cydonia-24b-v4.1
+      - alias: hermes-3-llama-3.1-405b
+        name: hermes-3-llama-3.1-405b
+      - alias: hermes-3-llama-3.1-70b
+        name: hermes-3-llama-3.1-70b
+      - alias: hermes-4-405b
+        name: hermes-4-405b
+      - alias: aion-rp-llama-3.1-8b
+        name: aion-rp-llama-3.1-8b
+      - alias: remm-slerp-l2-13b
+        name: remm-slerp-l2-13b
 
 # ChatGPT Codex accounts reject gpt-5.4-mini, which is the image-tool host.
 # gpt-5.5 is a model this login can call, and it still drives gpt-image-2.
@@ -104,3 +134,36 @@ payload:
           protocol: openai
       params:
         temperature: 1
+  # Experiential Labs refuses sampling params on some routes (400 unsupported_parameter or 502 all_routes_failed).
+  filter:
+    - models:
+        - name: qwen3.8-27b
+          protocol: openai
+        - name: deepseek-v4.1-flash-uncensored
+          protocol: openai
+        - name: glm-5.3-uncensored
+          protocol: openai
+        - name: glm-5.3-flash-uncensored
+          protocol: openai
+        - name: mimo-v2.6-flash-uncensored
+          protocol: openai
+        - name: dolphin-mistral-24b-venice-edition
+          protocol: openai
+        - name: cydonia-24b-v4.1
+          protocol: openai
+        - name: hermes-3-llama-3.1-405b
+          protocol: openai
+        - name: hermes-3-llama-3.1-70b
+          protocol: openai
+        - name: hermes-4-405b
+          protocol: openai
+        - name: aion-rp-llama-3.1-8b
+          protocol: openai
+        - name: remm-slerp-l2-13b
+          protocol: openai
+      params:
+        - temperature
+        - top_p
+        - top_k
+        - frequency_penalty
+        - presence_penalty
