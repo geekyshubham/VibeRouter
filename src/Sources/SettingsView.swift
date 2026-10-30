@@ -146,6 +146,11 @@ struct VercelGatewayControls: View {
     }
 }
 
+private func copyToPasteboard(_ string: String) {
+    NSPasteboard.general.clearContents()
+    NSPasteboard.general.setString(string, forType: .string)
+}
+
 /// A row displaying a service with its connected accounts and add button
 struct ServiceRow<ExtraContent: View>: View {
     let serviceType: ServiceType
@@ -161,6 +166,9 @@ struct ServiceRow<ExtraContent: View>: View {
     let customTitle: String?
     let onConnect: () -> Void
     var onPasteJSON: (() -> Void)? = nil
+    var onKiroLogin: ((AuthCommand, Bool) -> Void)? = nil
+    var onCopyLink: (() -> Void)? = nil
+    var pendingAuthLink: String? = nil
     let onDisconnect: (AuthAccount) -> Void
     let onToggleDisabled: (AuthAccount) -> Void
     let onToggleEnabled: (Bool) -> Void
@@ -213,14 +221,44 @@ struct ServiceRow<ExtraContent: View>: View {
                     .foregroundColor(isEnabled ? .primary : .secondary)
                 Spacer()
                 if isAuthenticating {
+                    if let pendingAuthLink {
+                        Text("Link copied")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Button("Copy Again") {
+                            copyToPasteboard(pendingAuthLink)
+                        }
+                        .controlSize(.small)
+                        .help("Open the copied link in any browser on this Mac to finish signing in")
+                    }
                     ProgressView()
                         .controlSize(.small)
                 } else if isEnabled {
                     HStack(spacing: 6) {
-                        Button("Add Account") {
-                            onConnect()
+                        if let onKiroLogin {
+                            Menu("Add Account") {
+                                Button("Sign in with Google") { onKiroLogin(.kiroGoogleLogin, false) }
+                                Button("Sign in with GitHub") { onKiroLogin(.kiroGitHubLogin, false) }
+                                Button("Sign in with AWS Builder ID") { onKiroLogin(.kiroLogin, false) }
+                            }
+                            .controlSize(.small)
+                        } else {
+                            Button("Add Account") { onConnect() }
+                                .controlSize(.small)
                         }
-                        .controlSize(.small)
+                        if let onKiroLogin {
+                            Menu("Copy Link") {
+                                Button("Google sign-in link") { onKiroLogin(.kiroGoogleLogin, true) }
+                                Button("GitHub sign-in link") { onKiroLogin(.kiroGitHubLogin, true) }
+                                Button("AWS Builder ID sign-in link") { onKiroLogin(.kiroLogin, true) }
+                            }
+                            .controlSize(.small)
+                            .help("Copy the original sign-in link to open in Dolphin or another browser.")
+                        } else if let onCopyLink {
+                            Button("Copy Link", action: onCopyLink)
+                                .controlSize(.small)
+                                .help("Copy the sign-in link instead of opening the default browser.")
+                        }
                         if let onPasteJSON {
                             Button("Paste JSON") {
                                 onPasteJSON()
@@ -629,6 +667,7 @@ struct SettingsView: View {
     @State private var showingAuthResult = false
     @State private var authResultMessage = ""
     @State private var authResultSuccess = false
+    @State private var pendingAuthLink: String? = nil
     @State private var showingQwenEmailPrompt = false
     @State private var qwenEmail = ""
     @State private var showingZaiApiKeyPrompt = false
@@ -749,12 +788,12 @@ struct SettingsView: View {
             }
         }
         .onAppear {
-            authManager.checkAuthStatus()
+            authManager.refreshInBackground()
             serverManager.reloadCustomProviders()
             checkLaunchAtLogin()
         }
         .onReceive(NotificationCenter.default.publisher(for: .authDirectoryChanged)) { _ in
-            authManager.checkAuthStatus()
+            authManager.refreshInBackground()
         }
         .alert("Authentication Result", isPresented: $showingAuthResult) {
             Button("OK", role: .cancel) { }
@@ -901,6 +940,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.antigravity) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .antigravity) },
+                        onCopyLink: copyLinkAction(for: .antigravity),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("antigravity", enabled: enabled) },
@@ -923,6 +964,8 @@ struct SettingsView: View {
                         customTitle: serverManager.vercelGatewayEnabled && !serverManager.vercelApiKey.isEmpty ? "Claude Code (via Vercel)" : nil,
                         onConnect: { connectService(.claude) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .claude) },
+                        onCopyLink: copyLinkAction(for: .claude),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("claude", enabled: enabled) },
@@ -946,6 +989,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.codex) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .codex) },
+                        onCopyLink: copyLinkAction(for: .codex),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("codex", enabled: enabled) },
@@ -968,6 +1013,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.gemini) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .gemini) },
+                        onCopyLink: copyLinkAction(for: .gemini),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("gemini", enabled: enabled) },
@@ -990,6 +1037,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.grok) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .grok) },
+                        onCopyLink: copyLinkAction(for: .grok),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("xai", enabled: enabled) },
@@ -1004,7 +1053,7 @@ struct SettingsView: View {
                         iconSystemName: "bolt.horizontal.circle.fill",
                         accounts: authManager.accounts(for: .kiro),
                         isAuthenticating: authenticatingService == .kiro,
-                        helpText: "Add Account opens AWS Builder ID login in your browser. Import a signed-in Kiro IDE session below, or paste token JSON.",
+                        helpText: "Choose the same sign-in method as your paid Kiro subscription: Google, GitHub or AWS Builder ID. You can also import a signed-in Kiro CLI or IDE session below.",
                         isEnabled: serverManager.isProviderEnabled("kiro"),
                         isToggleLocked: serverManager.isProviderToggleLocked("kiro"),
                         toggleHelpText: serverManager.providerConfigLockReason("kiro"),
@@ -1012,6 +1061,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.kiro) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kiro) },
+                        onKiroLogin: { command, copyLink in connectService(.kiro, command: command, copyLink: copyLink) },
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kiro", enabled: enabled) },
@@ -1034,6 +1085,8 @@ struct SettingsView: View {
                         customTitle: nil,
                         onConnect: { connectService(.kimi) },
                         onPasteJSON: { pasteJSONRequest = PasteJSONRequest(type: .kimi) },
+                        onCopyLink: copyLinkAction(for: .kimi),
+                        pendingAuthLink: pendingAuthLink,
                         onDisconnect: { account in disconnectAccount(account) },
                         onToggleDisabled: { account in toggleAccountDisabled(account) },
                         onToggleEnabled: { enabled in serverManager.setProviderEnabled("kimi", enabled: enabled) },
@@ -1512,7 +1565,7 @@ struct SettingsView: View {
         authenticatingService = serviceType
         let result = ManualTokenImporter.importPasted(text, preferredType: serviceType)
         authenticatingService = nil
-        authManager.checkAuthStatus()
+        authManager.refreshInBackground()
         serverManager.refreshAuthBackedConfiguration()
         switch result {
         case .success(let message):
@@ -1525,8 +1578,14 @@ struct SettingsView: View {
         showingAuthResult = true
     }
 
-    private func connectService(_ serviceType: ServiceType) {
+    private func copyLinkAction(for serviceType: ServiceType) -> (() -> Void)? {
+        guard case .authCommand(let command) = serviceType.connectionAction, command.supportsCopyLink else { return nil }
+        return { connectService(serviceType, copyLink: true) }
+    }
+
+    private func connectService(_ serviceType: ServiceType, command overrideCommand: AuthCommand? = nil, copyLink: Bool = false) {
         authenticatingService = serviceType
+        pendingAuthLink = nil
         NSLog("[SettingsView] Starting %@ authentication", serviceType.displayName)
         
         let command: AuthCommand
@@ -1544,11 +1603,16 @@ struct SettingsView: View {
             return // custom provider keys are added in the providers section
         }
         
-        serverManager.runAuthCommand(command) { success, output in
+        let onAuthURL: ((String) -> Void)? = copyLink ? { url in
+            copyToPasteboard(url)
+            self.pendingAuthLink = url
+        } : nil
+        serverManager.runAuthCommand(overrideCommand ?? command, opensBrowser: !copyLink, onAuthURL: onAuthURL) { success, output in
             NSLog("[SettingsView] Auth completed - success: %d, output: %@", success, output)
             DispatchQueue.main.async {
                 self.authenticatingService = nil
-                self.authManager.checkAuthStatus()
+                self.pendingAuthLink = nil
+                self.authManager.refreshInBackground()
 
                 if success {
                     self.authResultSuccess = true
@@ -1630,7 +1694,7 @@ struct SettingsView: View {
                         self.authResultSuccess = true
                         self.authResultMessage = "✓ Imported Kiro credentials from Kiro IDE.\n\nMake sure you were signed into Kiro IDE first."
                         self.showingAuthResult = true
-                        self.authManager.checkAuthStatus()
+                        self.authManager.refreshInBackground()
                         self.serverManager.refreshAuthBackedConfiguration()
                     } else {
                         self.authResultSuccess = false
@@ -1700,7 +1764,7 @@ struct SettingsView: View {
                     authResultMessage = "Imported \(successes.count) account\(successes.count == 1 ? "" : "s"). \(failures.count) failed.\n\n" + failures.joined(separator: "\n")
                 }
                 showingAuthResult = true
-                authManager.checkAuthStatus()
+                authManager.refreshInBackground()
                 serverManager.refreshAuthBackedConfiguration()
                 return
             }
@@ -1793,7 +1857,7 @@ struct SettingsView: View {
             authResultMessage = "Import failed for \(account.displayName).\n\nDetails: \(failureMessage ?? "Unknown error")"
         }
         showingAuthResult = true
-        authManager.checkAuthStatus()
+        authManager.refreshInBackground()
         serverManager.refreshAuthBackedConfiguration()
     }
     
@@ -1806,7 +1870,7 @@ struct SettingsView: View {
             DispatchQueue.main.async {
                 self.authenticatingService = nil
                 self.qwenEmail = ""
-                self.authManager.checkAuthStatus()
+                self.authManager.refreshInBackground()
                 
                 if success {
                     self.authResultSuccess = true
@@ -1839,7 +1903,7 @@ struct SettingsView: View {
                         ? "✓ Z.AI API key added successfully."
                         : output
                     self.showingAuthResult = true
-                    self.authManager.checkAuthStatus()
+                    self.authManager.refreshInBackground()
                 } else {
                     self.authResultSuccess = false
                     self.authResultMessage = "Failed to save API key.\n\nDetails: \(output.isEmpty ? "Unknown error" : output)"

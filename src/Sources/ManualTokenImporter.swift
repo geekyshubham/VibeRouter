@@ -374,7 +374,7 @@ enum ManualTokenImporter {
             "expired": firstString(raw, keys: ["expired", "expires_at", "expiresAt"]) ?? iso(now.addingTimeInterval(3600)),
             "last_refresh": iso(now),
         ]
-        for key in ["client_id", "clientId", "client_secret", "clientSecret", "client_id_hash", "clientIdHash", "auth_method", "authMethod", "provider", "start_url", "profile_arn", "profileArn", "user_id", "userId"] {
+        for key in ["client_id", "clientId", "client_secret", "clientSecret", "client_id_hash", "clientIdHash", "auth_method", "authMethod", "provider", "start_url", "profile_arn", "profileArn", "user_id", "userId", "id_token", "idToken", "oauth_flow", "oauthFlow", "client_secret_expires_at"] {
             if let value = firstString(raw, keys: [key]) {
                 switch key {
                 case "clientId": record["client_id"] = value
@@ -383,10 +383,14 @@ enum ManualTokenImporter {
                 case "authMethod": record["auth_method"] = value
                 case "profileArn": record["profile_arn"] = value
                 case "userId": record["user_id"] = value
+                case "idToken": record["id_token"] = value
+                case "oauthFlow": record["oauth_flow"] = value
                 default: record[key] = value
                 }
             }
         }
+        record["scopes"] = raw["scopes"]
+        record["kiro_cli_profile"] = raw["kiro_cli_profile"]
         return ParsedAccount(
             type: .kiro,
             filename: KiroAccountIdentity.filename(record),

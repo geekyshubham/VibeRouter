@@ -49,7 +49,7 @@ final class NativeSessionManager: ObservableObject {
     /// Providers we can both detect and switch.
     /// Antigravity uses its own IDE state DB + Cockpit pointer — not Gemini's
     /// `~/.gemini/google_accounts.json`.
-    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini", "antigravity", "cursor"]
+    static let switchableProviderIDs: Set<String> = ["codex", "claude", "gemini", "antigravity", "cursor", "kiro"]
 
     func supportsSwitching(_ type: ServiceType) -> Bool {
         guard let id = type.usageProviderID else { return false }
@@ -135,6 +135,10 @@ final class NativeSessionManager: ObservableObject {
         case .gemini: return detectGoogleIdentity()
         case .antigravity: return detectAntigravityIdentity()
         case .cursor: return detectCursorIdentity()
+        case .kiro:
+            guard let payload = KiroCLISession.currentPayload() else { return nil }
+            return NativeSessionIdentity(email: KiroAccountIdentity.email(payload),
+                accountID: KiroAccountIdentity.key(payload), plan: nil)
         default: return nil
         }
     }
@@ -171,7 +175,7 @@ final class NativeSessionManager: ObservableObject {
             }
         }
         // Fall back to presence of credentials (logged in but identity unknown).
-        if readClaudeCredentials() != nil {
+        if NativeUsageFetcher.readClaudeAppPayload() != nil {
             return NativeSessionIdentity(email: nil, accountID: nil, plan: nil)
         }
         return nil
@@ -224,7 +228,11 @@ final class NativeSessionManager: ObservableObject {
     }
 
     private func matches(_ account: AuthAccount, _ identity: NativeSessionIdentity) -> Bool {
-        Self.matchesSession(
+        if account.type == .kiro {
+            guard let stored = readJSON(account.filePath), let native = KiroCLISession.currentPayload() else { return false }
+            return KiroAccountIdentity.sameAccount(stored, native)
+        }
+        return Self.matchesSession(
             accountType: account.type,
             accountEmail: account.email,
             accountSeatID: codexAccountID(from: account),
@@ -352,6 +360,18 @@ final class NativeSessionManager: ObservableObject {
                 case .gemini: try writeGoogleAuth(from: src, email: email)
                 case .antigravity: return (nil, try writeAntigravityAuth(from: src, email: email))
                 case .cursor: try writeCursorAuth(from: src)
+                case .kiro:
+                    // Preserve an unimported native login before replacing its only token slot.
+                    if KiroCLISession.currentPayload() != nil {
+                        if case .failure(let message) = ConfiguredAccountImporter.importKiroCLI() {
+                            return (message, nil)
+                        }
+                    }
+                    guard await TokenRefreshService.refreshAccountFile(authFilePath),
+                          let fresh = readJSON(authFilePath) else {
+                        return ("Could not refresh this Kiro account. Sign in again before switching.", nil)
+                    }
+                    try KiroCLISession.apply(fresh)
                 default: return ("Switching \(type.displayName) is not supported yet.", nil)
                 }
                 return (nil, nil)
@@ -383,7 +403,9 @@ final class NativeSessionManager: ObservableObject {
         let targetName = subscriptionLabel?.nilIfEmpty
             ?? account.baseDisplayName
         var msg = "Switched \(type.displayName) to \(targetName)."
-        if restartApp {
+        if type == .kiro {
+            msg += " Start a new Kiro CLI session to use it."
+        } else if restartApp {
             // Antigravity was already quit above; only relaunch.
             let restarted: [String]
             if type == .antigravity || type == .cursor {
@@ -553,10 +575,15 @@ final class NativeSessionManager: ObservableObject {
         oauth["scopes"] = ["user:inference", "user:profile"]
         let credentials: [String: Any] = ["claudeAiOauth": oauth]
 
+        // The Keychain is about to lose the outgoing account's newest refresh
+        // token. Park it on that account's file first so VibeRouter can renew it.
+        let authDirectory = home.appendingPathComponent(".cli-proxy-api")
+        NativeUsageFetcher.overlayClaudeCLICredentials(inDirectory: authDirectory)
+
         // macOS primary store is the Keychain; also write the plaintext file as fallback.
         let data = try JSONSerialization.data(withJSONObject: credentials, options: [.sortedKeys])
-        if let jsonString = String(data: data, encoding: .utf8) {
-            writeClaudeKeychain(jsonString)
+        guard let jsonString = String(data: data, encoding: .utf8), writeClaudeKeychain(jsonString) else {
+            throw SwitchError.resolveFailed("Claude Code's Keychain is unavailable. Unlock it or reconnect Claude Code, then retry the switch.")
         }
         let credURL = home.appendingPathComponent(".claude/.credentials.json")
         try? ensureParent(credURL)
@@ -575,6 +602,9 @@ final class NativeSessionManager: ObservableObject {
                 config["oauthAccount"] = oauthAccount
                 _ = try? backupThenWrite(json: config, to: configURL)
             }
+            // Identity now names the incoming account: release the outgoing
+            // account's parked token and park the one Claude Code now owns.
+            NativeUsageFetcher.overlayClaudeCLICredentials(inDirectory: authDirectory)
         }
     }
 
@@ -1252,46 +1282,8 @@ final class NativeSessionManager: ObservableObject {
 
     // MARK: - Keychain (Claude)
 
-    private func writeClaudeKeychain(_ json: String) {
-        let user = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "add-generic-password", "-U",
-            "-a", user,
-            "-s", "Claude Code-credentials",
-            "-w", json,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
-    }
-
-    private func readClaudeCredentials() -> [String: Any]? {
-        // Try Keychain first, then plaintext file.
-        let user = ProcessInfo.processInfo.environment["USER"] ?? NSUserName()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-a", user, "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            if process.terminationStatus == 0,
-               let string = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let jsonData = string.data(using: .utf8),
-               let json = try? JSONSerialization.jsonObject(with: jsonData) as? [String: Any]
-            {
-                return json
-            }
-        } catch {
-            return nil
-        }
-        return readJSON(home.appendingPathComponent(".claude/.credentials.json"))
+    private func writeClaudeKeychain(_ json: String) -> Bool {
+        NativeKeychain.write(Data(json.utf8), service: "Claude Code-credentials", account: NSUserName())
     }
 
     // MARK: - IO helpers

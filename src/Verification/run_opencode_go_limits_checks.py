@@ -11,7 +11,7 @@ OpenCode Zen exposes the Go subscription's three windows at
 The card maps rolling→5h, weekly→7d, monthly→30d, and treats `rate-limited` as
 100% used because `percent` lags behind the actual block.
 
-The live contract check is skipped when no local OpenCode key is available.
+Run with --live to enable the optional contract check using a local OpenCode key.
 Exit 0 on success, 1 on failure.
 """
 from __future__ import annotations
@@ -66,7 +66,7 @@ def source_checks() -> None:
     auth = AUTH_STATUS.read_text()
     check(
         "opencode-go auth files map to the ServiceType",
-        "case opencodeGo" in auth and "openCodeGoProviderName ? .opencodeGo : nil" in auth,
+        "case opencodeGo" in auth and "case ProviderCatalog.openCodeGoProviderName: return .opencodeGo" in auth,
     )
 
 
@@ -78,12 +78,16 @@ def local_api_keys() -> list[str]:
             data = json.loads(auth_json.read_text())
         except ValueError:
             data = {}
-        for entry in data.values():
-            if isinstance(entry, dict) and entry.get("type") == "api" and entry.get("key"):
+        for provider, entry in data.items():
+            if provider in {"opencode", "opencode-go"} and isinstance(entry, dict) and entry.get("type") == "api" and entry.get("key"):
                 keys.append(entry["key"])
-    config = Path.home() / ".cli-proxy-api/merged-config.yaml"
-    if config.exists():
-        keys.extend(re.findall(r"api-key:\s*(\S+)", config.read_text()))
+    for auth_file in (Path.home() / ".cli-proxy-api").glob("*.json"):
+        try:
+            entry = json.loads(auth_file.read_text())
+        except (OSError, ValueError):
+            continue
+        if entry.get("type") == "openai-compat" and entry.get("provider") == "opencode-go" and entry.get("api_key"):
+            keys.append(entry["api_key"])
     return keys
 
 
@@ -135,7 +139,8 @@ def live_contract_check() -> None:
 
 def main() -> int:
     source_checks()
-    live_contract_check()
+    if "--live" in sys.argv:
+        live_contract_check()
     print("all OpenCode Go limits checks passed")
     return 0
 

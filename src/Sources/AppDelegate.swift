@@ -42,7 +42,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         let others = NSRunningApplication.runningApplications(withBundleIdentifier: id)
             .filter { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier && !$0.isTerminated }
         guard let existing = others.first else { return false }
-        NSLog("[VibeRouter] Already running (pid %d); exiting this instance", existing.processIdentifier)
+        DistributedNotificationCenter.default().postNotificationName(
+            VibeRouterDistributedCommand.showInterface, object: nil, userInfo: nil, deliverImmediately: true
+        )
+        existing.activate(options: [.activateIgnoringOtherApps])
+        NSLog("[VibeRouter] Already running (pid %d); showing its interface", existing.processIdentifier)
         NSApp.terminate(nil)
         return true
     }
@@ -80,7 +84,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             self?.authManager.serviceAccounts.mapValues { $0.accounts } ?? [:]
         }
         usageStore.nativeSession = nativeSession
-        authManager.checkAuthStatus()
+        authManager.refreshInBackground()
         usageStore.clearCachedUsage()
         // Load cached model prices immediately and refresh the live feed (models.dev) in the
         // background, so cost estimates track real pricing rather than a frozen table.
@@ -120,12 +124,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             object: nil
         )
         registerCLICommands()
+        if notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool == true {
+            DispatchQueue.main.async { [weak self] in self?.openSettings() }
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings()
+        return false
     }
 
     /// Allow the separately invoked `viberouter` command to control the already-running
     /// menu-bar process without opening a second app instance or exposing a network port.
     private func registerCLICommands() {
         let center = DistributedNotificationCenter.default()
+        center.addObserver(self, selector: #selector(openSettings), name: VibeRouterDistributedCommand.showInterface, object: nil)
         center.addObserver(self, selector: #selector(handleCLIServerStart), name: VibeRouterDistributedCommand.serverStart, object: nil)
         center.addObserver(self, selector: #selector(handleCLIServerStop), name: VibeRouterDistributedCommand.serverStop, object: nil)
         center.addObserver(self, selector: #selector(handleCLIServerRestart), name: VibeRouterDistributedCommand.serverRestart, object: nil)
@@ -298,6 +311,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // App menu
         let appMenuItem = NSMenuItem()
         let appMenu = NSMenu()
+        appMenu.addItem(NSMenuItem(title: "Show Overview", action: #selector(openOverview), keyEquivalent: "1"))
+        appMenu.addItem(NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ","))
+        appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "About VibeRouter", action: #selector(showAbout), keyEquivalent: ""))
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(NSMenuItem(title: "Quit VibeRouter", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
@@ -344,6 +360,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
     @objc func showAbout() {
         AboutWindowController.show()
+    }
+
+    @objc func openOverview() {
+        popoverController?.showPopover()
     }
 
     @objc func openSettings() {
@@ -485,7 +505,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
         // Settings or the menu-bar chrome jump on top of the user's work intermittently.
         NSLog("[AppDelegate] Auth/config inputs changed — refreshing in background")
         serverManager.handleObservedConfigInputsChanged()
-        authManager.checkAuthStatus()
+        authManager.refreshInBackground()
         nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
 
         // Debounce quota fetches: FSEvents can fire in bursts when any auth JSON is rewritten.

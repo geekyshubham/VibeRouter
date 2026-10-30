@@ -64,8 +64,9 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
         }
     }
 
-    private func showPopover() {
+    func showPopover() {
         guard let button = statusItem?.button else { return }
+        NSApp.activate(ignoringOtherApps: true)
 
         // Determine the popover height EXPLICITLY (not content-driven). An NSPopover
         // otherwise grows to fit its SwiftUI content and, with many providers, runs

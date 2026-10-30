@@ -12,6 +12,8 @@ enum ConfiguredAccountImporter {
             .appendingPathComponent(".cli-proxy-api")
     ) -> ConfiguredAccountImportResult {
         switch account.importKind {
+        case .kiroCLI:
+            return importKiroCLI(authDirectory: authDirectory)
         case .kiroIDE:
             return importKiroIDE(authDirectory: authDirectory)
         case .codexApp:
@@ -60,6 +62,29 @@ enum ConfiguredAccountImporter {
         ".aws/sso/cache/kiro-auth-token.json",
         ".kiro/kiro-auth-token.json",
     ]
+
+    static func importKiroCLI(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cli-proxy-api")
+    ) -> ConfiguredAccountImportResult {
+        let nativeHome = home == FileManager.default.homeDirectoryForCurrentUser
+        guard var payload = KiroCLISession.currentPayload(home: home) else {
+            return .failure(message: "No Kiro CLI session found. Sign in with Google, GitHub or AWS in Kiro CLI, then import it.")
+        }
+        if nativeHome, KiroAccountIdentity.email(payload) == nil,
+           let email = KiroCLIUsageProbe.currentEmail(),
+           let current = KiroCLISession.currentPayload(), KiroAccountIdentity.sameAccount(payload, current) {
+            payload = current
+            payload["email"] = email
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            return ManualTokenImporter.importPasted(String(decoding: data, as: UTF8.self),
+                preferredType: .kiro, authDirectory: authDirectory)
+        } catch {
+            return .failure(message: error.localizedDescription)
+        }
+    }
 
     static func importKiroIDE(
         home: URL = FileManager.default.homeDirectoryForCurrentUser,
@@ -314,60 +339,41 @@ enum ConfiguredAccountImporter {
 
     // MARK: - Claude
 
-    private static func importClaudeCode(authDirectory: URL, displayName: String) -> ConfiguredAccountImportResult {
-        let credentialsURL = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/.credentials.json")
-
-        let data: Data?
-        if let fileData = try? Data(contentsOf: credentialsURL),
-           let root = try? JSONSerialization.jsonObject(with: fileData) as? [String: Any],
-           root["claudeAiOauth"] != nil
-        {
-            data = fileData
-        } else if let keychainData = claudeKeychainString().data(using: .utf8),
-                  let root = try? JSONSerialization.jsonObject(with: keychainData) as? [String: Any],
-                  root["claudeAiOauth"] != nil
-        {
-            data = keychainData
-        } else {
+    static func importClaudeCode(
+        authDirectory: URL, displayName: String, localClaude: [String: Any]? = nil
+    ) -> ConfiguredAccountImportResult {
+        guard let native = localClaude ?? NativeUsageFetcher.readClaudeAppPayload(),
+              let accessToken = native["access_token"] as? String,
+              !accessToken.isEmpty
+        else {
             return .failure(message: "Could not read Claude Code credentials. Sign into Claude Code first.")
         }
 
-        guard let data,
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let oauth = root["claudeAiOauth"] as? [String: Any],
-              let accessToken = oauth["accessToken"] as? String,
-              !accessToken.isEmpty
-        else {
-            return .failure(message: "Claude Code credentials are missing an access token")
-        }
-
-        let expiresAtMs = oauth["expiresAt"] as? Double
-        let expiresAt = expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
-        let email = AccountCredentialIdentity.email(oauth,
-            matchingNative: AccountCredentialIdentity.email(oauth) == nil ? NativeUsageFetcher.readClaudeAppPayload() : nil) ?? ""
-
+        let email = AccountCredentialIdentity.email(native) ?? ""
         let now = Date()
-        let expired = expiresAt.map { ISO8601DateFormatter().string(from: $0) }
+        let expired = native["expired"] as? String
             ?? ISO8601DateFormatter().string(from: now.addingTimeInterval(3600))
 
-        // Keep the rotating refresh token in Claude Code's keychain only.
-        // Importing it into ~/.cli-proxy-api makes VibeRouter a second OAuth
-        // client on the same family; the next refresh logs `claude` out.
-        let record: [String: Any] = [
+        // Save the native refresh token privately from the first import, so an
+        // immediate account switch cannot orphan this session before polling.
+        var record: [String: Any] = [
             "type": "claude",
             "email": email,
             "access_token": accessToken,
             "expired": expired,
             "last_refresh": ISO8601DateFormatter().string(from: now),
         ]
+        TokenRefreshService.parkRefreshToken(TokenRefreshService.refreshToken(from: native), in: &record)
 
-        return writeAuthRecord(
-            record,
-            filename: "claude-\(sanitizeFilename(email)).json",
-            authDirectory: authDirectory,
-            successLabel: "Imported \(email) from Claude Code"
-        )
+        do {
+            let file = try AccountCredentialStore.save(record, in: authDirectory)
+            // A reimport may have merged a former proxy-owned refresh token.
+            _ = NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: native)
+            NotificationCenter.default.post(name: .authDirectoryChanged, object: nil)
+            return .success(message: "Imported \(email) from Claude Code")
+        } catch {
+            return .failure(message: error.localizedDescription)
+        }
     }
 
     // MARK: - Gemini
@@ -717,20 +723,6 @@ enum ConfiguredAccountImporter {
         let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789@._-")
         let sanitized = value.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
         return String(sanitized).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
-    }
-
-    private static func claudeKeychainString() -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return "" }
-        return String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     private static func grokExpiresAt(from entry: [String: Any]) -> Date? {

@@ -73,14 +73,10 @@ struct MenuBarPanelView: View {
         .frame(width: MenuBarDesign.panelWidth, height: panelHeight)
         .background(GlassPanelBackground())
         .onAppear {
-            authManager.checkAuthStatus()
+            authManager.refreshInBackground()
             nativeSession.refresh(accounts: authManager.serviceAccounts.mapValues { $0.accounts })
             Task {
-                // Force a local cost rescan when Analytics is empty so a failed prior pass
-                // (or launching a stale app binary) does not stick on "No local usage history".
-                // Opening the panel should pick up sessions written since the last scan.
-                // The 15-minute throttle otherwise left 8.2B / $5.3K on screen after new use.
-                usageStore.invalidateCostScanThrottle()
+                // Respect the local-history scan throttle when opening the panel.
                 await usageStore.refreshVisibleProviders(
                     from: ServiceType.allCases,
                     accounts: authManager.serviceAccounts.mapValues { $0.accounts }

@@ -10,16 +10,8 @@ struct ConfiguredAccountImportSection: View {
 
     @State private var discoveredAccounts: [DiscoveredConfiguredAccount] = []
 
-    private var importableAccounts: [DiscoveredConfiguredAccount] {
-        discoveredAccounts.filter {
-            !ConfiguredAccountDiscovery.isAlreadyConnected(
-                $0,
-                existingAccounts: connectedAccounts,
-                zaiAPIKeys: zaiAPIKeys,
-                customCredentials: customCredentials
-            )
-        }
-    }
+    @State private var discoveryTask: Task<Void, Never>?
+    private var importableAccounts: [DiscoveredConfiguredAccount] { discoveredAccounts }
 
     var body: some View {
         // Always mount a container so discovery onAppear/task actually runs for every provider.
@@ -48,7 +40,6 @@ struct ConfiguredAccountImportSection: View {
         .padding(.leading, importableAccounts.isEmpty ? 0 : 28)
         // Zero-size when empty still participates in the view tree for lifecycle.
         .frame(minHeight: importableAccounts.isEmpty ? 0.5 : nil)
-        .onAppear(perform: refreshDiscovery)
         .onChange(of: connectedAccounts) { _ in
             refreshDiscovery()
         }
@@ -64,14 +55,21 @@ struct ConfiguredAccountImportSection: View {
     }
 
     private func refreshDiscovery() {
-        discoveredAccounts = ConfiguredAccountDiscovery.discover(for: serviceType)
-        if !discoveredAccounts.isEmpty {
-            NSLog(
-                "[ConfiguredImport] %@ discovered=%d importable=%d",
-                serviceType.rawValue,
-                discoveredAccounts.count,
-                importableAccounts.count
-            )
+        discoveryTask?.cancel()
+        let type = serviceType
+        let accounts = connectedAccounts
+        let keys = zaiAPIKeys
+        let credentials = customCredentials
+        discoveryTask = Task { @MainActor in
+            let result = await Task.detached(priority: .utility) {
+                ConfiguredAccountDiscovery.discover(for: type).filter {
+                    !ConfiguredAccountDiscovery.isAlreadyConnected($0,
+                        existingAccounts: accounts, zaiAPIKeys: keys, customCredentials: credentials)
+                }
+            }.value
+            guard !Task.isCancelled else { return }
+            discoveredAccounts = result
         }
     }
+
 }

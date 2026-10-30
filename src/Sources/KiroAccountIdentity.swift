@@ -13,12 +13,25 @@ enum KiroAccountIdentity {
 
     static func email(_ payload: [String: Any]) -> String? {
         let candidate = JWTEmailExtractor.email(from: value(payload, ["access_token", "accessToken"]))
+            ?? JWTEmailExtractor.email(from: value(payload, ["id_token", "idToken"]))
             ?? value(payload, ["email", "username"])
         // Older imports wrote "kiro-account" into every unidentified session.
         return candidate.flatMap { $0.contains("@") ? $0 : nil }
     }
 
     static func sameAccount(_ a: [String: Any], _ b: [String: Any]) -> Bool {
+        // A Gmail can own separate Google and AWS Builder ID subscriptions.
+        if value(a, ["auth_method", "authMethod"]) != nil,
+           value(b, ["auth_method", "authMethod"]) != nil,
+           KiroAWSAuth.isAWSSession(a) != KiroAWSAuth.isAWSSession(b) { return false }
+        let providers: Set<String> = ["google", "github", "aws", "builderid"]
+        if let left = value(a, ["provider"])?.lowercased(),
+           let right = value(b, ["provider"])?.lowercased(),
+           providers.contains(left), providers.contains(right) {
+            let normalizedLeft = left == "builderid" ? "aws" : left
+            let normalizedRight = right == "builderid" ? "aws" : right
+            if normalizedLeft != normalizedRight { return false }
+        }
         var matchedIdentity = false
         for keys in [["user_id", "userId"], ["profile_arn", "profileArn"]] {
             if let left = value(a, keys), let right = value(b, keys) {

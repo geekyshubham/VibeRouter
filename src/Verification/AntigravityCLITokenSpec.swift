@@ -21,7 +21,7 @@ struct AntigravityCLITokenSpec {
         return try? JSONSerialization.jsonObject(with: out) as? [String: Any]
     }
 
-    static func main() {
+    static func main() throws {
         let go = update([
             "access_token": "ya29.old_access",
             "token_type": "Bearer",
@@ -141,12 +141,9 @@ struct AntigravityCLITokenSpec {
         )!))!
         precondition(renewed == .init(accessToken: "ya29.renewed", refreshToken: "1//r", idToken: "keep.me.ok", expiry: expiry))
 
-        let command = AntigravityCLIToken.keychainWriteCommand(#"a\b"c"#)!
-        precondition(command == #"add-generic-password -U -a antigravity -s gemini -w "a\\b\"c""# + "\n")
-        precondition(AntigravityCLIToken.keychainWriteCommand("line1\nline2") == nil, "newline would split the command")
-        precondition(AntigravityCLIToken.keychainWriteCommand("") == nil)
-        precondition(AntigravityCLIToken.keychainWriteCommand(String(repeating: "x", count: 1_900)) != nil)
-        precondition(AntigravityCLIToken.keychainWriteCommand(String(repeating: "x", count: 4_000)) == nil, "over the stdin line cap")
+        let source = try String(contentsOfFile: "src/Sources/AntigravityCLIToken.swift", encoding: .utf8)
+        precondition(source.contains("NativeKeychain.write"), "refresh writes use noninteractive Keychain API")
+        precondition(!source.contains("Process()"), "refresh cannot spawn password prompt helpers")
 
         print("AntigravityCLITokenSpec: OK")
     }

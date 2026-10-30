@@ -563,11 +563,13 @@ enum VibeRouterCLI {
         guard let provider = args.first?.lowercased() else { throw missing("provider") }
         args.removeFirst(); try rejectExtra(args)
 
-        if provider == "kiro" {
+        if ["kiro", "kiro-google", "kiro-github"].contains(provider) {
             guard !options.json else {
                 throw Failure("interactive_required", "Kiro login opens an interactive browser flow.", hint: "Run `viberouter login kiro` in a terminal without --json.", exitCode: 2)
             }
-            let result = await KiroAWSAuth.addAccount()
+            let result = provider == "kiro"
+                ? await KiroAWSAuth.addAccount()
+                : await KiroSocialAuth.addAccount(provider: provider == "kiro-google" ? "Google" : "Github")
             switch result {
             case .success(let message): emit(["connected": true, "provider": provider], human: message, options: options)
             case .failure(let message): throw Failure("login_failed", message)

@@ -1018,7 +1018,9 @@ private struct AccountUsageBlock: View {
                     .controlSize(.small)
                     .tint(tint)
                     .disabled(isSwitching)
-                    .help("Make this the active \(serviceType.displayName) session on this Mac (writes native auth, kills & relaunches the desktop app like Cockpit).")
+                    .help(serviceType == .kiro
+                        ? "Use this account in new Kiro CLI sessions on this Mac."
+                        : "Make this the active \(serviceType.displayName) session on this Mac (writes native auth and restarts the desktop app).")
                 }
 
                 if let switchMessage {
@@ -1093,6 +1095,7 @@ private struct AccountUsageBlock: View {
         // Always prefer the auth-file identity so multi-account lists stay distinct.
         // (Usage payloads can stamp a shared SuperGrok email onto every Grok row.)
         let fromFile = account.baseDisplayName
+        if serviceType == .kiro, let email = usage?.accountEmail, !email.isEmpty { return email }
         if !fromFile.isEmpty, fromFile != account.id {
             return fromFile
         }

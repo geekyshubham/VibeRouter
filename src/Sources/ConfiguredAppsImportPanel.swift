@@ -9,16 +9,8 @@ struct ConfiguredAppsImportPanel: View {
 
     @State private var discoveredAccounts: [DiscoveredConfiguredAccount] = []
 
-    private var importableAccounts: [DiscoveredConfiguredAccount] {
-        discoveredAccounts.filter { account in
-            !ConfiguredAccountDiscovery.isAlreadyConnected(
-                account,
-                existingAccounts: authManager.accounts(for: account.serviceType),
-                zaiAPIKeys: serverManager.activeZaiAPIKeys,
-                customCredentials: serverManager.customProviderCredentials
-            )
-        }
-    }
+    @State private var discoveryTask: Task<Void, Never>?
+    private var importableAccounts: [DiscoveredConfiguredAccount] { discoveredAccounts }
 
     var body: some View {
         // Discovery must run even when the list is empty — do not put onAppear
@@ -62,7 +54,6 @@ struct ConfiguredAppsImportPanel: View {
                 }
             }
         }
-        .onAppear(perform: refreshDiscovery)
         .onChange(of: authManager.serviceAccounts) { _ in
             refreshDiscovery()
         }
@@ -78,16 +69,19 @@ struct ConfiguredAppsImportPanel: View {
     }
 
     private func refreshDiscovery() {
-        discoveredAccounts = ConfiguredAccountDiscovery.discoverAllImportable(
-            connectedAccounts: { authManager.accounts(for: $0) },
-            zaiAPIKeys: serverManager.activeZaiAPIKeys,
-            customCredentials: serverManager.customProviderCredentials
-        )
-        NSLog(
-            "[ConfiguredAppsImport] discovered=%d importable=%d",
-            discoveredAccounts.count,
-            importableAccounts.count
-        )
+        discoveryTask?.cancel()
+        let accounts = authManager.serviceAccounts
+        let keys = serverManager.activeZaiAPIKeys
+        let credentials = serverManager.customProviderCredentials
+        discoveryTask = Task { @MainActor in
+            let result = await Task.detached(priority: .utility) {
+                ConfiguredAccountDiscovery.discoverAllImportable(
+                    connectedAccounts: { accounts[$0]?.accounts ?? [] },
+                    zaiAPIKeys: keys, customCredentials: credentials)
+            }.value
+            guard !Task.isCancelled else { return }
+            discoveredAccounts = result
+        }
     }
 
     private func providerCategoryLabel(for account: DiscoveredConfiguredAccount) -> String {

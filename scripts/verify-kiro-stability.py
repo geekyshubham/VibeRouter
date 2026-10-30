@@ -20,6 +20,7 @@ with tempfile.TemporaryDirectory(prefix="viberouter-verification-") as directory
         "-I", str(root / "src/.build/checkouts/Yams/Sources/CYaml/include"),
         "-F", str(build), "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", str(build),
         str(root / "src/Verification/KiroStabilitySpec.swift"),
-        str(root / "src/Verification/KiroAccountFailoverSpec.swift"), *objects, "-o", str(binary),
+        str(root / "src/Verification/KiroAccountFailoverSpec.swift"),
+        str(root / "src/Verification/KiroAccountSessionSpec.swift"), *objects, "-o", str(binary),
     ], check=True)
     subprocess.run([str(binary)], cwd=root, check=True)

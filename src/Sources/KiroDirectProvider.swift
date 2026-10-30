@@ -236,13 +236,7 @@ enum KiroDirectProvider {
     }
 
     private static func resolveKiroCLI() -> String? {
-        let fm = FileManager.default
-        let candidates = [
-            "/opt/homebrew/bin/kiro-cli",
-            "/usr/local/bin/kiro-cli",
-            fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/kiro-cli").path,
-        ]
-        return candidates.first { fm.isExecutableFile(atPath: $0) }
+        KiroCLIUsageProbe.resolveKiroCLI()
     }
 
     // MARK: - Credentials
@@ -503,23 +497,7 @@ enum KiroDirectProvider {
     }
 
     private static func cliPayload(forKey key: String) -> [String: Any]? {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Application Support/kiro-cli/data.sqlite3")
-        var db: OpaquePointer?
-        guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let db else { return nil }
-        defer { sqlite3_close(db) }
-        var stmt: OpaquePointer?
-        let sql = "SELECT value FROM auth_kv WHERE key = ? LIMIT 1"
-        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK, let stmt else { return nil }
-        defer { sqlite3_finalize(stmt) }
-        let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
-        guard sqlite3_bind_text(stmt, 1, key, -1, transient) == SQLITE_OK else { return nil }
-        guard sqlite3_step(stmt) == SQLITE_ROW, let cString = sqlite3_column_text(stmt, 0) else { return nil }
-        let raw = String(cString: cString)
-        guard let data = raw.data(using: .utf8),
-              let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        return payload
+        KiroCLISession.payload(forKey: key)
     }
 
     static func cliSocialAccessToken() -> String? {

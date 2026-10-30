@@ -646,6 +646,14 @@ enum TokenRefreshService {
             syncGeminiCredentials(oldRefresh: trimmed, updated: updated)
         case "cursor":
             syncCursorState(oldRefresh: trimmed, updated: updated)
+        case "kiro":
+            if let native = KiroCLISession.currentPayload(),
+               refreshToken(from: native) == trimmed,
+               KiroAccountIdentity.sameAccount(native, updated) {
+                var session = native
+                session.merge(updated) { _, fresh in fresh }
+                try? KiroCLISession.apply(session)
+            }
         case "xai", "grok":
             syncGrokCLICredentials(oldRefresh: trimmed, updated: updated)
         default:
@@ -654,6 +662,11 @@ enum TokenRefreshService {
     }
 
     private static func syncClaudeCredentials(oldRefresh: String, updated: [String: Any]) {
+        // A stale plaintext file can belong to a different account from the
+        // Keychain. It must never authorize overwriting Claude Code's session.
+        guard let native = NativeUsageFetcher.readClaudeAppPayload(),
+              AccountCredentialIdentity.sameAccount(updated, native),
+              refreshToken(from: native) == oldRefresh else { return }
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
         var root: [String: Any] = (try? Data(contentsOf: url)).flatMap {
@@ -694,38 +707,18 @@ enum TokenRefreshService {
         _ = writeAuthFile(root, to: url)
         if let data = try? JSONSerialization.data(withJSONObject: root),
            let json = String(data: data, encoding: .utf8) {
-            writeClaudeKeychain(json)
-            NSLog("[TokenRefresh] Synced rotated tokens to Claude Code-credentials keychain")
+            if writeClaudeKeychain(json) {
+                NSLog("[TokenRefresh] Synced rotated tokens to Claude Code-credentials keychain")
+            }
         }
     }
 
     private static func readClaudeKeychainData() -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        try? process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-        let output = pipe.fileHandleForReading.readDataToEndOfFile()
-        return output.isEmpty ? nil : output
+        NativeKeychain.read(service: "Claude Code-credentials").data
     }
 
-    private static func writeClaudeKeychain(_ json: String) {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "add-generic-password", "-U",
-            "-s", "Claude Code-credentials",
-            "-a", NSUserName(),
-            "-w", json,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
-        process.waitUntilExit()
+    private static func writeClaudeKeychain(_ json: String) -> Bool {
+        NativeKeychain.write(Data(json.utf8), service: "Claude Code-credentials", account: NSUserName())
     }
 
     private static func syncGeminiCredentials(oldRefresh: String, updated: [String: Any]) {
@@ -779,6 +772,7 @@ enum TokenRefreshService {
             return false
         }
         let flat = flattenedAuth(payload)
+        if kind == "claude", stringValue(flat, keys: [parkedRefreshTokenKey]) != nil { return true }
         if (flat["type"] as? String)?.lowercased() == "claude",
            let native = NativeUsageFetcher.readClaudeAppPayload(),
            AccountCredentialIdentity.sameAccount(flat, native),
@@ -907,7 +901,7 @@ enum TokenRefreshService {
     static func refreshOpenAIGrant(refreshToken: String) async -> OAuthGrantResult {
         let trimmed = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .failed }
-        return await OpenAIRefreshFlight.shared.run(token: trimmed) {
+        return await OAuthRefreshFlight.shared.run(token: "codex:" + trimmed) {
             await postOpenAIRefresh(refreshToken: trimmed)
         }
     }
@@ -938,14 +932,44 @@ enum TokenRefreshService {
         return !AccountCredentialIdentity.sameAccount(file, local)
     }
 
+    /// Where a native client's refresh token is kept while that client owns the
+    /// family. Neither VibeRouter nor the bundled proxy POSTs this key, but the
+    /// account stays renewable once the client signs into someone else: dropping
+    /// the token outright orphaned the file when Claude Code switched accounts.
+    static let parkedRefreshTokenKey = "viberouter_parked_refresh_token"
+
+    /// Keep `refresh` aside and remove any usable refresh token. True when `payload` changed.
+    @discardableResult
+    static func parkRefreshToken(_ refresh: String?, in payload: inout [String: Any]) -> Bool {
+        let refresh = refresh ?? refreshToken(from: payload)
+        var changed = false
+        for key in ["refresh_token", "refreshToken"] where payload[key] != nil {
+            payload.removeValue(forKey: key)
+            changed = true
+        }
+        if let refresh, !refresh.isEmpty, payload[parkedRefreshTokenKey] as? String != refresh {
+            payload[parkedRefreshTokenKey] = refresh
+            changed = true
+        }
+        return changed
+    }
+
+    /// Hand a parked refresh token back to VibeRouter once no native client owns it.
+    @discardableResult
+    static func restoreParkedRefreshToken(in payload: inout [String: Any]) -> Bool {
+        guard let parked = stringValue(payload, keys: [parkedRefreshTokenKey]) else { return false }
+        payload.removeValue(forKey: parkedRefreshTokenKey)
+        if refreshToken(from: payload) == nil { payload["refresh_token"] = parked }
+        return true
+    }
+
     private static func refreshAnthropic(_ payload: [String: Any], forceOAuth: Bool = false) async -> [String: Any]? {
         let local = NativeUsageFetcher.readClaudeAppPayload()
         // Native Claude Code owns this token family. Overlay the live access token
         // and never POST the refresh token — even on force, even if the file looks newer.
         if let local, !shouldNetworkRefreshClaude(payload: payload, native: local) {
             var adopted = copyTokenFields(from: local, onto: payload)
-            adopted.removeValue(forKey: "refresh_token")
-            adopted.removeValue(forKey: "refreshToken")
+            parkRefreshToken(refreshToken(from: local), in: &adopted)
             NSLog("[TokenRefresh] Skipping Anthropic refresh; Claude Code owns this token family")
             return adopted
         }
@@ -954,22 +978,34 @@ enum TokenRefreshService {
            NativeUsageFetcher.shouldAdoptClaudeCLITokens(local: local, file: payload)
         {
             var adopted = copyTokenFields(from: local, onto: payload)
-            adopted.removeValue(forKey: "refresh_token")
-            adopted.removeValue(forKey: "refreshToken")
+            parkRefreshToken(refreshToken(from: local), in: &adopted)
             return adopted
         }
 
         guard let refresh = refreshToken(from: payload) else { return nil }
-        let endpoint = "https://platform.claude.com/v1/oauth/token"
+        // Usage polling, the keep-alive timer and manual refresh may overlap.
+        // Only one of them may rotate a given Claude refresh token.
+        switch await OAuthRefreshFlight.shared.run(token: "claude:" + refresh, work: {
+            await postAnthropicRefresh(refreshToken: refresh)
+        }) {
+        case .success(let json):
+            return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+        case .reuseRevoked, .failed:
+            return nil
+        }
+    }
+
+    private static func postAnthropicRefresh(refreshToken refresh: String) async -> OAuthGrantResult {
+        // Match the bundled proxy's token endpoint and preserve the grant's scopes.
+        let endpoint = "https://api.anthropic.com/v1/oauth/token"
         let body: [String: Any] = [
             "grant_type": "refresh_token",
             "refresh_token": refresh,
             "client_id": anthropicClientID,
-            "scope": "user:file_upload user:inference user:mcp_servers user:profile user:sessions:claude_code",
         ]
         guard let postURL = URL(string: endpoint),
               let bodyData = try? JSONSerialization.data(withJSONObject: body)
-        else { return nil }
+        else { return .failed }
 
         var request = URLRequest(url: postURL)
         request.httpMethod = "POST"
@@ -981,12 +1017,26 @@ enum TokenRefreshService {
 
         do {
             let (responseData, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
-                  let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
-            else { return nil }
-            return applyOAuthTokenResponse(json, to: payload, preferRefreshFromResponse: true)
+            guard let http = response as? HTTPURLResponse else { return .failed }
+            guard (200...299).contains(http.statusCode) else {
+                NSLog("[TokenRefresh] Anthropic OAuth renewal failed (HTTP %d)", http.statusCode)
+                let now = Date()
+                let json = (try? JSONSerialization.jsonObject(with: responseData)) as? [String: Any]
+                if json?["error"] as? String == "invalid_grant" {
+                    await OAuthRefreshFlight.shared.block(token: "claude:" + refresh, until: .distantFuture)
+                    NSLog("[TokenRefresh] Claude refresh grant is no longer valid; reconnect this account")
+                } else {
+                    let delay = max(5 * 60, ClaudeUsagePoller.retryDelay(
+                        http.value(forHTTPHeaderField: "Retry-After"), now: now))
+                    await OAuthRefreshFlight.shared.block(token: "claude:" + refresh, until: now.addingTimeInterval(delay))
+                }
+                return .failed
+            }
+            guard let json = try JSONSerialization.jsonObject(with: responseData) as? [String: Any]
+            else { return .failed }
+            return .success(json)
         } catch {
-            return nil
+            return .failed
         }
     }
 
@@ -1062,8 +1112,8 @@ enum TokenRefreshService {
     }
 
     private static func refreshKiro(_ payload: [String: Any]) async -> [String: Any]? {
-        if let aws = await KiroAWSAuth.refresh(payload) {
-            return aws
+        if KiroAWSAuth.isAWSSession(payload) {
+            return await KiroAWSAuth.refresh(payload)
         }
         guard let refresh = stringValue(payload, keys: ["refreshToken", "refresh_token"]) else {
             return nil
@@ -1085,6 +1135,8 @@ enum TokenRefreshService {
                     updated["refresh_token"] = newRefresh
                     updated["refreshToken"] = newRefresh
                 }
+                if let arn = stringValue(json, keys: ["profileArn", "profile_arn"]) { updated["profile_arn"] = arn }
+                if let idToken = stringValue(json, keys: ["idToken", "id_token"]) { updated["id_token"] = idToken }
                 if let expiresAt = stringValue(json, keys: ["expiresAt", "expires_at"]) {
                     updated["expires_at"] = expiresAt
                     updated["expired"] = expiresAt
@@ -1352,19 +1404,26 @@ enum TokenRefreshService {
     }
 }
 
-/// One in-flight OpenAI grant per refresh token. A second POST with the old token
-/// returns `refresh_token_reused` and OpenAI revokes the family.
-private actor OpenAIRefreshFlight {
-    static let shared = OpenAIRefreshFlight()
+/// One OAuth grant per provider and refresh token, shared by concurrent callers.
+/// Reusing a rotated token can revoke the account's whole session.
+actor OAuthRefreshFlight {
+    static let shared = OAuthRefreshFlight()
     private var inflight: [String: Task<TokenRefreshService.OAuthGrantResult, Never>] = [:]
+    private var blockedUntil: [String: Date] = [:]
+
+    func block(token: String, until: Date) {
+        blockedUntil[token] = until
+    }
 
     func run(
         token: String,
+        now: Date = Date(),
         work: @Sendable @escaping () async -> TokenRefreshService.OAuthGrantResult
     ) async -> TokenRefreshService.OAuthGrantResult {
         if let existing = inflight[token] {
             return await existing.value
         }
+        guard now >= (blockedUntil[token] ?? .distantPast) else { return .failed }
         let task = Task { await work() }
         inflight[token] = task
         let result = await task.value

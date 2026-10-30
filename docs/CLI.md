@@ -53,7 +53,9 @@ viberouter login gemini
 viberouter login kimi
 viberouter login antigravity
 viberouter login grok
-viberouter login kiro
+viberouter login kiro         # AWS Builder ID
+viberouter login kiro-google  # Google Kiro subscription
+viberouter login kiro-github  # GitHub Kiro subscription
 
 viberouter import list
 viberouter import codex

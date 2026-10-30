@@ -2,7 +2,7 @@ import XCTest
 @testable import CLIProxyMenuBar
 
 final class GlobalAccountIsolationTests: XCTestCase {
-    private var oauthProviders: [ServiceType] { ServiceType.allCases.filter { $0 != .zai && $0 != .opencodeGo } }
+    private var oauthProviders: [ServiceType] { ServiceType.allCases.filter { !$0.isAPIKeyProvider } }
 
     func testEveryOAuthProviderPreservesUnidentifiedAccountsAndReimports() throws {
         for provider in oauthProviders {

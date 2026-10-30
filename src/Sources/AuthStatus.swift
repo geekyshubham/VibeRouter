@@ -99,14 +99,7 @@ struct AuthAccount: Identifiable, Equatable {
     }
     
     var displayName: String {
-        let base: String
-        if let email = email, !email.isEmpty {
-            base = email
-        } else if let login = login, !login.isEmpty {
-            base = login
-        } else {
-            base = id
-        }
+        let base = baseDisplayName
         if let planLabel, !planLabel.isEmpty {
             return "\(base) · \(planLabel)"
         }
@@ -117,6 +110,7 @@ struct AuthAccount: Identifiable, Equatable {
     var baseDisplayName: String {
         if let email = email, !email.isEmpty { return email }
         if let login = login, !login.isEmpty { return login }
+        if type == .kiro { return "Kiro account (\(KiroAccountIdentity.digest(id).prefix(6)))" }
         return id
     }
     
@@ -140,6 +134,7 @@ struct ServiceAccounts: Equatable {
 
 class AuthManager: ObservableObject {
     @Published var serviceAccounts: [ServiceType: ServiceAccounts] = [:]
+    private var backgroundScan: Task<Void, Never>?
     
     private static let dateFormatters: [ISO8601DateFormatter] = {
         let withFractional = ISO8601DateFormatter()
@@ -167,6 +162,17 @@ class AuthManager: ObservableObject {
     func checkAuthStatus() {
         let scanned = scanAuthDirectory()
         applyAccounts(scanned)
+    }
+
+    func refreshInBackground() {
+        Task { @MainActor [weak self] in
+            guard let self, self.backgroundScan == nil else { return }
+            self.backgroundScan = Task {
+                let scanned = await Task.detached(priority: .utility) { self.scanAuthDirectory() }.value
+                self.applyAccounts(scanned)
+                self.backgroundScan = nil
+            }
+        }
     }
 
     /// Maps an auth file's `type` to a ServiceType. Custom openai-compatibility
@@ -215,7 +221,7 @@ class AuthManager: ObservableObject {
                 }
                 let json = TokenRefreshService.flattenedAuth(raw)
 
-                let email = json["email"] as? String
+                let email = serviceType == .kiro ? KiroAccountIdentity.email(json) : json["email"] as? String
                 let login = json["login"] as? String
                     ?? json["username"] as? String
                     ?? (serviceType == .opencodeGo || serviceType == .experientialLabs ? json["label"] as? String : nil)
@@ -356,10 +362,8 @@ class AuthManager: ObservableObject {
     private func applyAccounts(_ newAccounts: [ServiceType: [AuthAccount]]) {
         let update = {
             for type in ServiceType.allCases {
-                self.serviceAccounts[type] = ServiceAccounts(
-                    type: type,
-                    accounts: newAccounts[type] ?? []
-                )
+                let next = ServiceAccounts(type: type, accounts: newAccounts[type] ?? [])
+                if self.serviceAccounts[type] != next { self.serviceAccounts[type] = next }
             }
         }
 
@@ -545,6 +549,8 @@ class AuthManager: ObservableObject {
                 return ChatGPTPlanFormatter.displayName(for: ChatGPTPlanFormatter.normalizePlanType(plan))
             }
             return nil
+        case .kiro:
+            return json["plan_label"] as? String ?? json["plan_type"] as? String
         case .copilot:
             if let plan = json["plan_type"] as? String ?? json["copilot_plan"] as? String {
                 return plan

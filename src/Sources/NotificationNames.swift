@@ -8,6 +8,7 @@ extension Notification.Name {
 /// Cross-process commands sent by the `viberouter` CLI to the running menu-bar app.
 /// Distributed notifications deliberately carry no credentials or account payloads.
 enum VibeRouterDistributedCommand {
+    static let showInterface = Notification.Name("com.viberouter.app.show-interface")
     static let serverStart = Notification.Name("com.viberouter.cli.server.start")
     static let serverStop = Notification.Name("com.viberouter.cli.server.stop")
     static let serverRestart = Notification.Name("com.viberouter.cli.server.restart")

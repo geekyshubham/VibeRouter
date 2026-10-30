@@ -32,6 +32,7 @@ struct KiroStabilitySpec {
         check(ModelProviderLabel.pickerOption(for: ["id": "grok-imagine-video"]) == nil, "video-only models stay out of the Claude picker")
         check(ModelProviderLabel.pickerOption(for: ["id": "gpt-6.1-sol", "providers": ["codex"]]) != nil, "Codex text models remain selectable")
         checks += try await KiroAccountFailoverSpec.run()
+        checks += try KiroAccountSessionSpec.run()
         // An unchanged token in the early-refresh window must never switch
         // the request onto an account with different model entitlements.
         let tokenNow = Date(timeIntervalSince1970: 1_800_000_000)

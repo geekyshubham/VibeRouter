@@ -90,6 +90,19 @@ enum KiroCLIUsageProbe {
         cached = (Date(), value)
     }
 
+    /// Called only while importing a verified live CLI session, never for sibling accounts.
+    static func currentEmail() -> String? {
+        guard let binary = resolveKiroCLI(),
+              let output = run(binary: binary, arguments: ["whoami"], timeout: 8) else { return nil }
+        return parseEmail(output: output)
+    }
+
+    static func parseEmail(output: String) -> String? {
+        let text = stripANSI(output)
+        guard !text.localizedCaseInsensitiveContains("not logged in") else { return nil }
+        return firstMatch(in: text, pattern: #"(?im)^\s*(?:Email:\s*)?([^\s<>]+@[^\s<>]+)\s*$"#)
+    }
+
     // MARK: - Parse (CodexBar-compatible)
 
     static func parse(output: String) -> KiroCLIUsageSnapshot? {
@@ -161,9 +174,10 @@ enum KiroCLIUsageProbe {
 
     // MARK: - Process
 
-    private static func resolveKiroCLI() -> String? {
+    static func resolveKiroCLI() -> String? {
         let fm = FileManager.default
         let candidates = [
+            "/Applications/Kiro CLI.app/Contents/MacOS/kiro-cli",
             "/opt/homebrew/bin/kiro-cli",
             "/usr/local/bin/kiro-cli",
             fm.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin/kiro-cli").path,
@@ -268,7 +282,7 @@ enum KiroCLIUsageProbe {
         // "Estimated Usage | resets on 2026-06-01 | KIRO POWER"
         if let name = firstMatch(
             in: text,
-            pattern: #"Estimated Usage[ \t]*\|[^\n|]*\|[ \t]*([A-Z][A-Z0-9 ]+)"#
+            pattern: #"Estimated Usage[ \t]*\|[^\n|]*\|[ \t]*([A-Z][A-Z0-9 +\-]+)"#
         ) {
             return name.trimmingCharacters(in: .whitespacesAndNewlines)
         }
@@ -276,7 +290,7 @@ enum KiroCLIUsageProbe {
             return name.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         // Legacy box format: "| KIRO FREE"
-        if let name = firstMatch(in: text, pattern: #"\|[ \t]*(KIRO[ \t]+\w+)"#) {
+        if let name = firstMatch(in: text, pattern: #"\|[ \t]*(KIRO[ \t]+[A-Z0-9+ -]+)"#) {
             return name.trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return nil

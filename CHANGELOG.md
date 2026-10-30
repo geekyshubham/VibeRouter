@@ -11,8 +11,17 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An Experiential Labs card on the Overview shows the credit balance, spend today, this week, and this month, and the key's daily limit when one is set.
 
 ### Fixed
+- Native-token writes also use noninteractive Keychain access. Background account scans and import discovery run off the UI thread, and unchanged account scans no longer trigger repeated view updates.
+- Reopening VibeRouter from Finder or an app icon raises Settings in the existing instance instead of silently exiting a second instance. The menu-bar panel activates when opened.
+- Background native-account discovery reads Keychain entries without opening password dialogs or waiting for user input.
+- Restored Copy Link beside Add Account, including Kiro Google, GitHub and AWS sign-ins, so login can finish in Dolphin or another browser without opening the default browser.
+- Kiro switching uses the CLI's SQLite credential store without touching legacy Keychain entries, preventing repeated password prompts.
+- Kiro accounts support native CLI switching and CLI session imports. Add Account offers Google, GitHub and AWS Builder ID separately, and each account shows its verified email, subscription and credit allowance instead of a raw filename or another login's plan.
 - Claude Code's VibeRouter model picker now refreshes from the live catalog each time the proxy starts, so newly added providers such as Experiential Labs appear without re-running setup.
 - Antigravity shows the separate Gemini 4 Argon weekly limit that paid Google AI Pro accounts get. Running out of Argon no longer marks the account exhausted or changes the Gemini badge.
+- A Claude account no longer expires after Claude Code signs into a different account. While Claude Code owns an account's session, VibeRouter keeps its newest refresh token aside instead of discarding it, and takes over renewal once Claude Code moves to someone else, including when VibeRouter's own Switch does it. Before, the account's only refresh token went with Claude Code and the account expired within 8 hours.
+- VibeRouter reads Claude Code's session from the Keychain, as Claude Code does. A leftover `~/.claude/.credentials.json` from an earlier switch is no longer taken for the live session.
+- Importing Claude Code now uses that same live session and saves its refresh token for a later account switch immediately. A stale plaintext credential file cannot overwrite the active account's Keychain during renewal.
 
 ## [1.3.4] - 2026-10-21
 

@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 enum NativeUsageFetcher {
     static func fetchUsage(
@@ -2457,34 +2458,38 @@ enum NativeUsageFetcher {
         payload: [String: Any],
         authFile: URL
     ) async -> ProviderUsageSnapshot {
-        let email = stringValue(payload, keys: ["email"])
-
-        // This card is the auth file's own account. The kiro-cli login can be a
-        // different account, so it is fetched with its own token and compared.
-        var api = await fetchKiroLimitsAPI(payload: payload, authFile: authFile)
-        api?.profileArn = stringValue(payload, keys: ["profile_arn", "profileArn"])
+        // Each saved login owns its quota. A different live CLI session must never
+        // supply this card's email, plan or credits.
+        var ownPayload = payload
+        let native = KiroDirectProvider.cliPayload()
+        let matchesCLI = native.map { KiroAccountIdentity.sameAccount(payload, $0.payload) } ?? false
+        if let native, matchesCLI, KiroDirectProvider.cliAccessToken() != nil,
+           (TokenRefreshService.accessTokenExpiry(from: native.payload) ?? .distantPast)
+            > (TokenRefreshService.accessTokenExpiry(from: payload) ?? .distantPast) {
+            ownPayload.merge(native.payload) { _, current in current }
+        }
+        var api = await fetchKiroLimitsAPI(payload: ownPayload, authFile: authFile)
+        api?.profileArn = stringValue(ownPayload, keys: ["profile_arn", "profileArn"])
+        if let api { persistKiroMetadata(api, matching: ownPayload, authFile: authFile) }
+        let email = api?.email ?? KiroAccountIdentity.email(ownPayload)
         KiroDirectProvider.rememberUserID(
             api?.userID,
             forAccount: KiroDirectProvider.Credential.authFile(authFile.lastPathComponent).ledgerAccount
         )
-        let social = await fetchKiroCLILimits()
-        if let session = KiroDirectProvider.cliPayload() {
-            KiroDirectProvider.rememberUserID(social?.userID, forAccount: session.credential.ledgerAccount)
-        }
-
-        var cliText: KiroCLIUsageSnapshot?
-        if api == nil, social == nil {
-            cliText = await Task.detached(priority: .userInitiated) {
-                KiroCLIUsageProbe.fetch()
-            }.value
+        if let native, matchesCLI {
+            KiroDirectProvider.rememberUserID(api?.userID, forAccount: native.credential.ledgerAccount)
+            if api == nil, let cli = await Task.detached(priority: .utility, operation: { KiroCLIUsageProbe.fetch() }).value {
+                api = KiroAPIUsage(planName: cli.planName, reportedPlan: cli.planName,
+                    totalUsed: cli.creditsUsed, windows: kiroCLIWindows(cli), userID: nil)
+            }
         }
         let snapshot = kiroSnapshot(
             authAccountID: authAccountID,
             providerID: providerID,
             email: email,
             api: api,
-            social: social,
-            cliText: cliText,
+            social: nil,
+            cliText: nil,
             authFileName: authFile.lastPathComponent,
             lastProxyAccount: KiroProxyUsageLedger.latestAccount()
         )
@@ -2498,7 +2503,7 @@ enum NativeUsageFetcher {
     static func kiroSameAccount(_ auth: KiroAPIUsage, _ social: KiroAPIUsage) -> Bool {
         if let a = auth.userID, let b = social.userID, !a.isEmpty, !b.isEmpty { return a == b }
         if let a = auth.profileArn, let b = social.profileArn, !a.isEmpty, !b.isEmpty { return a == b }
-        return KiroCreditMath.samePlan(auth.reportedPlan, social.reportedPlan)
+        return false // A shared subscription tier is not an account identity.
     }
 
     static func kiroSnapshot(
@@ -2637,6 +2642,32 @@ enum NativeUsageFetcher {
         let windows: [RateWindow]
         let userID: String?
         var profileArn: String?
+        var email: String?
+    }
+
+    private static func kiroMetadata(_ usage: KiroAPIUsage) -> [String: Any] {
+        var metadata: [String: Any] = [:]
+        metadata["email"] = usage.email
+        metadata["user_id"] = usage.userID
+        metadata["plan_label"] = usage.planName
+        metadata["plan_type"] = usage.reportedPlan
+        return metadata
+    }
+
+    static func kiroAccountMetadata(payload: [String: Any]) async -> [String: Any] {
+        guard case .value(let usage) = await fetchKiroLimitsOnce(payload: payload) else { return [:] }
+        return kiroMetadata(usage)
+    }
+
+    private static func persistKiroMetadata(_ usage: KiroAPIUsage, matching payload: [String: Any], authFile: URL) {
+        guard var stored = readAuthPayload(at: authFile), KiroAccountIdentity.sameAccount(stored, payload) else { return }
+        let metadata = kiroMetadata(usage)
+        guard metadata.contains(where: { key, value in (stored[key] as? String) != (value as? String) }) else { return }
+        stored.merge(metadata) { _, verified in verified }
+        guard AccountCredentialIdentity.isConsistent(stored),
+              let data = try? JSONSerialization.data(withJSONObject: stored, options: [.prettyPrinted, .sortedKeys]) else { return }
+        try? data.write(to: authFile, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: authFile.path)
     }
 
     /// This auth file's own limits. `currentUsage` is the total burn, overage included.
@@ -2654,38 +2685,19 @@ enum NativeUsageFetcher {
         return nil
     }
 
-    /// The kiro-cli social login's limits, read with its own token (read-only call).
-    private static func fetchKiroCLILimits() async -> KiroAPIUsage? {
-        guard var social = KiroDirectProvider.cliPayload()?.payload else { return nil }
-        if KiroDirectProvider.cliAccessToken() == nil {
-            let refreshed = await Task.detached(priority: .utility) {
-                KiroDirectProvider.refreshCLISession()
-            }.value
-            guard refreshed, KiroDirectProvider.cliAccessToken() != nil,
-                  let fresh = KiroDirectProvider.cliPayload()?.payload
-            else { return nil }
-            social = fresh
-        }
-        guard case .value(var usage) = await fetchKiroLimitsOnce(payload: social, sendProfileArn: true) else {
-            return nil
-        }
-        usage.profileArn = stringValue(social, keys: ["profile_arn", "profileArn"])
-        return usage
-    }
-
     private enum KiroLimitsAttempt {
         case value(KiroAPIUsage)
         case unauthorized
         case unavailable
     }
 
-    private static func fetchKiroLimitsOnce(payload: [String: Any], sendProfileArn: Bool = false) async -> KiroLimitsAttempt {
+    private static func fetchKiroLimitsOnce(payload: [String: Any]) async -> KiroLimitsAttempt {
         guard let accessToken = stringValue(payload, keys: ["access_token"]) else { return .unavailable }
         let region = stringValue(payload, keys: ["region"]) ?? "us-east-1"
         guard let url = URL(string: "https://codewhisperer.\(region).amazonaws.com/getUsageLimits") else { return .unavailable }
 
-        var body: [String: Any] = ["origin": "KIRO_CLI"]
-        if sendProfileArn, let arn = stringValue(payload, keys: ["profile_arn", "profileArn"]) {
+        var body: [String: Any] = ["origin": "KIRO_CLI", "isEmailRequired": true]
+        if let arn = stringValue(payload, keys: ["profile_arn", "profileArn"]) {
             body["profileArn"] = arn
         }
         var request = URLRequest(url: url)
@@ -2739,7 +2751,8 @@ enum NativeUsageFetcher {
             reportedPlan: reportedPlan,
             totalUsed: totalUsed,
             windows: windows,
-            userID: userInfo.flatMap { stringValue($0, keys: ["userId", "userID"]) }
+            userID: userInfo.flatMap { stringValue($0, keys: ["userId", "userID"]) },
+            email: userInfo.flatMap { KiroAccountIdentity.email($0) }
         )
     }
 
@@ -3472,15 +3485,36 @@ enum NativeUsageFetcher {
         // Claude Code owns the rotating refresh token for this account. Leaving
         // it in ~/.cli-proxy-api lets the bundled proxy POST it, Anthropic
         // invalidates the previous RT, and `claude` logs out on the next request.
-        if let local,
-           !TokenRefreshService.shouldNetworkRefreshClaude(payload: payload, native: local),
-           payload["refresh_token"] != nil || payload["refreshToken"] != nil
-        {
-            payload.removeValue(forKey: "refresh_token")
-            payload.removeValue(forKey: "refreshToken")
-            changed = true
+        // Park the native token instead of dropping it: once Claude Code signs
+        // into another account, nothing else holds this account's session.
+        if let local {
+            if !TokenRefreshService.shouldNetworkRefreshClaude(payload: payload, native: local) {
+                if TokenRefreshService.parkRefreshToken(
+                    TokenRefreshService.refreshToken(from: local), in: &payload
+                ) { changed = true }
+            } else if stringValue(local, keys: ["access_token"]) != nil,
+                      AccountCredentialIdentity.hasConflict(payload, local),
+                      TokenRefreshService.restoreParkedRefreshToken(in: &payload)
+            {
+                // Only a native session positively identified as someone else
+                // releases the family; an unreadable Keychain proves nothing.
+                NSLog("[ClaudeOverlay] Claude Code moved to another account; VibeRouter now renews %@",
+                      authFile.lastPathComponent)
+                changed = true
+            }
         }
         return changed ? writeAuthPayload(payload, to: authFile) : false
+    }
+
+    /// Run the Claude overlay on every Claude auth file, parking or releasing native refresh tokens.
+    static func overlayClaudeCLICredentials(inDirectory directory: URL, localClaude: [String: Any]? = nil) {
+        guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
+        else { return }
+        let local = localClaude ?? readClaudeAppPayload()
+        for file in files where file.pathExtension == "json" {
+            guard (readAuthPayload(at: file)?["type"] as? String)?.lowercased() == "claude" else { continue }
+            _ = overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: local)
+        }
     }
 
     /// True when `local` belongs to the same Claude account (or account matches) and has a newer/valid access token than `file`.
@@ -3613,57 +3647,15 @@ enum NativeUsageFetcher {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let credentialsURL = home.appendingPathComponent(".claude/.credentials.json")
 
-        var candidateDatas: [Data] = []
-        if let fileData = try? Data(contentsOf: credentialsURL) {
-            candidateDatas.append(fileData)
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-        if (try? process.run()) != nil {
-            process.waitUntilExit()
-            if process.terminationStatus == 0 {
-                let output = pipe.fileHandleForReading.readDataToEndOfFile()
-                if !output.isEmpty {
-                    candidateDatas.append(output)
-                }
-            }
-        }
-
-        var parsedPayloads: [[String: Any]] = []
-        for data in candidateDatas {
-            guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let oauth = root["claudeAiOauth"] as? [String: Any],
-                  let accessToken = oauth["accessToken"] as? String,
-                  !accessToken.isEmpty
-            else { continue }
-
-            var payload: [String: Any] = ["access_token": accessToken]
-            if let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty {
-                payload["refresh_token"] = refreshToken
-            }
-            if let email = oauth["email"] as? String, !email.isEmpty {
-                payload["email"] = email
-            }
-            if let expiresAt = oauth["expiresAt"] as? Double {
-                let exp = ISO8601DateFormatter().string(
-                    from: Date(timeIntervalSince1970: expiresAt / 1000)
-                )
-                payload["expired"] = exp
-                payload["expires_at"] = exp
-            }
-            parsedPayloads.append(payload)
-        }
-
-        guard var bestPayload = parsedPayloads.max(by: { a, b in
-            let expA = parseISO8601(a["expired"] as? String) ?? .distantPast
-            let expB = parseISO8601(b["expired"] as? String) ?? .distantPast
-            return expA < expB
-        }) else { return nil }
+        let keychain = NativeKeychain.read(service: "Claude Code-credentials")
+        // An inaccessible item leaves the live session unknown; only a missing
+        // item permits falling back to a possibly stale plaintext account.
+        let keychainMissing = keychain.status == errSecItemNotFound
+        guard keychain.status == errSecSuccess || keychainMissing else { return nil }
+        guard var bestPayload = claudeAppPayload(
+            keychain: keychain.data,
+            file: try? Data(contentsOf: credentialsURL)
+        ) else { return nil }
 
         if bestPayload["email"] == nil || (bestPayload["email"] as? String)?.isEmpty == true {
             let configURLs = [
@@ -3684,6 +3676,34 @@ enum NativeUsageFetcher {
         }
 
         return bestPayload
+    }
+
+    /// Claude Code on macOS reads only its Keychain item while one exists; the
+    /// plaintext file is its fallback. A file left by an earlier account switch
+    /// is not the live session, even when its access token expires later.
+    static func claudeAppPayload(keychain: Data?, file: Data?) -> [String: Any]? {
+        guard let data = keychain ?? file,
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let oauth = root["claudeAiOauth"] as? [String: Any],
+              let accessToken = oauth["accessToken"] as? String,
+              !accessToken.isEmpty
+        else { return nil }
+
+        var payload: [String: Any] = ["access_token": accessToken]
+        if let refreshToken = oauth["refreshToken"] as? String, !refreshToken.isEmpty {
+            payload["refresh_token"] = refreshToken
+        }
+        if let email = oauth["email"] as? String, !email.isEmpty {
+            payload["email"] = email
+        }
+        if let expiresAt = oauth["expiresAt"] as? Double {
+            let exp = ISO8601DateFormatter().string(
+                from: Date(timeIntervalSince1970: expiresAt / 1000)
+            )
+            payload["expired"] = exp
+            payload["expires_at"] = exp
+        }
+        return payload
     }
 
     static func readAuthPayload(at url: URL) -> [String: Any]? {

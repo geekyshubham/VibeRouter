@@ -17,6 +17,7 @@ enum KiroAWSAuth {
 
     static func isAWSSession(_ payload: [String: Any]) -> Bool {
         let method = (stringValue(payload, keys: ["auth_method", "authMethod"]) ?? "").lowercased()
+        if method == "social" || method == "imported" { return false }
         let provider = (stringValue(payload, keys: ["provider"]) ?? "").lowercased()
         let hasOIDC = stringValue(payload, keys: ["client_id", "clientId"]) != nil
             && stringValue(payload, keys: ["client_secret", "clientSecret"]) != nil
@@ -28,6 +29,8 @@ enum KiroAWSAuth {
 
     static func addAccount(
         region: String = defaultRegion,
+        opensBrowser: Bool = true,
+        onAuthURL: ((String) -> Void)? = nil,
         authDirectory: URL = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".cli-proxy-api")
     ) async -> ConfiguredAccountImportResult {
@@ -35,13 +38,17 @@ enum KiroAWSAuth {
             let session = try await startDeviceLogin(region: region)
             if let url = URL(string: session.verificationURL) {
                 await MainActor.run {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(session.userCode, forType: .string)
-                    NSWorkspace.shared.open(url)
+                    if opensBrowser {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(session.userCode, forType: .string)
+                        NSWorkspace.shared.open(url)
+                    }
+                    onAuthURL?(url.absoluteString)
                 }
             }
             let tokens = try await poll(session)
-            let record = authRecord(from: tokens, session: session)
+            var record = authRecord(from: tokens, session: session)
+            record.merge(await NativeUsageFetcher.kiroAccountMetadata(payload: record)) { _, verified in verified }
             return write(record, authDirectory: authDirectory)
         } catch {
             return .failure(message: error.localizedDescription)
@@ -110,6 +117,7 @@ enum KiroAWSAuth {
         let interval: TimeInterval
         let expiresAt: Date
         let region: String
+        var clientSecretExpiresAt: String? = nil
     }
 
     struct Tokens {
@@ -162,7 +170,10 @@ enum KiroAWSAuth {
             verificationURL: verification,
             interval: TimeInterval(max(5, interval)),
             expiresAt: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            region: region
+            region: region,
+            clientSecretExpiresAt: (registered["clientSecretExpiresAt"] as? Double).map {
+                isoString(Date(timeIntervalSince1970: $0))
+            }
         )
     }
 
@@ -205,7 +216,7 @@ enum KiroAWSAuth {
 
     static func authRecord(from tokens: Tokens, session: DeviceSession, now: Date = Date()) -> [String: Any] {
         let exp = now.addingTimeInterval(TimeInterval(tokens.expiresIn))
-        return [
+        var record: [String: Any] = [
             "type": "kiro",
             "auth_method": "idc",
             "provider": "AWS",
@@ -225,7 +236,11 @@ enum KiroAWSAuth {
             "email": "",
             "profile_arn": "",
             "disabled": false,
+            "oauth_flow": "DeviceCode",
+            "scopes": scopes,
         ]
+        record["client_secret_expires_at"] = session.clientSecretExpiresAt
+        return record
     }
 
     // MARK: - IO
@@ -249,7 +264,7 @@ enum KiroAWSAuth {
         return json
     }
 
-    private static func postJSONStatus(url: String, body: [String: Any]) async -> ([String: Any]?, Int) {
+    static func postJSONStatus(url: String, body: [String: Any]) async -> ([String: Any]?, Int) {
         guard let endpoint = URL(string: url),
               let data = try? JSONSerialization.data(withJSONObject: body)
         else { return (nil, -1) }

@@ -384,6 +384,8 @@ final class TokenRefreshServiceTests: XCTestCase {
         var native = payload
         native["refresh_token"] = "native-only-rt"
         try JSONSerialization.data(withJSONObject: payload).write(to: file)
+        // The first pass parks the native refresh token; later passes change nothing.
+        XCTAssertTrue(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: native))
         let before = try Data(contentsOf: file)
         XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: native))
         XCTAssertEqual(try Data(contentsOf: file), before)
@@ -391,6 +393,137 @@ final class TokenRefreshServiceTests: XCTestCase {
         native["email"] = "someone-else@x.com"
         XCTAssertNotNil(AuthManager.sessionExpiryDate(from: payload, serviceType: .claude, nativeClaude: native))
         XCTAssertNotNil(AuthManager.sessionExpiryDate(from: payload, serviceType: .claude))
+    }
+
+    func testClaudeAccountStaysRenewableAfterClaudeCodeSwitchesAccounts() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude-a.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude", "email": "a@x.com", "access_token": "a-at",
+            "refresh_token": "a-rt-imported", "expired": "2020-01-01T00:00:00Z",
+        ]).write(to: file)
+        let parked = TokenRefreshService.parkedRefreshTokenKey
+
+        // Claude Code is signed into A: it owns the family, the proxy cannot POST it.
+        let nativeA: [String: Any] = ["email": "a@x.com", "access_token": "a-live", "refresh_token": "a-rt-native",
+                                      "expired": "2099-01-01T00:00:00Z"]
+        NativeUsageFetcher.overlayClaudeCLICredentials(inDirectory: dir, localClaude: nativeA)
+        var stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertNil(TokenRefreshService.refreshToken(from: stored))
+        XCTAssertEqual(stored[parked] as? String, "a-rt-native")
+        XCTAssertFalse(TokenRefreshService.shouldRefresh(payload: stored))
+
+        // Claude Code rotates; the parked copy follows.
+        var rotated = nativeA
+        rotated["refresh_token"] = "a-rt-rotated"
+        XCTAssertTrue(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: rotated))
+        stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertEqual(stored[parked] as? String, "a-rt-rotated")
+
+        // A native session with no known identity releases nothing.
+        XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+            onto: file, localClaude: ["access_token": "anonymous-at", "refresh_token": "anonymous-rt"]))
+
+        // Claude Code signs into B: A's newest token comes back to VibeRouter.
+        let nativeB: [String: Any] = ["email": "b@x.com", "access_token": "b-live", "refresh_token": "b-rt",
+                                      "expired": "2099-01-01T00:00:00Z"]
+        XCTAssertTrue(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: nativeB))
+        stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertEqual(stored["refresh_token"] as? String, "a-rt-rotated")
+        XCTAssertNil(stored[parked])
+        XCTAssertEqual(stored["access_token"] as? String, "a-live")
+        XCTAssertTrue(TokenRefreshService.shouldNetworkRefreshClaude(payload: stored, native: nativeB))
+        XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: nativeB))
+    }
+
+    func testClaudeNativeSessionPrefersKeychainOverLeftoverFile() throws {
+        func credentials(_ access: String, expiresAt: Double) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["claudeAiOauth": [
+                "accessToken": access, "refreshToken": access + "-rt", "expiresAt": expiresAt,
+            ]])
+        }
+        let keychain = try credentials("keychain-at", expiresAt: 1_000_000_000_000)
+        let leftover = try credentials("leftover-at", expiresAt: 4_000_000_000_000)
+        XCTAssertEqual(
+            NativeUsageFetcher.claudeAppPayload(keychain: keychain, file: leftover)?["access_token"] as? String,
+            "keychain-at"
+        )
+        XCTAssertEqual(
+            NativeUsageFetcher.claudeAppPayload(keychain: nil, file: leftover)?["access_token"] as? String,
+            "leftover-at"
+        )
+        // A Keychain item without a Claude login means signed out, not "use the file".
+        let signedOut = try JSONSerialization.data(withJSONObject: ["mcpOAuth": [:]])
+        XCTAssertNil(NativeUsageFetcher.claudeAppPayload(keychain: signedOut, file: leftover))
+        XCTAssertNil(NativeUsageFetcher.claudeAppPayload(keychain: Data("invalid".utf8), file: leftover))
+    }
+
+    func testClaudeImportKeepsRefreshTokenBeforeFirstPollAndReimportParksItAgain() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nativeA: [String: Any] = [
+            "email": "a@x.com", "access_token": "a-live", "refresh_token": "a-rt",
+            "expired": "2099-01-01T00:00:00Z",
+        ]
+        func importA() throws -> URL {
+            guard case .success = ConfiguredAccountImporter.importClaudeCode(
+                authDirectory: dir, displayName: "Claude Code", localClaude: nativeA
+            ) else { XCTFail("Claude import failed"); throw NSError(domain: "test", code: 1) }
+            return try XCTUnwrap(FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil).first)
+        }
+        let file = try importA()
+        var stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertEqual(stored[TokenRefreshService.parkedRefreshTokenKey] as? String, "a-rt")
+        XCTAssertNil(TokenRefreshService.refreshToken(from: stored))
+        // The account switches immediately, before the first background pass.
+        XCTAssertTrue(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+            onto: file, localClaude: ["email": "b@x.com", "access_token": "b-live"]))
+        stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertEqual(stored["refresh_token"] as? String, "a-rt")
+        // Switching back and reimporting cannot leave a proxy-usable copy.
+        XCTAssertEqual(try importA(), file)
+        stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertNil(TokenRefreshService.refreshToken(from: stored))
+        XCTAssertEqual(stored[TokenRefreshService.parkedRefreshTokenKey] as? String, "a-rt")
+    }
+
+    func testConcurrentClaudeOAuthRenewalsShareOneGrant() async {
+        actor Counter {
+            var count = 0
+            func increment() { count += 1 }
+        }
+        let flight = OAuthRefreshFlight()
+        let counter = Counter()
+        await withTaskGroup(of: Void.self) { group in
+            for _ in 0..<20 {
+                group.addTask {
+                    let result = await flight.run(token: "claude:synthetic-refresh") {
+                        await counter.increment()
+                        try? await Task.sleep(nanoseconds: 50_000_000)
+                        return .success(["access_token": "rotated-access"])
+                    }
+                    guard case .success(let json) = result else { return XCTFail("Missing grant") }
+                    XCTAssertEqual(json["access_token"] as? String, "rotated-access")
+                }
+            }
+        }
+        let count = await counter.count
+        XCTAssertEqual(count, 1)
+        let now = Date()
+        await flight.block(token: "claude:synthetic-refresh", until: now.addingTimeInterval(600))
+        _ = await flight.run(token: "claude:synthetic-refresh", now: now.addingTimeInterval(599)) {
+            XCTFail("A rate-limited grant must respect its retry deadline")
+            return .failed
+        }
+        _ = await flight.run(token: "claude:synthetic-refresh", now: now.addingTimeInterval(600)) {
+            await counter.increment()
+            return .success(["access_token": "retried-access"])
+        }
+        let retryCount = await counter.count
+        XCTAssertEqual(retryCount, 2)
     }
 
     func testCopyTokenFieldsIncludesCamelCaseAliases() {

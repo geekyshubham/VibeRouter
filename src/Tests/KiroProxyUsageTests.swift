@@ -486,7 +486,7 @@ final class KiroProxyUsageTests: XCTestCase {
         XCTAssertEqual(subtitles(nil), ["this login", "kiro-cli login"], "no ledger, no billing claim")
     }
 
-    func testSameAccountFallsBackToArnThenPlan() {
+    func testSameAccountRequiresUserOrProfileIdentity() {
         let a = NativeUsageFetcher.KiroAPIUsage(
             planName: "KIRO PRO", reportedPlan: "KIRO PRO", totalUsed: 1, windows: [], userID: nil, profileArn: "arn:a"
         )
@@ -497,7 +497,7 @@ final class KiroProxyUsageTests: XCTestCase {
         let c = NativeUsageFetcher.KiroAPIUsage(
             planName: "KIRO PRO", reportedPlan: "KIRO PRO", totalUsed: 1, windows: [], userID: nil, profileArn: nil
         )
-        XCTAssertTrue(NativeUsageFetcher.kiroSameAccount(a, c))
+        XCTAssertFalse(NativeUsageFetcher.kiroSameAccount(a, c), "a plan title cannot identify an account")
     }
 
     func testCLITextWindowsAreNotClampedAndShowOverage() {

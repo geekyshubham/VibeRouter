@@ -83,58 +83,14 @@ enum AntigravityCLIToken {
     }
 
     private static func readKeychain() -> String? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-a", keychainAccount, "-s", keychainService, "-w"]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0,
+        guard let data = NativeKeychain.read(service: keychainService, account: keychainAccount).data,
               let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty
-        else { return nil }
+              !value.isEmpty else { return nil }
         return value
     }
 
-    /// `security -i` reads one command line per stdin line and truncates past 4,095 bytes.
-    private static let securityInteractiveLineLimit = 4_000
-
-    /// Sends the secret over stdin so it never appears in a process argument list.
     private static func writeKeychain(_ value: String) -> Bool {
-        guard let line = keychainWriteCommand(value) else { return false }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["-i"]
-        let input = Pipe()
-        process.standardInput = input
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-        } catch {
-            return false
-        }
-        input.fileHandleForWriting.write(Data(line.utf8))
-        try? input.fileHandleForWriting.close()
-        process.waitUntilExit()
-        return process.terminationStatus == 0
-    }
-
-    /// Build the `security -i` line for a Keychain update; nil when the value can't be sent safely.
-    static func keychainWriteCommand(_ value: String) -> String? {
-        guard !value.isEmpty, !value.contains(where: \.isNewline) else { return nil }
-        let quoted = "\"" + value
-            .replacingOccurrences(of: "\\", with: "\\\\")
-            .replacingOccurrences(of: "\"", with: "\\\"") + "\""
-        let line = "add-generic-password -U -a \(keychainAccount) -s \(keychainService) -w \(quoted)\n"
-        return line.utf8.count <= securityInteractiveLineLimit ? line : nil
+        NativeKeychain.write(Data(value.utf8), service: keychainService, account: keychainAccount)
     }
 
     /// Back up the original once, write atomically, and keep both owner-only.

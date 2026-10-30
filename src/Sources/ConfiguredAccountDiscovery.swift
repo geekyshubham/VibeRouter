@@ -35,6 +35,7 @@ enum ConfiguredAccountImportKind: Equatable {
     case grokOpenCode
     case antigravityCockpit(email: String)
     case kiroIDE
+    case kiroCLI
     case cursorApp
     case zaiAPIKey(String)
     case opencodeGo(apiKey: String)
@@ -130,6 +131,12 @@ enum ConfiguredAccountDiscovery {
         case let .opencodeGo(apiKey):
             let stored = customCredentials[ProviderCatalog.openCodeGoProviderName] ?? []
             return stored.contains { $0.apiKey == apiKey && !$0.isDisabled }
+        case .kiroCLI:
+            guard let native = KiroCLISession.currentPayload(home: home) else { return false }
+            return existingAccounts.contains { account in
+                guard let stored = NativeUsageFetcher.readAuthPayload(at: account.filePath) else { return false }
+                return KiroAccountIdentity.sameAccount(stored, native)
+            }
         case .kiroIDE:
             let cache = ConfiguredAccountImporter.kiroIDETokenRelativePaths.lazy
                 .compactMap { NativeUsageFetcher.readAuthPayload(at: home.appendingPathComponent($0)) }.first
@@ -736,16 +743,24 @@ enum ConfiguredAccountDiscovery {
     // MARK: - Kiro
 
     private static func discoverKiro() -> [DiscoveredConfiguredAccount] {
+        var accounts: [DiscoveredConfiguredAccount] = []
+        if let cli = KiroCLISession.currentPayload() {
+            accounts.append(DiscoveredConfiguredAccount(
+                id: "kiro-cli", serviceType: .kiro,
+                displayName: KiroAccountIdentity.email(cli) ?? "Kiro CLI session",
+                sourceAppName: "Kiro CLI", importKind: .kiroCLI
+            ))
+        }
         let tokenPaths = [
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".aws/sso/cache/kiro-auth-token.json"),
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".kiro/kiro-auth-token.json"),
         ]
 
         guard tokenPaths.contains(where: { FileManager.default.fileExists(atPath: $0.path) }) else {
-            return []
+            return accounts
         }
 
-        return [
+        return accounts + [
             DiscoveredConfiguredAccount(
                 id: "kiro-ide",
                 serviceType: .kiro,
@@ -823,28 +838,7 @@ enum ConfiguredAccountDiscovery {
     }
 
     private static func claudeKeychainData() -> Data? {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
-
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = Pipe()
-
-        do {
-            try process.run()
-        } catch {
-            return nil
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { return nil }
-
-        let output = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard let string = String(data: output, encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines),
-              !string.isEmpty
-        else { return nil }
-        return string.data(using: .utf8)
+        NativeKeychain.read(service: "Claude Code-credentials").data
     }
 
     // MARK: - Shared helpers

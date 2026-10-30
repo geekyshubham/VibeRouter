@@ -14,7 +14,8 @@ the CodeWhisperer surface:
 The reply is an AWS event stream whose frames carry assistantResponseEvent
 (text), toolUseEvent (incremental tool JSON), and meteringEvent (credits).
 
-The live checks are skipped when no Kiro credential or no running proxy exists.
+Run with --live to enable optional upstream and local API checks. Offline source
+checks do not consume credits or depend on the machine's current login.
 Exit 0 on success, 1 on failure.
 """
 from __future__ import annotations
@@ -80,7 +81,8 @@ def source_checks() -> None:
         "advertises only models this account can reach",
         '"auto"' in src and '"claude-sonnet-4.5"' in src and '"claude-haiku-4.5"' in src,
     )
-    check("opus is not advertised (upstream rejects it)", "claude-opus" not in src)
+    check("model catalog uses the CLI's current model list with a namespaced fallback",
+          "fetchCLIModels" in src and 'modelPrefix = "kiro/"' in src and "fallbackModels" in src)
     check("history is built as userInputMessage/assistantResponseMessage pairs",
           '"userInputMessage"' in src and '"assistantResponseMessage"' in src)
     check("tool calls round-trip", "toolUses" in src and "toolResults" in src)
@@ -92,9 +94,11 @@ def source_checks() -> None:
 
     proxy = PROXY.read_text()
     check("proxy intercepts /v1/messages for Kiro models",
-          'rewrittenPath.hasSuffix("/v1/messages")' in proxy and "KiroDirectProvider.translateRequest" in proxy)
-    check("proxy merges Kiro models into the catalog",
-          "serveMergedModelCatalog" in proxy and "advertisedModelIDs" in proxy)
+          "KiroDirectProvider.httpRoute(for: rewrittenPath)" in proxy and "KiroDirectProvider.translateRequest" in proxy
+          and "case .messages:" in proxy and "case .countTokens:" in proxy)
+    check("proxy preserves backend model filtering instead of resurrecting disabled Kiro models",
+          "serveMergedModelCatalog" in proxy and "ModelProviderLabel.tag" in proxy
+          and "KiroDirectProvider.advertisedModelIDs" not in proxy)
 
 
 def kiro_token() -> str | None:
@@ -186,8 +190,9 @@ def local_route_check() -> None:
 
 def main() -> int:
     source_checks()
-    upstream_contract_check()
-    local_route_check()
+    if "--live" in sys.argv:
+        upstream_contract_check()
+        local_route_check()
     print("all Kiro direct-route checks passed")
     return 0
 

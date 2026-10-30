@@ -562,55 +562,15 @@ enum CodexWorkspaceCredentials {
 
     @discardableResult
     static func writeKeychain(authFileJSON: [String: Any], codexHome: URL) -> Bool {
-        guard let data = try? JSONSerialization.data(withJSONObject: authFileJSON, options: [.sortedKeys]),
-              let secret = String(data: data, encoding: .utf8)
-        else { return false }
-
-        let account = keychainAccountName(codexHome: codexHome)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "add-generic-password", "-U",
-            "-s", keychainService,
-            "-a", account,
-            "-w", secret,
-        ]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-            return process.terminationStatus == 0
-        } catch {
-            return false
-        }
+        guard let data = try? JSONSerialization.data(withJSONObject: authFileJSON, options: [.sortedKeys]) else { return false }
+        return NativeKeychain.write(data, service: keychainService, account: keychainAccountName(codexHome: codexHome))
     }
 
     /// Codex CLI/desktop persist the live session here first; `~/.codex/auth.json` can lag.
     static func readKeychain(codexHome: URL) -> [String: Any]? {
-        let account = keychainAccountName(codexHome: codexHome)
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        process.arguments = [
-            "find-generic-password",
-            "-s", keychainService,
-            "-a", account,
-            "-w",
-        ]
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return nil
-        }
-        guard process.terminationStatus == 0 else { return nil }
-        let output = pipe.fileHandleForReading.readDataToEndOfFile()
-        guard !output.isEmpty,
-              let json = try? JSONSerialization.jsonObject(with: output) as? [String: Any]
-        else { return nil }
+        guard let data = NativeKeychain.read(service: keychainService,
+            account: keychainAccountName(codexHome: codexHome)).data,
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
         return json
     }
 

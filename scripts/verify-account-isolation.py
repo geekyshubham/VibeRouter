@@ -17,13 +17,18 @@ objects = [str(p) for target in ["CLIProxyMenuBar", "Yams", "CYaml"]
 compiler = ["swiftc", "-parse-as-library", "-I", str(build / "Modules"),
             "-I", str(root / "src/.build/checkouts/Yams/Sources/CYaml/include"),
             "-F", str(build), "-framework", "Sparkle", "-Xlinker", "-rpath", "-Xlinker", str(build)]
-test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests", "ClaudeUsagePollerTests", "ClaudeProtocolTests", "ClaudeNativeSessionRefreshTests"]
+test_classes = ["GlobalAccountIsolationTests", "MultiAccountIsolationTests", "ManualTokenImporterTests", "TokenRefreshServiceTests", "GrokUsageSyncTests", "ClaudeUsagePollerTests", "ClaudeProtocolTests", "ClaudeNativeSessionRefreshTests", "KiroProxyUsageTests", "AntigravityCLISwitchTests", "AntigravitySwitchTests"]
 test_sources = [(name, (root / f"src/Tests/{name}.swift").read_text()) for name in test_classes]
 methods = [(name, method, asynchronous, throwing) for name, source in test_sources
            for method, asynchronous, throwing in re.findall(r"func (test\w+)\(\)( async)?( throws)?\s*\{", source)]
 shim = r'''
 import Foundation
 class XCTestCase {}
+struct XCTSkip: Error {
+    let message: String
+    init(_ message: String) { self.message = message }
+}
+private var skips = 0
 private var failures = 0
 func XCTFail(_ message: String = "", file: StaticString = #file, line: UInt = #line) {
     failures += 1
@@ -32,8 +37,20 @@ func XCTFail(_ message: String = "", file: StaticString = #file, line: UInt = #l
 func XCTAssertEqual<T: Equatable>(_ a: T, _ b: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if a != b { XCTFail(message.isEmpty ? "Values differ" : message, file: file, line: line) }
 }
-func XCTAssertEqual(_ a: Double, _ b: Double, accuracy: Double, file: StaticString = #file, line: UInt = #line) {
+func XCTAssertEqual(_ a: Double, _ b: Double, accuracy: Double, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if abs(a - b) > accuracy { XCTFail("Values differ", file: file, line: line) }
+}
+func XCTAssertNotEqual<T: Equatable>(_ a: T, _ b: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
+    if a == b { XCTFail(message.isEmpty ? "Expected different values" : message, file: file, line: line) }
+}
+func XCTAssertGreaterThan<T: Comparable>(_ a: T, _ b: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
+    if !(a > b) { XCTFail(message.isEmpty ? "Expected greater value" : message, file: file, line: line) }
+}
+func XCTAssertGreaterThanOrEqual<T: Comparable>(_ a: T, _ b: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
+    if !(a >= b) { XCTFail(message.isEmpty ? "Expected greater or equal value" : message, file: file, line: line) }
+}
+func XCTAssertLessThan<T: Comparable>(_ a: T, _ b: T, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
+    if !(a < b) { XCTFail(message.isEmpty ? "Expected smaller value" : message, file: file, line: line) }
 }
 func XCTAssertFalse(_ value: Bool, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if value { XCTFail(message.isEmpty ? "Expected false" : message, file: file, line: line) }
@@ -41,10 +58,10 @@ func XCTAssertFalse(_ value: Bool, _ message: String = "", file: StaticString = 
 func XCTAssertTrue(_ value: Bool, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if !value { XCTFail(message.isEmpty ? "Expected true" : message, file: file, line: line) }
 }
-func XCTAssertNil<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) {
+func XCTAssertNil<T>(_ value: T?, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if value != nil { XCTFail("Expected nil", file: file, line: line) }
 }
-func XCTAssertNotNil<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) {
+func XCTAssertNotNil<T>(_ value: T?, _ message: String = "", file: StaticString = #file, line: UInt = #line) {
     if value == nil { XCTFail("Expected a value", file: file, line: line) }
 }
 func XCTUnwrap<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) throws -> T {
@@ -55,14 +72,16 @@ func XCTUnwrap<T>(_ value: T?, file: StaticString = #file, line: UInt = #line) t
     return value
 }
 '''
-calls = "\n".join(f'        {"try " if throwing else ""}{"await " if asynchronous else ""}{name}().{method}()\n        print("Checked {method}")'
-                  for name, method, asynchronous, throwing in methods)
+calls = "\n".join(
+    f'        do {{ {"try " if throwing else ""}{"await " if asynchronous else ""}{name}().{method}(); print("Checked {method}") }}'
+    + (rf' catch let skip as XCTSkip {{ skips += 1; print("Skipped {method}: \(skip.message)") }} catch {{ XCTFail("{method}: \(error)") }}' if throwing else "")
+    for name, method, asynchronous, throwing in methods)
 runner = '''
 @main struct AccountIsolationChecks {
     static func main() async throws {
-''' + calls + f'''
+''' + calls + rf'''
         if failures > 0 {{ exit(1) }}
-        print("Passed {len(methods)} account isolation regression checks")
+        print("Passed \({len(methods)} - skips) regression cases; \(skips) opt-in cases skipped")
     }}
 }}
 '''
@@ -77,9 +96,13 @@ with tempfile.TemporaryDirectory(prefix="viberouter-account-verification-") as d
         sources.append(str(test_file))
     subprocess.run([*compiler, *sources, *objects, "-o", str(binary)], check=True)
     subprocess.run([str(binary)], cwd=root, check=True)
-    for name in ["ZAIAPIKeyStoreSpec", "CustomProviderCredentialStoreSpec"]:
+    for name in ["ZAIAPIKeyStoreSpec", "CustomProviderCredentialStoreSpec", "AntigravityCLITokenSpec"]:
         spec_source = Path(directory) / f"{name}.swift"
         spec_binary = Path(directory) / name
         spec_source.write_text("@testable import CLIProxyMenuBar\n" + (root / f"src/Verification/{name}.swift").read_text())
         subprocess.run([*compiler, str(spec_source), *objects, "-o", str(spec_binary)], check=True)
         subprocess.run([str(spec_binary)], cwd=root, check=True)
+
+    reopen_binary = Path(directory) / "app-reopen"
+    subprocess.run([*compiler, str(root / "src/Verification/AppReopenSpec.swift"), *objects, "-o", str(reopen_binary)], check=True)
+    subprocess.run([str(reopen_binary)], cwd=root, check=True)
