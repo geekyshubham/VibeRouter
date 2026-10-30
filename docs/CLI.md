@@ -39,6 +39,21 @@ The TUI supports `Tab` or `1`–`4` to change pages, `j`/`k` or arrow keys to mo
 `r` to refresh, `s` to switch, `w` to wake a quota window, `e` to enable or disable,
 `x` to consume a reset, and `q` to quit.
 
+## Harness model lists
+
+Models enabled on the management console's Models page are the source for managed
+harness catalogs. VibeRouter refreshes the connected harness configurations every
+15 seconds and Claude-VibeRouter refreshes them before each launch. Run
+`viberouter harness refresh --json` to sync immediately. Restart an existing harness
+session if it caches its picker at startup.
+
+Claude Code and OpenCode list every enabled coding model, including Opus, Sonnet,
+and Haiku 5.5 when enabled. Image and video generation models are excluded from
+coding pickers. Factory receives the same models as custom entries. Codex's
+`viberouter` profile uses `.codex/viberouter-models.json`; Gemini uses
+`viberouter/<model-id>` custom aliases. Automatic sync only updates configurations
+already connected to the local proxy and preserves personal provider settings.
+
 ## Accounts, OAuth, and imports
 
 ```bash

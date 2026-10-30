@@ -105,8 +105,16 @@ enum VibeRouterCLI {
             case "api":
                 try await rawAPICommand(args: args, options: options)
             case "harness":
-                let msg = try CLIHarnessAutoconfigure.autoconfigure(.claudeCode)
-                emit(["ok": true, "message": msg], human: msg, options: options)
+                if args == ["refresh"] {
+                    guard CLIHarnessAutoconfigure.refreshManagedModelPickers() else {
+                        throw Failure("catalog_unavailable", "Could not refresh the Claude model picker from the proxy.")
+                    }
+                    emit(["refreshed": true], human: "Managed model pickers refreshed", options: options)
+                } else {
+                    try rejectExtra(args)
+                    let msg = try CLIHarnessAutoconfigure.autoconfigure(.claudeCode)
+                    emit(["ok": true, "message": msg], human: msg, options: options)
+                }
             case "doctor":
                 try await doctor(options: options)
             default:

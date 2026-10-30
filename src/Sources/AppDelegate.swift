@@ -24,6 +24,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     private var authFileMonitor: DispatchSourceFileSystemObject?
     private var userConfigFileMonitor: DispatchSourceFileSystemObject?
     private var configInputPoller: DispatchSourceTimer?
+    private var modelPickerPoller: DispatchSourceTimer?
     private var pendingAuthRefresh: DispatchWorkItem?
     private var polledConfigInputsFingerprint = ""
     private var isStartingServer = false
@@ -124,6 +125,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
             object: nil
         )
         registerCLICommands()
+        let modelPoller = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
+        modelPoller.schedule(deadline: .now() + 15, repeating: 15)
+        modelPoller.setEventHandler { _ = CLIHarnessAutoconfigure.refreshManagedModelPickers() }
+        modelPoller.resume()
+        modelPickerPoller = modelPoller
         if notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool == true {
             DispatchQueue.main.async { [weak self] in self?.openSettings() }
         }

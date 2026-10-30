@@ -119,13 +119,13 @@ enum CLIHarnessAutoconfigure {
             try configureClaudeCode(baseURL: base, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "Claude Code → claude-viberouter (\(base))"
         case .codex:
-            try configureCodex(baseURL: baseV1, apiKey: dummyAPIKey)
+            try configureCodex(baseURL: baseV1, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "Codex → \(baseV1)"
         case .openCode:
             try configureOpenCode(baseURL: baseV1, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "OpenCode → \(baseV1)"
         case .geminiCLI:
-            try configureGemini(baseURL: baseV1, apiKey: dummyAPIKey)
+            try configureGemini(baseURL: baseV1, apiKey: dummyAPIKey, proxyPort: proxyPort)
             return "Gemini CLI → \(baseV1)"
         case .factory:
             try configureFactory(baseURL: base, apiKey: dummyAPIKey, proxyPort: proxyPort)
@@ -172,13 +172,7 @@ enum CLIHarnessAutoconfigure {
         let previous = (try? readJSONForMerge(url))?["model"] as? String
         let main = previous.flatMap { ids.contains($0) ? $0 : nil }
             ?? available(["gpt-6.1-sol", "gpt-6-sol", "gpt-5.5"], fallback: first)
-        let opus = available(["kiro/claude-opus-5.5", "claude-opus-5-5", "claude-opus-5", "claude-opus-4-8"], fallback: main)
-        let sonnet = available(["kiro/claude-sonnet-5.5", "claude-sonnet-5-5", "claude-sonnet-5", "claude-sonnet-4-6"], fallback: main)
-        let haiku = available(["kiro/claude-haiku-4.5", "claude-haiku-5-5", "claude-haiku-4-5-20251001"], fallback: sonnet)
-        func metadata(_ id: String, key: String) -> String {
-            let entry = catalog.first { $0["id"] as? String == id } ?? ["id": id]
-            return ModelProviderLabel.tag(entry)[key] as? String ?? id
-        }
+        let aliases = claudeModelAliases(catalog: catalog)
         let options = catalog.compactMap(ModelProviderLabel.pickerOption)
         let root: [String: Any] = [
             "env": [
@@ -193,16 +187,7 @@ enum CLIHarnessAutoconfigure {
                 // Let Claude Code choose the selected model's compaction window.
                 // A global percentage tuned for Kiro causes premature compaction
                 // and repeated refills when switching to GPT or other providers.
-                "ANTHROPIC_DEFAULT_OPUS_MODEL": opus,
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME": metadata(opus, key: "display_name"),
-                "ANTHROPIC_DEFAULT_OPUS_MODEL_DESCRIPTION": metadata(opus, key: "description"),
-                "ANTHROPIC_DEFAULT_SONNET_MODEL": sonnet,
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME": metadata(sonnet, key: "display_name"),
-                "ANTHROPIC_DEFAULT_SONNET_MODEL_DESCRIPTION": metadata(sonnet, key: "description"),
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL": haiku,
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME": metadata(haiku, key: "display_name"),
-                "ANTHROPIC_DEFAULT_HAIKU_MODEL_DESCRIPTION": metadata(haiku, key: "description"),
-            ],
+            ].merging(aliases) { _, live in live },
             "model": main,
             // This file is passed with --settings, which is allowed to set the picker.
             // Only these rows, each labeled [VibeRouter], so the lineup is the proxy.
@@ -215,23 +200,165 @@ enum CLIHarnessAutoconfigure {
         try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
     }
 
-    /// Rebuilds the Claude Code picker from the live catalog so newly added providers appear without re-running setup.
-    @discardableResult
-    static func refreshClaudeCodePicker(proxyPort: Int = 8317) -> Bool {
-        let url = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".claude/settings.viberouter.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return true }
-        guard var root = try? readJSONForMerge(url), !root.isEmpty else { return true }
-        let options = fetchProxyModels(port: proxyPort).compactMap(ModelProviderLabel.pickerOption)
-        guard !options.isEmpty else { return false }
+    static func refreshedClaudePicker(root: [String: Any], catalog: [[String: Any]]) -> [String: Any]? {
+        let options = catalog.compactMap(ModelProviderLabel.pickerOption)
+        var updated = root
         var picker = root["modelPicker"] as? [String: Any] ?? ["replaceBuiltInOptions": true]
-        if let current = picker["options"] as? [[String: Any]],
-           NSArray(array: current).isEqual(to: options) {
-            return true
-        }
         picker["options"] = options
-        root["modelPicker"] = picker
-        return (try? writeJSON(root, to: url)) != nil
+        updated["modelPicker"] = picker
+        var env = root["env"] as? [String: Any] ?? [:]
+        for family in ["OPUS", "SONNET", "HAIKU"] {
+            for suffix in ["", "_NAME", "_DESCRIPTION"] {
+                env.removeValue(forKey: "ANTHROPIC_DEFAULT_\(family)_MODEL" + suffix)
+            }
+        }
+        env.merge(claudeModelAliases(catalog: catalog)) { _, live in live }
+        updated["env"] = env
+        return updated
+    }
+
+    /// Prefer each family's newest published model, rather than pinning a legacy
+    /// shortcut or inventing a model the proxy cannot route.
+    static func claudeModelAliases(catalog: [[String: Any]]) -> [String: String] {
+        let usable = catalog.filter { ModelProviderLabel.pickerOption(for: $0) != nil }
+        let families: [(String, [String])] = [
+            ("OPUS", ["claude-opus-5-5", "kiro/claude-opus-5.5", "claude-opus-5", "claude-opus-4-8"]),
+            ("SONNET", ["claude-sonnet-5-5", "kiro/claude-sonnet-5.5", "claude-sonnet-5", "claude-sonnet-4-6"]),
+            ("HAIKU", ["claude-haiku-5-5", "kiro/claude-haiku-5.5", "kiro/claude-haiku-4.5", "claude-haiku-4-5-20251001"]),
+        ]
+        var aliases: [String: String] = [:]
+        for (family, preferences) in families {
+            guard let entry = preferences.lazy.compactMap({ id in usable.first { $0["id"] as? String == id } }).first else { continue }
+            let tagged = ModelProviderLabel.tag(entry)
+            let prefix = "ANTHROPIC_DEFAULT_\(family)_MODEL"
+            aliases[prefix] = entry["id"] as? String
+            aliases[prefix + "_NAME"] = tagged["display_name"] as? String
+            aliases[prefix + "_DESCRIPTION"] = tagged["description"] as? String
+        }
+        return aliases
+    }
+
+    private static let catalogSyncLock = NSLock()
+
+    /// Refresh only harnesses already connected to this proxy. A single fetch is
+    /// shared by all writers; unavailable catalogs leave the last good lists intact.
+    @discardableResult
+    static func refreshManagedModelPickers(proxyPort: Int = 8317,
+                                          home: URL = FileManager.default.homeDirectoryForCurrentUser,
+                                          catalog supplied: [[String: Any]]? = nil) -> Bool {
+        guard catalogSyncLock.try() else { return true }
+        defer { catalogSyncLock.unlock() }
+        guard let catalog = supplied ?? requestProxyModels(port: proxyPort) else { return false }
+        let baseURL = "http://127.0.0.1:\(proxyPort)"
+        func writeIfChanged(_ root: [String: Any], previous: [String: Any], to url: URL) throws {
+            guard !NSDictionary(dictionary: previous).isEqual(to: root) else { return }
+            try writeJSON(root, to: url)
+        }
+        do {
+            let claude = home.appendingPathComponent(".claude/settings.viberouter.json")
+            if let root = try? readJSONForMerge(claude),
+               let env = root["env"] as? [String: Any],
+               let base = env["ANTHROPIC_BASE_URL"] as? String,
+               isLocalProxyURL(base, port: proxyPort),
+               let updated = refreshedClaudePicker(root: root, catalog: catalog) {
+                try writeIfChanged(updated, previous: root, to: claude)
+            }
+            for relative in [".config/opencode/opencode.json", ".config/opencode/opencode.jsonc"] {
+                let url = home.appendingPathComponent(relative)
+                guard let root = try? readJSONForMerge(url),
+                      var providers = root["provider"] as? [String: Any],
+                      var router = providers[providerKey] as? [String: Any],
+                      let options = router["options"] as? [String: Any],
+                      let base = options["baseURL"] as? String, isLocalProxyURL(base, port: proxyPort) else { continue }
+                var updated = root
+                router["models"] = openCodeModelEntries(catalog: catalog)
+                providers[providerKey] = router
+                updated["provider"] = providers
+                try writeIfChanged(updated, previous: root, to: url)
+            }
+            let factory = home.appendingPathComponent(".factory/config.json")
+            if let root = try? readJSONForMerge(factory), let existing = root["custom_models"] as? [[String: Any]],
+               let managed = existing.first(where: { ($0["model_display_name"] as? String)?.hasPrefix("VP:") == true }),
+               let base = managed["base_url"] as? String, isLocalProxyURL(base, port: proxyPort),
+               let key = managed["api_key"] as? String {
+                var updated = root
+                updated["custom_models"] = existing.filter { !(($0["model_display_name"] as? String)?.hasPrefix("VP:") ?? false) }
+                    + factoryModelEntries(catalog: catalog, baseURL: baseURL, apiKey: key)
+                try writeIfChanged(updated, previous: root, to: factory)
+            }
+            let codexConfig = home.appendingPathComponent(".codex/config.toml")
+            let codexCatalog = home.appendingPathComponent(".codex/viberouter-models.json")
+            if let text = try? String(contentsOf: codexConfig, encoding: .utf8),
+               text.contains("model_catalog_json"), text.contains("viberouter-models.json") {
+                let previous = (try? readJSONForMerge(codexCatalog)) ?? [:]
+                try writeIfChanged(["models": codexModelEntries(catalog: catalog)], previous: previous, to: codexCatalog)
+            }
+            let gemini = home.appendingPathComponent(".gemini/settings.json")
+            if let root = try? readJSONForMerge(gemini), let env = root["env"] as? [String: Any],
+               let base = env["GEMINI_API_BASE"] as? String, isLocalProxyURL(base, port: proxyPort) {
+                try writeIfChanged(refreshedGeminiModels(root: root, catalog: catalog), previous: root, to: gemini)
+            }
+            return true
+        } catch {
+            NSLog("[HarnessModels] Could not refresh a managed picker: %@", error.localizedDescription)
+            return false
+        }
+    }
+
+    private static func isLocalProxyURL(_ value: String, port: Int) -> Bool {
+        guard let url = URL(string: value), let host = url.host else { return false }
+        return ["127.0.0.1", "localhost", "::1"].contains(host) && url.port == port
+    }
+
+    static func openCodeModelEntries(catalog: [[String: Any]]) -> [String: Any] {
+        var models: [String: Any] = [:]
+        for entry in catalog where ModelProviderLabel.pickerOption(for: entry) != nil {
+            guard let id = entry["id"] as? String else { continue }
+            let name = ModelProviderLabel.tag(entry)["display_name"] as? String ?? id
+            models[openCodeModelKey(id)] = openCodeModelEntry(id: id, displayName: name)
+        }
+        return models
+    }
+
+    static func codexModelEntries(catalog: [[String: Any]]) -> [[String: Any]] {
+        catalog.enumerated().compactMap { index, entry in
+            guard ModelProviderLabel.pickerOption(for: entry) != nil, let id = entry["id"] as? String else { return nil }
+            let tagged = ModelProviderLabel.tag(entry)
+            return [
+                "slug": id, "display_name": tagged["display_name"] ?? id,
+                "description": tagged["description"] ?? "VibeRouter", "visibility": "list",
+                "supported_in_api": true, "priority": index, "supported_reasoning_levels": [],
+                "default_reasoning_level": "medium", "shell_type": "shell_command",
+                "base_instructions": "You are a helpful coding assistant.",
+                "truncation_policy": ["mode": "tokens", "limit": 10_000],
+                "support_verbosity": false, "default_verbosity": "medium", "apply_patch_tool_type": "freeform",
+                "input_modalities": ["text"], "effective_context_window_percent": 95,
+                "context_window": entry["context_length"] ?? entry["context_window"] ?? 128_000,
+                "experimental_supported_tools": [],
+            ]
+        }
+    }
+
+    static func refreshedGeminiModels(root: [String: Any], catalog: [[String: Any]]) -> [String: Any] {
+        var updated = root
+        var configs = root["modelConfigs"] as? [String: Any] ?? [:]
+        var aliases = configs["customAliases"] as? [String: Any] ?? [:]
+        aliases = aliases.filter { !$0.key.hasPrefix("viberouter/") }
+        for entry in catalog where ModelProviderLabel.pickerOption(for: entry) != nil {
+            guard let id = entry["id"] as? String else { continue }
+            aliases["viberouter/" + id] = ["modelConfig": ["model": id]]
+        }
+        configs["customAliases"] = aliases
+        updated["modelConfigs"] = configs
+        return updated
+    }
+
+    static func factoryModelEntries(catalog: [[String: Any]], baseURL: String, apiKey: String) -> [[String: Any]] {
+        catalog.compactMap { entry in
+            guard ModelProviderLabel.pickerOption(for: entry) != nil, let id = entry["id"] as? String else { return nil }
+            return ["model_display_name": "VP: " + (ModelProviderLabel.tag(entry)["display_name"] as? String ?? id),
+                    "model": id, "base_url": baseURL, "api_key": apiKey, "provider": "anthropic"]
+        }
     }
 
     /// Removes proxy settings that may have been persisted by an older launcher.
@@ -325,6 +452,12 @@ enum CLIHarnessAutoconfigure {
           echo "VibeRouter could not bring both proxy services online. Open /Applications/VibeRouter.app and check its server status." >&2
           exit 1
         fi
+        # Refresh the picker after readiness checks so new or re-enabled models
+        # appear even when the proxy has been running since before they changed.
+        viberouter_cli="${VIBEROUTER_CLI:-/Applications/VibeRouter.app/Contents/MacOS/viberouter}"
+        if [ -x "$viberouter_cli" ]; then
+          "$viberouter_cli" harness refresh --json >/dev/null || true
+        fi
         # Claude Code saves /model choices in its config directory. Keep proxy
         # selections separate from the native `claude` subscription.
         export CLAUDE_CONFIG_DIR="$HOME/.claude-viberouter"
@@ -342,7 +475,7 @@ enum CLIHarnessAutoconfigure {
         """
     }
 
-    private static func configureCodex(baseURL: String, apiKey: String) throws {
+    private static func configureCodex(baseURL: String, apiKey: String, proxyPort: Int) throws {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".codex/config.toml")
         try FileManager.default.createDirectory(
@@ -388,6 +521,12 @@ enum CLIHarnessAutoconfigure {
         let envHint = codexHome.appendingPathComponent("viberouter.env")
         try "export VIBEROUTER_API_KEY=\"\(apiKey)\"\n".write(to: envHint, atomically: true, encoding: .utf8)
         try? FileManager.default.removeItem(at: codexHome.appendingPathComponent(legacyProviderKey + ".env"))
+        guard let catalog = requestProxyModels(port: proxyPort), !catalog.isEmpty else { throw AutoconfigureError.noModels }
+        let modelCatalog = codexHome.appendingPathComponent("viberouter-models.json")
+        try writeJSON(["models": codexModelEntries(catalog: catalog)], to: modelCatalog)
+        text = replaceOrAppendTOMLKey(in: text, key: "model_catalog_json",
+                                     value: "\"\(modelCatalog.path)\"", section: "profiles.viberouter")
+        text = replaceOrAppendTOMLKey(in: text, key: "model_provider", value: "\"viberouter\"", section: "profiles.viberouter")
         try text.write(to: url, atomically: true, encoding: .utf8)
     }
 
@@ -408,29 +547,9 @@ enum CLIHarnessAutoconfigure {
         var root = try readJSONForMerge(url)
         var provider = root["provider"] as? [String: Any] ?? [:]
 
-        // Fetch live model ids when proxy is up; fall back to common aliases.
-        // The whole catalog is published: truncating it is what hides models
-        // like gpt-5.6-* and claude-opus-5 from the OpenCode picker.
-        var catalog = fetchProxyModels(port: proxyPort)
-        if catalog.isEmpty {
-            catalog = Array(anthropicModelPreferences.prefix(1) + openAIModelPreferences.prefix(1)).map { ["id": $0] }
-        }
+        guard let catalog = requestProxyModels(port: proxyPort), !catalog.isEmpty else { throw AutoconfigureError.noModels }
         let modelIDs = catalog.compactMap { $0["id"] as? String }
-        var models: [String: Any] = [:]
-        for entry in catalog {
-            guard let id = entry["id"] as? String, !id.isEmpty else { continue }
-            let name = ModelProviderLabel.tag(entry)["display_name"] as? String ?? id
-            models[openCodeModelKey(id)] = openCodeModelEntry(id: id, displayName: name)
-            // Reasoning budget is expressed as a model suffix the proxy strips
-            // before forwarding, so each effort level needs its own entry.
-            for effort in thinkingEfforts(for: id) {
-                let variant = "\(id)-thinking-\(effort.budget)"
-                models[openCodeModelKey(variant)] = openCodeModelEntry(
-                    id: variant,
-                    displayName: "\(name) (\(effort.label) reasoning)"
-                )
-            }
-        }
+        let models = openCodeModelEntries(catalog: catalog)
 
         provider.removeValue(forKey: legacyProviderKey)
         if let pinned = root["model"] as? String, pinned.hasPrefix(legacyProviderKey + "/") {
@@ -465,7 +584,7 @@ enum CLIHarnessAutoconfigure {
         try writeJSON(root, to: url)
     }
 
-    private static func configureGemini(baseURL: String, apiKey: String) throws {
+    private static func configureGemini(baseURL: String, apiKey: String, proxyPort: Int) throws {
         let url = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".gemini/settings.json")
         try FileManager.default.createDirectory(
@@ -479,6 +598,8 @@ enum CLIHarnessAutoconfigure {
         env["GOOGLE_GEMINI_BASE_URL"] = baseURL
         env["GEMINI_API_KEY"] = apiKey
         root["env"] = env
+        guard let catalog = requestProxyModels(port: proxyPort), !catalog.isEmpty else { throw AutoconfigureError.noModels }
+        root = refreshedGeminiModels(root: root, catalog: catalog)
         try writeJSON(root, to: url)
     }
 
@@ -491,26 +612,8 @@ enum CLIHarnessAutoconfigure {
         )
         try backupIfNeeded(url)
         var root = try readJSONForMerge(url)
-        let available = fetchProxyModelIDs(port: proxyPort)
-        var models: [[String: Any]] = []
-        if let anthropicModel = resolveLiveModel(anthropicModelPreferences, port: proxyPort, available: available) {
-            models.append([
-                "model_display_name": "VP: \(anthropicModel)",
-                "model": anthropicModel,
-                "base_url": baseURL,
-                "api_key": apiKey,
-                "provider": "anthropic",
-            ])
-        }
-        if let openAIModel = resolveLiveModel(openAIModelPreferences, port: proxyPort, available: available) {
-            models.append([
-                "model_display_name": "VP: \(openAIModel)",
-                "model": openAIModel,
-                "base_url": "\(baseURL)/v1",
-                "api_key": apiKey,
-                "provider": "openai",
-            ])
-        }
+        guard let catalog = requestProxyModels(port: proxyPort), !catalog.isEmpty else { throw AutoconfigureError.noModels }
+        let models = factoryModelEntries(catalog: catalog, baseURL: baseURL, apiKey: apiKey)
         // Merge: replace previous VibeRouter-tagged entries, keep user custom models.
         let existing = root["custom_models"] as? [[String: Any]] ?? []
         let kept = existing.filter { entry in
@@ -696,11 +799,15 @@ enum CLIHarnessAutoconfigure {
     }
 
     private static func fetchProxyModels(port: Int) -> [[String: Any]] {
-        guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else { return [] }
+        requestProxyModels(port: port) ?? []
+    }
+
+    private static func requestProxyModels(port: Int) -> [[String: Any]]? {
+        guard let url = URL(string: "http://127.0.0.1:\(port)/v1/models") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 2)
         request.setValue("Bearer \(dummyAPIKey)", forHTTPHeaderField: "Authorization")
         let sem = DispatchSemaphore(value: 0)
-        var models: [[String: Any]] = []
+        var models: [[String: Any]]?
         URLSession.shared.dataTask(with: request) { data, _, _ in
             defer { sem.signal() }
             guard let data,
