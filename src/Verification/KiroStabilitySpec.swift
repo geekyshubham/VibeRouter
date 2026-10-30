@@ -28,6 +28,28 @@ struct KiroStabilitySpec {
     }
 
     static func main() async throws {
+        let kiroIDs = ["kiro/claude-opus-5.5", "kiro/claude-sonnet-5.5"]
+        let fallbackIDs = KiroDirectProvider.fallbackModels.map { KiroDirectProvider.modelPrefix + $0.id }
+        check(kiroIDs.allSatisfy(fallbackIDs.contains), "Kiro fallback includes Opus and Sonnet 5.5")
+        let kiroCatalog: [[String: Any]] = kiroIDs.map { ["id": $0, "display_name": $0, "providers": ["claude"]] }
+        let picker = CLIHarnessAutoconfigure.refreshedClaudePicker(root: [:], catalog: kiroCatalog)!
+        let options = (picker["modelPicker"] as! [String: Any])["options"] as! [[String: Any]]
+        check(options.compactMap { $0["model"] as? String } == kiroIDs, "both 5.5 Kiro routes remain selectable")
+        check(options.compactMap { $0["label"] as? String } == ["[VibeRouter] [Kiro] Claude Opus 5.5", "[VibeRouter] [Kiro] Claude Sonnet 5.5"], "Kiro bridge IDs get readable picker labels")
+        let aliases = picker["env"] as! [String: String]
+        check(aliases["ANTHROPIC_DEFAULT_OPUS_MODEL"] == kiroIDs[0] && aliases["ANTHROPIC_DEFAULT_SONNET_MODEL"] == kiroIDs[1], "Kiro family aliases use the published 5.5 routes")
+        check(picker["model"] as? String == "kiro/claude-opus-5.5", "Kiro Opus 5.5 is the claude-viberouter default")
+        let mixed = CLIHarnessAutoconfigure.refreshedClaudePicker(
+            root: ["model": "gpt-6.1-sol"],
+            catalog: [["id": "gpt-6.1-sol", "providers": ["codex"]], ["id": "kiro/claude-opus-5.5", "providers": ["kiro"]]]
+        )!
+        check(mixed["model"] as? String == "kiro/claude-opus-5.5", "Kiro Opus 5.5 replaces the older GPT default")
+        let mixedOptions = (mixed["modelPicker"] as! [String: Any])["options"] as! [[String: Any]]
+        check(mixedOptions.first?["model"] as? String == "kiro/claude-opus-5.5", "default model is listed first in the picker")
+        let noKiro = CLIHarnessAutoconfigure.refreshedClaudePicker(
+            root: ["model": "gone"], catalog: [["id": "gpt-6.1-sol", "providers": ["codex"]]]
+        )!
+        check(noKiro["model"] as? String == "gpt-6.1-sol", "unavailable default falls back to a live model")
         check(ModelProviderLabel.pickerOption(for: ["id": "gpt-image-2"]) == nil, "image-only models stay out of the Claude picker")
         check(ModelProviderLabel.pickerOption(for: ["id": "grok-imagine-video"]) == nil, "video-only models stay out of the Claude picker")
         check(ModelProviderLabel.pickerOption(for: ["id": "gpt-6.1-sol", "providers": ["codex"]]) != nil, "Codex text models remain selectable")

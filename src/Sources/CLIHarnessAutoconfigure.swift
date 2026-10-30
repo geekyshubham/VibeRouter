@@ -170,10 +170,11 @@ enum CLIHarnessAutoconfigure {
             preferences.first(where: ids.contains) ?? fallback
         }
         let previous = (try? readJSONForMerge(url))?["model"] as? String
-        let main = previous.flatMap { ids.contains($0) ? $0 : nil }
-            ?? available(["gpt-6.1-sol", "gpt-6-sol", "gpt-5.5"], fallback: first)
+        let main = defaultClaudeModel(available: ids)
+            ?? previous.flatMap { ids.contains($0) ? $0 : nil }
+            ?? available(fallbackClaudeModels, fallback: first)
         let aliases = claudeModelAliases(catalog: catalog)
-        let options = catalog.compactMap(ModelProviderLabel.pickerOption)
+        let options = claudePickerOptions(catalog: catalog, defaultModel: main)
         let root: [String: Any] = [
             "env": [
                 "ANTHROPIC_BASE_URL": baseURL,
@@ -200,9 +201,37 @@ enum CLIHarnessAutoconfigure {
         try installClaudeVibeRouterLauncher(baseURL: baseURL, apiKey: apiKey)
     }
 
-    static func refreshedClaudePicker(root: [String: Any], catalog: [[String: Any]]) -> [String: Any]? {
+    /// Launch default for `claude-viberouter`. The settings file is passed with
+    /// --settings, so its `model` wins over the saved /model choice every launch.
+    static let preferredClaudeModels = ["kiro/claude-opus-5.5"]
+    static let fallbackClaudeModels = ["gpt-6.1-sol", "gpt-6-sol", "gpt-5.5"]
+
+    static func defaultClaudeModel(available ids: [String]) -> String? {
+        preferredClaudeModels.first(where: ids.contains)
+    }
+
+    /// Picker rows in catalog order, with the launch default listed first.
+    static func claudePickerOptions(catalog: [[String: Any]], defaultModel: String?) -> [[String: Any]] {
         let options = catalog.compactMap(ModelProviderLabel.pickerOption)
+        guard let defaultModel,
+              let index = options.firstIndex(where: { $0["model"] as? String == defaultModel })
+        else { return options }
+        var ordered = options
+        ordered.insert(ordered.remove(at: index), at: 0)
+        return ordered
+    }
+
+    static func refreshedClaudePicker(root: [String: Any], catalog: [[String: Any]]) -> [String: Any]? {
+        let ids = catalog.compactMap { ModelProviderLabel.pickerOption(for: $0)?["model"] as? String }
         var updated = root
+        let current = root["model"] as? String
+        if let preferred = defaultClaudeModel(available: ids) {
+            updated["model"] = preferred
+        } else if let current, !ids.contains(current),
+                  let fallback = fallbackClaudeModels.first(where: ids.contains) ?? ids.first {
+            updated["model"] = fallback
+        }
+        let options = claudePickerOptions(catalog: catalog, defaultModel: updated["model"] as? String)
         var picker = root["modelPicker"] as? [String: Any] ?? ["replaceBuiltInOptions": true]
         picker["options"] = options
         updated["modelPicker"] = picker

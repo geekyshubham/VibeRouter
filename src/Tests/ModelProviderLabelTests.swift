@@ -15,7 +15,8 @@ final class ModelProviderLabelTests: XCTestCase {
             let entry: [String: Any] = ["id": id, "owned_by": owner, "providers": [provider]]
             let tagged = ModelProviderLabel.tag(entry)
             XCTAssertEqual(tagged["id"] as? String, id)
-            XCTAssertEqual(tagged["display_name"] as? String, "[VibeRouter] [\(source)] \(id)")
+            let name = id.hasPrefix("kiro/") ? "Gpt 5.6 Sol" : id
+            XCTAssertEqual(tagged["display_name"] as? String, "[VibeRouter] [\(source)] \(name)")
             XCTAssertEqual(tagged["description"] as? String, "\(source) via VibeRouter")
             let option = try XCTUnwrap(ModelProviderLabel.pickerOption(for: tagged))
             XCTAssertEqual(option["model"] as? String, id)

@@ -27,6 +27,7 @@ enum KiroDirectProvider {
     static let fallbackModels: [CatalogModel] = [
         CatalogModel(id: "auto", blurb: "Kiro picks the model"),
         CatalogModel(id: "claude-opus-5.5", blurb: "Claude Opus 5.5"),
+        CatalogModel(id: "claude-sonnet-5.5", blurb: "Claude Sonnet 5.5"),
         CatalogModel(id: "claude-opus-5", blurb: "Claude Opus 5"),
         CatalogModel(id: "claude-sonnet-5", blurb: "Claude Sonnet 5"),
         CatalogModel(id: "claude-opus-4.8", blurb: "Claude Opus 4.8"),

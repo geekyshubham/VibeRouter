@@ -20,8 +20,37 @@ final class ClaudeProtocolTests: XCTestCase {
             XCTAssertEqual(env["ANTHROPIC_DEFAULT_\(family)_MODEL"] as? String, "claude-\(family.lowercased())-5-5")
         }
         XCTAssertEqual(env["KEEP"] as? String, "value")
-        XCTAssertEqual(updated["model"] as? String, "gpt-6.1-sol")
+        // Kiro Opus 5.5 is the launch default whenever the proxy publishes it.
+        XCTAssertEqual(updated["model"] as? String, "kiro/claude-opus-5.5")
+        XCTAssertEqual(options.first?["model"] as? String, "kiro/claude-opus-5.5")
         XCTAssertEqual(updated["permissions"] as? [String: Bool], ["keep": true])
+    }
+
+    func testClaudeDefaultKeepsValidChoiceWithoutKiroOpus() throws {
+        let catalog = enabledCatalog.filter { $0["id"] as? String != "kiro/claude-opus-5.5" }
+        let kept = try XCTUnwrap(CLIHarnessAutoconfigure.refreshedClaudePicker(root: ["model": "claude-opus-5-5"], catalog: catalog))
+        XCTAssertEqual(kept["model"] as? String, "claude-opus-5-5")
+        let replaced = try XCTUnwrap(CLIHarnessAutoconfigure.refreshedClaudePicker(root: ["model": "gone-model"], catalog: catalog))
+        XCTAssertEqual(replaced["model"] as? String, "gpt-6.1-sol")
+    }
+
+    func testKiroFallbackPublishesReadableOpusAndSonnet55PickerEntries() throws {
+        let ids = ["kiro/claude-opus-5.5", "kiro/claude-sonnet-5.5"]
+        let fallbackIDs = KiroDirectProvider.fallbackModels.map { KiroDirectProvider.modelPrefix + $0.id }
+        XCTAssertTrue(ids.allSatisfy(fallbackIDs.contains))
+        // The backend bridge returns raw IDs and identifies its credential as Claude.
+        let catalog: [[String: Any]] = ids.map { ["id": $0, "display_name": $0, "providers": ["claude"]] }
+        let updated = try XCTUnwrap(CLIHarnessAutoconfigure.refreshedClaudePicker(root: [:], catalog: catalog))
+        let options = try XCTUnwrap((updated["modelPicker"] as? [String: Any])?["options"] as? [[String: Any]])
+        XCTAssertEqual(options.compactMap { $0["model"] as? String }, ids)
+        XCTAssertEqual(options.compactMap { $0["label"] as? String }, [
+            "[VibeRouter] [Kiro] Claude Opus 5.5", "[VibeRouter] [Kiro] Claude Sonnet 5.5",
+        ])
+        let aliases = try XCTUnwrap(updated["env"] as? [String: String])
+        XCTAssertEqual(aliases["ANTHROPIC_DEFAULT_OPUS_MODEL"], ids[0])
+        XCTAssertEqual(aliases["ANTHROPIC_DEFAULT_SONNET_MODEL"], ids[1])
+        XCTAssertEqual(ModelProviderLabel.tag(ModelProviderLabel.tag(catalog[0]))["display_name"] as? String,
+                       options[0]["label"] as? String)
     }
 
     func testManagedHarnessCatalogsStayInSyncAndPreserveUnrelatedSettings() throws {

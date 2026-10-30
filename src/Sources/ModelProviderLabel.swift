@@ -38,6 +38,9 @@ enum ModelProviderLabel {
         let source = source(for: original)
         // Keep useful upstream names, replacing our older generic label.
         var name = (original["display_name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if id.hasPrefix(KiroDirectProvider.modelPrefix), name.isEmpty || name == id {
+            name = KiroDirectProvider.pickerLabel(forUpstreamID: String(id.dropFirst(KiroDirectProvider.modelPrefix.count)))
+        }
         if name.hasPrefix("[VibeRouter]") {
             name = String(name.dropFirst("[VibeRouter]".count)).trimmingCharacters(in: .whitespaces)
             if name.hasPrefix("["), let end = name.firstIndex(of: "]") {
