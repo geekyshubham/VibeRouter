@@ -24,6 +24,8 @@ actor ClaudeUsagePoller {
     private struct SavedQuota: Codable {
         let windows: [RateWindow]
         let updatedAt: Date
+        var planType: String? = nil
+        var planLabel: String? = nil
     }
 
     init(cacheFile: URL? = nil) {
@@ -70,7 +72,9 @@ actor ClaudeUsagePoller {
                 id: snapshot.id, providerID: snapshot.providerID,
                 source: previous == nil ? snapshot.source : "Claude OAuth (last known)",
                 windows: previous?.windows ?? [],
-                accountEmail: snapshot.accountEmail, updatedAt: previous?.updatedAt,
+                accountEmail: snapshot.accountEmail,
+                planType: previous?.planType, planLabel: previous?.planLabel,
+                updatedAt: previous?.updatedAt,
                 errorMessage: notice + "\nNext check after \(ResetCountdownFormatter.absoluteTime(deadline))."
             )
         } else {
@@ -78,7 +82,10 @@ actor ClaudeUsagePoller {
             // Auth rejection must allow a retry with newly adopted credentials.
             deadlines[key] = now.addingTimeInterval(snapshot.errorMessage == nil ? Self.minimumInterval : 0)
             if snapshot.errorMessage == nil, !snapshot.windows.isEmpty, let updatedAt = snapshot.updatedAt {
-                lastSuccessful[key] = SavedQuota(windows: snapshot.windows, updatedAt: updatedAt)
+                lastSuccessful[key] = SavedQuota(
+                    windows: snapshot.windows, updatedAt: updatedAt,
+                    planType: snapshot.planType, planLabel: snapshot.planLabel
+                )
                 if let cacheFile {
                     do {
                         try FileManager.default.createDirectory(at: cacheFile.deletingLastPathComponent(), withIntermediateDirectories: true)

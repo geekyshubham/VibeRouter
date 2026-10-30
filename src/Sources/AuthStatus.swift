@@ -549,6 +549,8 @@ class AuthManager: ObservableObject {
                 return ChatGPTPlanFormatter.displayName(for: ChatGPTPlanFormatter.normalizePlanType(plan))
             }
             return nil
+        case .claude:
+            return ClaudePlanFormatter.displayName(fromAuth: json)
         case .kiro:
             return json["plan_label"] as? String ?? json["plan_type"] as? String
         case .copilot:

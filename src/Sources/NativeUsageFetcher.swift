@@ -1303,6 +1303,14 @@ enum NativeUsageFetcher {
             let resetBank = windows.isEmpty
                 ? nil
                 : await RateLimitResetService.fetchClaudeBank(accessToken: accessToken)
+            // Profile names the live plan (Max 20x, Team 5x…); fall back to stored fields.
+            let profilePlan = windows.isEmpty ? nil : await fetchClaudeProfilePlan(accessToken: accessToken)
+            let planType = profilePlan?.planType
+                ?? ClaudePlanFormatter.planType(
+                    organizationType: stringValue(payload, keys: ["organization_type"]),
+                    subscriptionType: stringValue(payload, keys: ["subscriptionType", "plan_type"])
+                )
+            let planLabel = profilePlan?.planLabel ?? ClaudePlanFormatter.displayName(fromAuth: payload)
 
             return .init(snapshot: ProviderUsageSnapshot(
                 id: authAccountID,
@@ -1310,6 +1318,8 @@ enum NativeUsageFetcher {
                 source: "Claude OAuth",
                 windows: windows,
                 accountEmail: email,
+                planType: planType,
+                planLabel: planLabel,
                 rateLimitResets: resetBank,
                 updatedAt: Date(),
                 errorMessage: windows.isEmpty ? "No quota windows reported" : nil,
@@ -1318,6 +1328,46 @@ enum NativeUsageFetcher {
         } catch {
             return .init(snapshot: .empty(authAccountID: authAccountID, providerID: providerID, error: error.localizedDescription))
         }
+    }
+
+    /// `organization.organization_type` (claude_max / claude_team / …) plus
+    /// `rate_limit_tier` (default_claude_max_5x / _20x). Nil on any failure.
+    private static func fetchClaudeProfilePlan(accessToken: String) async -> (planType: String?, planLabel: String?)? {
+        guard let url = URL(string: "https://api.anthropic.com/api/oauth/profile") else { return nil }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 15
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        request.setValue("claude-code/2.1.271", forHTTPHeaderField: "User-Agent")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              let http = response as? HTTPURLResponse,
+              (200...299).contains(http.statusCode),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return nil }
+        return claudeProfilePlan(from: json)
+    }
+
+    static func claudeProfilePlan(from json: [String: Any]) -> (planType: String?, planLabel: String?)? {
+        let organization = json["organization"] as? [String: Any] ?? [:]
+        let account = json["account"] as? [String: Any] ?? [:]
+        var subscription: String?
+        if account["has_claude_max"] as? Bool == true {
+            subscription = "max"
+        } else if account["has_claude_pro"] as? Bool == true {
+            subscription = "pro"
+        }
+        let planType = ClaudePlanFormatter.planType(
+            organizationType: stringValue(organization, keys: ["organization_type"]),
+            subscriptionType: subscription
+        )
+        let label = ClaudePlanFormatter.displayName(
+            planType: planType,
+            rateLimitTier: stringValue(organization, keys: ["rate_limit_tier"])
+        )
+        guard planType != nil || label != nil else { return nil }
+        return (planType, label)
     }
 
     private static func mapClaudeWindow(_ window: [String: Any]?, defaultMinutes: Int, label: String) -> RateWindow? {
@@ -3695,6 +3745,12 @@ enum NativeUsageFetcher {
         }
         if let email = oauth["email"] as? String, !email.isEmpty {
             payload["email"] = email
+        }
+        if let subscription = oauth["subscriptionType"] as? String, !subscription.isEmpty {
+            payload["subscriptionType"] = subscription
+        }
+        if let tier = oauth["rateLimitTier"] as? String, !tier.isEmpty {
+            payload["rate_limit_tier"] = tier
         }
         if let expiresAt = oauth["expiresAt"] as? Double {
             let exp = ISO8601DateFormatter().string(
