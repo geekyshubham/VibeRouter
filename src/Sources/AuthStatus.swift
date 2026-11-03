@@ -467,7 +467,7 @@ class AuthManager: ObservableObject {
         // A refresh token keeps the session alive. OpenAI refresh tokens are JWTs whose
         // `exp` often matches the access token (~10d) — that is NOT session death.
         // Keep-alive / usage-fetch refresh owns rotation; only a failed refresh is a re-login.
-        if refreshToken != nil {
+        if refreshToken != nil || nonEmptyString(json[TokenRefreshService.parkedRefreshTokenKey]) != nil {
             return nil
         }
 

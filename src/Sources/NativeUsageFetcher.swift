@@ -101,7 +101,7 @@ enum NativeUsageFetcher {
         payload: [String: Any],
         reauthHint: String = "re-authenticate in Settings"
     ) -> String {
-        let hasRefresh = stringValue(payload, keys: ["refresh_token", "refreshToken", "refresh"]) != nil
+        let hasRefresh = stringValue(payload, keys: ["refresh_token", "refreshToken", "refresh", TokenRefreshService.parkedRefreshTokenKey]) != nil
         if hasRefresh {
             return "Access token is refreshing — try again in a moment (no re-login needed)"
         }
@@ -3508,7 +3508,8 @@ enum NativeUsageFetcher {
     static func overlayClaudeCLICredentialsIfFresher(
         onto authFile: URL,
         localClaude: [String: Any]? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        sessionAbsent: () -> Bool = NativeUsageFetcher.claudeSessionIsAbsent
     ) -> Bool {
         guard var payload = readAuthPayload(at: authFile) else { return false }
         let local = localClaude ?? readClaudeAppPayload()
@@ -3537,7 +3538,7 @@ enum NativeUsageFetcher {
         // invalidates the previous RT, and `claude` logs out on the next request.
         // Park the native token instead of dropping it: once Claude Code signs
         // into another account, nothing else holds this account's session.
-        if let local {
+        if let local, stringValue(local, keys: ["access_token", "refresh_token"]) != nil {
             if !TokenRefreshService.shouldNetworkRefreshClaude(payload: payload, native: local) {
                 if TokenRefreshService.parkRefreshToken(
                     TokenRefreshService.refreshToken(from: local), in: &payload
@@ -3552,8 +3553,37 @@ enum NativeUsageFetcher {
                       authFile.lastPathComponent)
                 changed = true
             }
+        } else if payload[TokenRefreshService.parkedRefreshTokenKey] != nil,
+                  sessionAbsent(),
+                  TokenRefreshService.restoreParkedRefreshToken(in: &payload)
+        {
+            NSLog("[ClaudeOverlay] Claude Code has no session; VibeRouter now renews %@",
+                  authFile.lastPathComponent)
+            changed = true
         }
         return changed ? writeAuthPayload(payload, to: authFile) : false
+    }
+
+    static func claudeSessionIsAbsent() -> Bool {
+        let credentials = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".claude/.credentials.json")
+        let keychain = NativeKeychain.read(service: "Claude Code-credentials")
+        return claudeSessionIsAbsent(
+            keychain: keychain.data, status: keychain.status, file: try? Data(contentsOf: credentials)
+        )
+    }
+
+    static func claudeSessionIsAbsent(keychain: Data?, status: OSStatus, file: Data?) -> Bool {
+        switch status {
+        case errSecItemNotFound:
+            return claudeAppPayload(keychain: nil, file: file) == nil
+        case errSecSuccess:
+            guard let keychain,
+                  let root = try? JSONSerialization.jsonObject(with: keychain) as? [String: Any] else { return false }
+            return claudeAppPayload(keychain: keychain, file: nil) == nil && root["claudeAiOauth"] == nil
+        default:
+            return false
+        }
     }
 
     /// Run the Claude overlay on every Claude auth file, parking or releasing native refresh tokens.

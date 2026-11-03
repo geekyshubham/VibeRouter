@@ -1,4 +1,5 @@
 import XCTest
+import Security
 @testable import CLIProxyMenuBar
 
 final class TokenRefreshServiceTests: XCTestCase {
@@ -436,6 +437,51 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertEqual(stored["access_token"] as? String, "a-live")
         XCTAssertTrue(TokenRefreshService.shouldNetworkRefreshClaude(payload: stored, native: nativeB))
         XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(onto: file, localClaude: nativeB))
+    }
+
+    func testParkedClaudeAccountIsRenewableNotExpired() {
+        let parked: [String: Any] = [
+            "type": "claude", "email": "a@x.com", "access_token": "a-at",
+            "expired": "2020-01-01T00:00:00Z", TokenRefreshService.parkedRefreshTokenKey: "a-rt",
+        ]
+        XCTAssertNil(AuthManager.sessionExpiryDate(from: parked, serviceType: .claude))
+        var lost = parked
+        lost.removeValue(forKey: TokenRefreshService.parkedRefreshTokenKey)
+        XCTAssertNotNil(AuthManager.sessionExpiryDate(from: lost, serviceType: .claude))
+    }
+
+    func testParkedClaudeTokenIsReleasedWhenClaudeCodeIsSignedOut() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("claude-a.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude", "email": "a@x.com", "access_token": "a-at",
+            "expired": "2020-01-01T00:00:00Z", TokenRefreshService.parkedRefreshTokenKey: "a-rt",
+        ]).write(to: file)
+
+        XCTAssertFalse(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+            onto: file, localClaude: [:], sessionAbsent: { false }))
+        var stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertNil(stored["refresh_token"])
+
+        XCTAssertTrue(NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+            onto: file, localClaude: [:], sessionAbsent: { true }))
+        stored = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: file))
+        XCTAssertEqual(stored["refresh_token"] as? String, "a-rt")
+        XCTAssertNil(stored[TokenRefreshService.parkedRefreshTokenKey])
+    }
+
+    func testClaudeSessionAbsenceNeedsPositiveEvidence() throws {
+        let signedOut = try JSONSerialization.data(withJSONObject: ["mcpOAuth": [:]])
+        let live = try JSONSerialization.data(withJSONObject: ["claudeAiOauth": ["accessToken": "at", "refreshToken": "rt"]])
+        XCTAssertTrue(NativeUsageFetcher.claudeSessionIsAbsent(keychain: signedOut, status: errSecSuccess, file: live))
+        XCTAssertTrue(NativeUsageFetcher.claudeSessionIsAbsent(keychain: nil, status: errSecItemNotFound, file: nil))
+        XCTAssertFalse(NativeUsageFetcher.claudeSessionIsAbsent(keychain: nil, status: errSecItemNotFound, file: live))
+        XCTAssertFalse(NativeUsageFetcher.claudeSessionIsAbsent(keychain: live, status: errSecSuccess, file: nil))
+        XCTAssertFalse(NativeUsageFetcher.claudeSessionIsAbsent(keychain: Data("bad".utf8), status: errSecSuccess, file: nil))
+        XCTAssertFalse(NativeUsageFetcher.claudeSessionIsAbsent(keychain: nil, status: errSecAuthFailed, file: nil))
+        XCTAssertFalse(NativeUsageFetcher.claudeSessionIsAbsent(keychain: nil, status: errSecNotAvailable, file: nil))
     }
 
     func testClaudeNativeSessionPrefersKeychainOverLeftoverFile() throws {
