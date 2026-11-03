@@ -22,6 +22,7 @@ struct MenuBarPanelView: View {
 
     private enum PanelTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
+        case pools = "Quota"
         case status = "Status"
         case analytics = "Analytics"
         var id: String { rawValue }
@@ -43,7 +44,7 @@ struct MenuBarPanelView: View {
     }
 
     private var availableTabs: [PanelTab] {
-        var tabs: [PanelTab] = [.overview]
+        var tabs: [PanelTab] = [.overview, .pools]
         if settings.showStatusTab { tabs.append(.status) }
         if settings.showAnalyticsTab { tabs.append(.analytics) }
         return tabs
@@ -57,7 +58,7 @@ struct MenuBarPanelView: View {
         VStack(spacing: 0) {
             header
             tabPicker
-            Divider().opacity(0.35)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
             ScrollView {
                 LazyVStack(spacing: MenuBarDesign.sectionSpacing) {
                     tabContent
@@ -67,7 +68,7 @@ struct MenuBarPanelView: View {
                 .transition(.opacity)
             }
             .frame(maxHeight: .infinity)
-            Divider().opacity(0.35)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
             footer
         }
         .frame(width: MenuBarDesign.panelWidth, height: panelHeight)
@@ -93,6 +94,8 @@ struct MenuBarPanelView: View {
         switch effectiveTab {
         case .overview:
             overviewContent
+        case .pools:
+            QuotaPoolsView(usageStore: usageStore, compact: true)
         case .status:
             StatusIncidentsView(usageStore: usageStore, compact: true)
         case .analytics:
@@ -103,46 +106,68 @@ struct MenuBarPanelView: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: DS.Space.md) {
             PulsingDot(
-                color: serverManager.isRunning ? MenuBarDesign.success : MenuBarDesign.danger,
+                color: MenuBarDesign.success,
                 active: serverManager.isRunning,
-                size: 9
+                size: 8
             )
             VStack(alignment: .leading, spacing: 2) {
                 Text("VibeRouter")
-                    .font(.headline)
+                    .font(.system(size: 14, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 // Use String(port) so SwiftUI LocalizedStringKey does not locale-format
                 // the integer (e.g. "8,337" instead of "8337").
                 if serverManager.isRunning {
                     Button(action: onOpenDashboard) {
-                        HStack(spacing: 5) {
-                            Text("Proxy live")
-                                .foregroundStyle(MenuBarDesign.success)
-                            Text("·").foregroundStyle(.tertiary)
+                        HStack(spacing: DS.Space.xs) {
+                            Text("Live on")
+                                .foregroundStyle(Palette.textSecondary)
                             Text("localhost:\(String(proxyPort))")
-                                .foregroundStyle(.secondary)
-                                .monospacedDigit()
-                            Image(systemName: "arrow.up.right.square")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.tertiary)
+                                .font(DS.Font.meta)
+                                .foregroundStyle(Palette.text)
+                            Image(systemName: "arrow.up.right")
+                                .font(.system(size: 9))
+                                .foregroundStyle(Palette.textMuted)
                         }
-                        .font(.caption)
+                        .font(DS.Font.label)
                     }
                     .buttonStyle(.plain)
+                    .pointerCursor()
                     .help("Open management dashboard (lists all proxy models)")
                 } else {
-                    Text("Server stopped — tap Start below")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("Proxy stopped")
+                        .font(DS.Font.label)
+                        .foregroundStyle(Palette.textSecondary)
                 }
             }
             Spacer()
+            appearanceControl
             refreshControl
         }
-        .padding(.horizontal, 14)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .padding(.horizontal, DS.Space.lg)
+        .padding(.top, DS.Space.lg)
+        .padding(.bottom, DS.Space.md)
+    }
+
+    /// Cycles system → light → dark, so the popover can be checked in both themes.
+    private var appearanceControl: some View {
+        let next: String = switch settings.appearanceMode {
+        case "system": "light"
+        case "light": "dark"
+        default: "system"
+        }
+        let icon: String = switch settings.appearanceMode {
+        case "light": "sun.max"
+        case "dark": "moon"
+        default: "circle.lefthalf.filled"
+        }
+        return Button { settings.appearanceMode = next } label: {
+            Image(systemName: icon)
+        }
+        .buttonStyle(IconActionButtonStyle())
+        .help("Appearance: \(settings.appearanceMode == "system" ? "match system" : settings.appearanceMode)")
+        .accessibilityLabel("Appearance")
     }
 
     @ViewBuilder
@@ -150,7 +175,7 @@ struct MenuBarPanelView: View {
         if usageStore.isRefreshing || usageStore.isRefreshingStatus {
             ProgressView()
                 .controlSize(.small)
-                .frame(width: 26, height: 26)
+                .frame(width: 28, height: 28)
         } else {
             Button {
                 Task {
@@ -178,15 +203,16 @@ struct MenuBarPanelView: View {
             title: { $0.rawValue },
             icon: { tabIcon(for: $0) }
         )
-        .padding(.horizontal, 12)
-        .padding(.bottom, 10)
+        .padding(.horizontal, DS.Space.lg)
+        .padding(.bottom, DS.Space.md)
     }
 
     private func tabIcon(for tab: PanelTab) -> String {
         switch tab {
-        case .overview: return "square.grid.2x2.fill"
-        case .status: return "dot.radiowaves.left.and.right"
-        case .analytics: return "chart.bar.fill"
+        case .overview: return "square.grid.2x2"
+        case .pools: return "gauge.with.dots.needle.33percent"
+        case .status: return "waveform.path.ecg"
+        case .analytics: return "chart.bar"
         }
     }
 
@@ -207,9 +233,9 @@ struct MenuBarPanelView: View {
         }
 
         if totalAccountCount > 6 {
-            Text("Tip: tap a provider header to collapse · tap an account to expand details")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
+            Text("Click a provider to collapse it, an account to expand it")
+                .font(DS.Font.label)
+                .foregroundStyle(Palette.textMuted)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
 
@@ -268,20 +294,18 @@ struct MenuBarPanelView: View {
             HStack(spacing: 8) {
                 Circle().fill(tint).frame(width: 8, height: 8)
                 Text(UsageProviderNaming.displayName(forProviderID: cost.providerID))
-                    .font(.subheadline.weight(.semibold))
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 Spacer()
-                Text("local CLI")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.secondary.opacity(0.12), in: Capsule())
+                Text("Local CLI")
+                    .font(DS.Font.meta)
+                    .foregroundStyle(Palette.textMuted)
             }
             HStack(spacing: 12) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("30-day")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                    Text("30 days")
+                        .font(DS.Font.label)
+                        .foregroundStyle(Palette.textSecondary)
                     Text(UsageNumberFormatter.tokens(cost.last30DaysTokens))
                         .font(.caption.monospacedDigit().weight(.semibold))
                     if settings.showCostEstimates, let usd = cost.last30DaysCostUSD, usd > 0 {
@@ -293,8 +317,8 @@ struct MenuBarPanelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Today")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.label)
+                        .foregroundStyle(Palette.textSecondary)
                     Text(UsageNumberFormatter.tokens(cost.sessionTokens))
                         .font(.caption.monospacedDigit().weight(.semibold))
                     if settings.showCostEstimates, let usd = cost.sessionCostUSD, usd > 0 {
@@ -306,9 +330,9 @@ struct MenuBarPanelView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             if let top = cost.models.first {
-                Text("Top: \(top.model)")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                Text("Top model \(top.model)")
+                    .font(DS.Font.meta)
+                    .foregroundStyle(Palette.textMuted)
                     .lineLimit(1)
             }
         }
@@ -322,43 +346,37 @@ struct MenuBarPanelView: View {
         let monthModel = analytics.topModels.first?.model
         return HStack(spacing: DS.Space.lg) {
             pulseStat(
-                icon: "chart.line.uptrend.xyaxis",
                 label: "30-day volume",
                 value: analytics.totalTokens30d > 0
                     ? formatTokens(analytics.totalTokens30d)
                     : UsageNumberFormatter.volume(analytics.estimatedTokens30d, unit: .estimatedTokens),
-                detail: "today \(UsageNumberFormatter.tokens(today.totalTokens, estimated: today.totalEstimatedTokens))",
-                valueColor: .primary
+                detail: "Today \(UsageNumberFormatter.tokens(today.totalTokens, estimated: today.totalEstimatedTokens))",
+                valueColor: Palette.text
             )
-            Divider().frame(height: 36)
+            Rectangle().fill(Palette.hairline).frame(width: 1, height: 40)
             pulseStat(
-                icon: "dollarsign.circle",
-                label: "Est. API $",
+                label: "API-equivalent",
                 value: pulseDollars(analytics.totalCostUSD30d),
                 detail: analytics.estimatedCostUSD30d >= 0.005
-                    ? "today \(pulseDollars(today.totalCostUSD)) · +\(UsageNumberFormatter.usd(analytics.estimatedCostUSD30d)) est"
-                    : "today \(pulseDollars(today.totalCostUSD))",
-                valueColor: MenuBarDesign.accent
+                    ? "Today \(pulseDollars(today.totalCostUSD)) · +\(UsageNumberFormatter.usd(analytics.estimatedCostUSD30d)) est"
+                    : "Today \(pulseDollars(today.totalCostUSD))",
+                valueColor: Palette.text
             )
             if let shown = todayModel ?? monthModel {
-                Divider().frame(height: 36)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "star.fill")
-                            .font(.system(size: 9, weight: .semibold))
-                            .foregroundStyle(.secondary)
-                        Text("Top model")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(.secondary)
-                    }
+                Rectangle().fill(Palette.hairline).frame(width: 1, height: 40)
+                VStack(alignment: .leading, spacing: DS.Space.xs) {
+                    Text("Top model")
+                        .font(DS.Font.label)
+                        .foregroundStyle(Palette.textSecondary)
                     Text(shown)
-                        .font(.caption.weight(.semibold))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.text)
                         .lineLimit(1)
                         .minimumScaleFactor(0.7)
                     if let monthModel, shown != monthModel {
-                        Text("30d \(monthModel)")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.tertiary)
+                        Text("30 days \(monthModel)")
+                            .font(DS.Font.meta)
+                            .foregroundStyle(Palette.textMuted)
                             .lineLimit(1)
                     }
                 }
@@ -383,27 +401,20 @@ struct MenuBarPanelView: View {
         return "\(sign)$\(digits)"
     }
 
-    private func pulseStat(icon: String, label: String, value: String, detail: String, valueColor: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 4) {
-                Image(systemName: icon)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                Text(label)
-                    .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
+    private func pulseStat(label: String, value: String, detail: String, valueColor: Color) -> some View {
+        VStack(alignment: .leading, spacing: DS.Space.xs) {
+            Text(label)
+                .font(DS.Font.label)
+                .foregroundStyle(Palette.textSecondary)
             Text(value)
-                .font(.system(.body, design: .rounded).weight(.bold))
+                .font(.system(size: 16, weight: .medium).monospacedDigit())
                 .foregroundStyle(valueColor)
-                .monospacedDigit()
                 .contentTransition(.numericText())
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             Text(detail)
-                .font(.system(size: 9, design: .rounded))
-                .foregroundStyle(.secondary)
-                .monospacedDigit()
+                .font(DS.Font.meta)
+                .foregroundStyle(Palette.textMuted)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
@@ -412,25 +423,21 @@ struct MenuBarPanelView: View {
 
     private var emptyState: some View {
         VStack(spacing: DS.Space.lg) {
-            ZStack {
-                Circle()
-                    .fill(MenuBarDesign.accent.opacity(0.14))
-                    .frame(width: 54, height: 54)
-                Image(systemName: "sparkles")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(MenuBarDesign.accent)
-            }
+            Image(systemName: "point.3.connected.trianglepath.dotted")
+                .font(.system(size: 20, weight: .regular))
+                .foregroundStyle(Palette.textSecondary)
             VStack(spacing: DS.Space.xs) {
                 Text("No providers connected yet")
-                    .font(.subheadline.weight(.semibold))
-                Text("Connect an account to see live usage limits, reset countdowns, status, and analytics.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Palette.text)
+                Text("Connect an account to see its limits, reset times, status and usage")
+                    .font(DS.Font.label)
+                    .foregroundStyle(Palette.textSecondary)
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
             Button(action: onOpenSettings) {
-                Label("Connect a provider", systemImage: "plus.circle.fill")
+                Label("Connect a provider", systemImage: "plus")
             }
             .buttonStyle(ProminentActionButtonStyle())
         }
@@ -447,9 +454,9 @@ struct MenuBarPanelView: View {
                 Label(serverManager.isRunning ? "Stop" : "Start",
                       systemImage: serverManager.isRunning ? "stop.fill" : "play.fill")
             }
-            .buttonStyle(ProminentActionButtonStyle(
-                tint: serverManager.isRunning ? MenuBarDesign.danger : MenuBarDesign.success
-            ))
+            .buttonStyle(serverManager.isRunning
+                ? AnyButtonStyle(SoftActionButtonStyle())
+                : AnyButtonStyle(ProminentActionButtonStyle()))
             .help(serverManager.isRunning ? "Stop the local proxy" : "Start the local proxy")
 
             Button(action: onOpenDashboard) {
@@ -460,7 +467,7 @@ struct MenuBarPanelView: View {
             .help("Open management UI at \(ManagementCredentials.backendBaseURL)/management.html (key copied)")
 
             Button(action: onOpenSettings) {
-                Image(systemName: "gearshape.fill")
+                Image(systemName: "gearshape")
             }
             .buttonStyle(IconActionButtonStyle())
             .help("Open settings")
@@ -480,8 +487,8 @@ struct MenuBarPanelView: View {
             .buttonStyle(IconActionButtonStyle(tint: MenuBarDesign.danger))
             .help("Quit VibeRouter")
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.horizontal, DS.Space.lg)
+        .padding(.vertical, DS.Space.md)
     }
 
     private func providerKey(for type: ServiceType) -> String {
@@ -495,4 +502,11 @@ struct MenuBarPanelView: View {
     private func formatTokens(_ count: Int) -> String {
         UsageNumberFormatter.tokens(count)
     }
+}
+
+/// Lets the footer swap Start (primary) and Stop (secondary) styles.
+struct AnyButtonStyle: ButtonStyle {
+    private let make: (Configuration) -> AnyView
+    init<S: ButtonStyle>(_ style: S) { make = { AnyView(style.makeBody(configuration: $0)) } }
+    func makeBody(configuration: Configuration) -> some View { make(configuration) }
 }

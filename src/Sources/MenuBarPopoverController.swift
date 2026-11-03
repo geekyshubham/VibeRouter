@@ -36,6 +36,22 @@ final class MenuBarPopoverController: NSObject, NSPopoverDelegate {
         popover.behavior = .semitransient
         popover.animates = true
         popover.delegate = self
+        applyAppearance()
+        NotificationCenter.default.addObserver(
+            forName: .appearanceModeChanged, object: nil, queue: .main
+        ) { [weak self] _ in self?.applyAppearance() }
+    }
+
+    /// NSPopover takes the menu bar's appearance unless told otherwise; nil follows the system.
+    private func applyAppearance() {
+        let name: NSAppearance.Name? = switch AppSettings.shared.appearanceMode {
+        case "light": .aqua
+        case "dark": .darkAqua
+        default: nil
+        }
+        let appearance = name.flatMap(NSAppearance.init(named:))
+        popover.appearance = appearance
+        popover.contentViewController?.view.window?.appearance = appearance
     }
 
     func attach(to statusItem: NSStatusItem) {

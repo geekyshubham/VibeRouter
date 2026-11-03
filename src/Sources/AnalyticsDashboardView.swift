@@ -10,7 +10,10 @@ struct AnalyticsDashboardView: View {
     private var overview: AnalyticsOverview? { usageStore.analytics }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: compact ? 10 : 16) {
+        VStack(alignment: .leading, spacing: compact ? DS.Space.lg : DS.Space.xxl) {
+            if !compact {
+                QuotaPoolsView(usageStore: usageStore)
+            }
             header
             if let overview {
                 totalsGrid(overview)
@@ -22,8 +25,9 @@ struct AnalyticsDashboardView: View {
                 }
                 footnote
             } else if usageStore.isRefreshing {
-                ProgressView("Scanning local session logs…")
+                ProgressView("Scanning local session logs")
                     .controlSize(.small)
+                    .foregroundStyle(Palette.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 emptyState
@@ -35,13 +39,14 @@ struct AnalyticsDashboardView: View {
     private var header: some View {
         HStack {
             VStack(alignment: .leading, spacing: 2) {
-                Text(compact ? "Analytics" : "Usage analytics")
-                    .font(compact ? .subheadline.weight(.semibold) : .title3.weight(.semibold))
+                Text(compact ? "Analytics" : "Usage")
+                    .font(.system(size: compact ? 13 : 17, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 Text(settings.showCostEstimates
-                    ? "All local CLIs · estimated API-equivalent $"
-                    : "All local CLIs · token / credit volume")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    ? "Local CLI logs · API-equivalent cost"
+                    : "Local CLI logs · token and credit volume")
+                    .font(DS.Font.label)
+                    .foregroundStyle(Palette.textSecondary)
             }
             Spacer()
             if usageStore.isRefreshing {
@@ -56,14 +61,12 @@ struct AnalyticsDashboardView: View {
                 label: "30-day volume",
                 value: formatTokens(overview.totalTokens30d),
                 sublabel: totalsSublabel(cost: overview.totalCostUSD30d, estimatedCost: overview.estimatedCostUSD30d, estimated: overview.estimatedTokens30d),
-                systemImage: "calendar",
                 tint: MenuBarDesign.accent
             )
             StatTile(
                 label: "Today",
                 value: formatTokens(overview.totalTokensSession),
                 sublabel: totalsSublabel(cost: overview.totalCostUSDSession, estimatedCost: overview.estimatedCostUSDSession, estimated: overview.estimatedTokensSession),
-                systemImage: "sun.max.fill",
                 tint: MenuBarDesign.accent
             )
         }
@@ -84,8 +87,8 @@ struct AnalyticsDashboardView: View {
     private func providerSection(_ overview: AnalyticsOverview) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("By provider")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.textSecondary)
             // Compact menu bar used to hide OpenCode/Antigravity behind a 4-row cap.
             ForEach(overview.byProvider.prefix(compact ? 8 : 14)) { provider in
                 providerRow(provider, overview: overview)
@@ -100,48 +103,45 @@ struct AnalyticsDashboardView: View {
         let share = Double(provider.last30DaysTokens) / Double(peerTotal)
         let tint = providerTint(for: provider.providerID)
         let todayUSD = provider.sessionCostUSD ?? 0
-        return VStack(alignment: .leading, spacing: 5) {
-            HStack(spacing: 6) {
+        return VStack(alignment: .leading, spacing: DS.Space.sm) {
+            HStack(spacing: DS.Space.md) {
                 Circle()
                     .fill(tint)
-                    .frame(width: 7, height: 7)
-                VStack(alignment: .leading, spacing: 1) {
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
                     Text(displayName(for: provider.providerID))
-                        .font(.caption.weight(.semibold))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(Palette.text)
                     // Surface today's $ so a Kiro-only total isn't mistaken for "Grok is missing".
                     if settings.showCostEstimates, todayUSD >= 0.01 {
-                        Text("today \(formatUSD(todayUSD))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
+                        Text("Today \(formatUSD(todayUSD))")
+                            .font(DS.Font.meta)
+                            .foregroundStyle(Palette.textMuted)
                     }
                 }
                 Spacer()
                 Text(formatVolume(provider.last30DaysTokens, unit: provider.volumeUnit))
-                    .font(.caption.monospacedDigit())
+                    .font(.system(size: 12).monospacedDigit())
+                    .foregroundStyle(Palette.text)
                 if let usd = provider.last30DaysCostUSD, settings.showCostEstimates {
                     Text(formatUSD(usd))
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.meta)
+                        .foregroundStyle(Palette.textSecondary)
                         .frame(minWidth: 52, alignment: .trailing)
                 }
             }
             GeometryReader { proxy in
                 ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.06))
+                    Capsule().fill(Palette.surfaceSunken)
                     Capsule()
-                        .fill(
-                            LinearGradient(
-                                colors: [tint.opacity(0.95), tint.opacity(0.6)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            )
-                        )
+                        .fill(tint)
                         .frame(width: max(4, proxy.size.width * share))
                         .animation(reduceMotion ? nil : DS.Motion.spring, value: share)
                 }
             }
-            .frame(height: 6)
+            .frame(height: 4)
         }
+        .padding(.vertical, DS.Space.xs)
     }
 
     /// Maps an analytics provider ID to its brand tint (falls back to the app accent).
@@ -164,24 +164,24 @@ struct AnalyticsDashboardView: View {
     }
 
     private func modelsSection(_ overview: AnalyticsOverview) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: DS.Space.md) {
             Text("Most used models")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.textSecondary)
             ForEach(Array(overview.topModels.prefix(compact ? 5 : 10).enumerated()), id: \.offset) { _, model in
                 modelRow(model)
             }
             if !overview.topEstimatedModels.isEmpty {
                 Text("Estimated volume")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.tertiary)
-                    .padding(.top, 4)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Palette.textMuted)
+                    .padding(.top, DS.Space.md)
                 ForEach(Array(overview.topEstimatedModels.prefix(compact ? 3 : 6).enumerated()), id: \.offset) { _, model in
                     modelRow(model)
                 }
             }
         }
-        .padding(10)
+        .padding(DS.Space.lg)
         .cardSurface(tint: MenuBarDesign.accent)
     }
 
@@ -189,30 +189,32 @@ struct AnalyticsDashboardView: View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 1) {
                 Text(model.model)
-                    .font(.caption.weight(.medium))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.text)
                     .lineLimit(1)
                 Text(Self.modelDetailLine(model, format: formatTokens))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(DS.Font.meta)
+                    .foregroundStyle(Palette.textSecondary)
                 if settings.showCostEstimates, let rate = Self.rateLabel(for: model) {
                     Text(rate)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .font(DS.Font.meta)
+                        .foregroundStyle(Palette.textMuted)
                         .lineLimit(1)
                 }
             }
             Spacer()
             VStack(alignment: .trailing, spacing: 1) {
                 Text(formatVolume(model.totalTokens, unit: model.volumeUnit))
-                    .font(.caption.monospacedDigit().weight(.semibold))
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Palette.text)
                 if settings.showCostEstimates {
                     Text(formatUSD(model.estimatedCostUSD))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.meta)
+                        .foregroundStyle(Palette.textSecondary)
                 }
             }
         }
-        .padding(.vertical, 2)
+        .padding(.vertical, DS.Space.xs)
     }
 
     /// Estimated rows name how they were estimated; a zero request count is omitted, not shown as "0 msg".
@@ -259,13 +261,14 @@ struct AnalyticsDashboardView: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("No local usage history yet")
-                .font(.subheadline.weight(.semibold))
-            Text("Use Claude Code, Codex, Grok CLI, Kiro CLI, OpenCode, Copilot, and more — VibeRouter scans local session logs for tokens, credits, models, and estimated API-equivalent spend.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(Palette.text)
+            Text("Run Claude Code, Codex, Grok CLI, Kiro CLI, OpenCode or Copilot. VibeRouter reads their local session logs for tokens, credits, models and API-equivalent cost.")
+                .font(DS.Font.label)
+                .foregroundStyle(Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(12)
+        .padding(DS.Space.lg)
         .cardSurface(tint: .secondary)
     }
 
@@ -273,8 +276,8 @@ struct AnalyticsDashboardView: View {
         Text(settings.showCostEstimates
             ? "Token totals are exact tokens only; estimated tokens and Kiro credits are listed separately. Models priced from list rates (CodexBar tables). Kiro analytics = local session credits × $0.04 overage rate (est.); quota bar uses Kiro GetUsageLimits per login. Not your invoice."
             : "Exact token volume from CLI logs; estimated tokens and Kiro credits are listed separately. Kiro quota uses Kiro GetUsageLimits per login (billing period), not the rolling window.")
-            .font(.caption2)
-            .foregroundStyle(.tertiary)
+            .font(DS.Font.label)
+            .foregroundStyle(Palette.textMuted)
             .fixedSize(horizontal: false, vertical: true)
     }
 
@@ -317,8 +320,9 @@ struct StatusIncidentsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text(compact ? "Status" : "Provider status & incidents")
-                    .font(compact ? .subheadline.weight(.semibold) : .title3.weight(.semibold))
+                Text(compact ? "Status" : "Provider status")
+                    .font(.system(size: compact ? 13 : 17, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 Spacer()
                 if usageStore.isRefreshingStatus {
                     ProgressView().controlSize(.mini)
@@ -327,9 +331,8 @@ struct StatusIncidentsView: View {
                         Task { await usageStore.refreshStatus() }
                     } label: {
                         Image(systemName: "arrow.clockwise")
-                            .font(.caption.weight(.semibold))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(IconActionButtonStyle())
                     .help("Refresh status pages")
                 }
             }
@@ -337,15 +340,15 @@ struct StatusIncidentsView: View {
             if usageStore.providerStatuses.isEmpty {
                 Text(
                     usageStore.isRefreshingStatus
-                        ? "Loading status for your connected providers…"
+                        ? "Loading status for your connected providers"
                         : "No status sources for your connected accounts yet."
                 )
                 .font(.caption)
                 .foregroundStyle(.secondary)
             } else {
-                Text("Showing status only for providers you have connected.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                Text("Connected providers only")
+                    .font(DS.Font.label)
+                    .foregroundStyle(Palette.textMuted)
                 ForEach(usageStore.providerStatuses) { status in
                     statusCard(status)
                 }
@@ -360,7 +363,8 @@ struct StatusIncidentsView: View {
                     .fill(statusColor(status.level))
                     .frame(width: 8, height: 8)
                 Text(status.displayName)
-                    .font(.caption.weight(.semibold))
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 Spacer()
                 Text(status.level.displayName)
                     .font(.caption2.weight(.medium))
@@ -403,7 +407,7 @@ struct StatusIncidentsView: View {
                     .font(.caption2)
             }
         }
-        .padding(10)
+        .padding(DS.Space.lg)
         .cardSurface(tint: statusColor(status.level))
         .hoverHighlight(statusColor(status.level))
     }
@@ -413,7 +417,7 @@ struct StatusIncidentsView: View {
         case .none: return MenuBarDesign.success
         case .minor, .maintenance: return MenuBarDesign.warning
         case .major, .critical: return MenuBarDesign.danger
-        case .unknown: return .secondary
+        case .unknown: return Palette.textMuted
         }
     }
 }

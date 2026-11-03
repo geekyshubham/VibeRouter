@@ -69,8 +69,45 @@ enum NativeKeychain {
             query[kSecAttrAccount as String] = account
             var result: CFTypeRef?
             let status = SecItemCopyMatching(query as CFDictionary, &result)
-            return (status == errSecSuccess ? result as? Data : nil, status)
+            if status == errSecSuccess { return (result as? Data, status) }
+            // Ad-hoc rebuilds change our signature, so a prior "Always Allow"
+            // stops matching. Items written via /usr/bin/security trust that
+            // tool, which can still read them without a prompt.
+            if [errSecAuthFailed, errSecInteractionNotAllowed].contains(status),
+               securityToolServices.contains(service),
+               let data = readWithSecurityTool(service: service, account: account) {
+                return (data, errSecSuccess)
+            }
+            return (nil, status)
         }
+    }
+
+    /// Native CLIs that store their session through /usr/bin/security.
+    static let securityToolServices: Set<String> = ["Claude Code-credentials"]
+
+    /// Read-only fallback. Killed after two seconds so a surprise prompt cannot hang the queue.
+    private static func readWithSecurityTool(service: String, account: String?) -> Data? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        var arguments = ["find-generic-password", "-s", service]
+        if let account { arguments += ["-a", account] }
+        process.arguments = arguments + ["-w"]
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = FileHandle.nullDevice
+        let exited = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in exited.signal() }
+        do { try process.run() } catch { return nil }
+        if exited.wait(timeout: .now() + 2) == .timedOut {
+            process.terminate()
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        guard let text = String(data: data, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty
+        else { return nil }
+        return Data(text.utf8)
     }
 
     /// Preserve existing access controls. Denied writes never launch a helper or

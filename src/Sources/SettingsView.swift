@@ -743,7 +743,7 @@ struct SettingsView: View {
             .padding(.top, 14)
             .padding(.bottom, 10)
 
-            Divider().opacity(0.4)
+            Rectangle().fill(Palette.hairline).frame(height: 1)
 
             ScrollView {
                 switch settingsPane {
@@ -771,6 +771,7 @@ struct SettingsView: View {
             settingsFooter
         }
         .frame(minWidth: 560, idealWidth: 620, minHeight: 560, idealHeight: 720)
+        .background(Palette.background)
         .sheet(isPresented: $showingQwenEmailPrompt) {
             qwenEmailSheet
         }
@@ -1425,6 +1426,12 @@ struct SettingsView: View {
             }
 
             Section("Display") {
+                Picker("Appearance", selection: $settings.appearanceMode) {
+                    Text("Match system").tag("system")
+                    Text("Light").tag("light")
+                    Text("Dark").tag("dark")
+                }
+                .pickerStyle(.segmented)
                 Toggle("Show cost estimates ($)", isOn: $settings.showCostEstimates)
                 Toggle("Auto-update model prices", isOn: $settings.autoUpdatePricing)
                 if settings.autoUpdatePricing {

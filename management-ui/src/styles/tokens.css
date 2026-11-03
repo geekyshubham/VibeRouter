@@ -1,8 +1,7 @@
-/* Hallmark · genre: modern-minimal (glass variant, user brief) · macrostructure: Workbench (app shell)
- * theme: custom · vibe: "liquid glass over a quiet violet night" · paper pitch black oklch(0% 0 0) dark / oklch(96% 0.012 281) light
- * accent: oklch(56% 0.2 281) violet · display + body: Geist · data: Geist Mono · nav: N3 side-rail + N13 ⌘K · footer: none (app)
- * axes: dark+light / geometric-sans / cool
- * Hallmark · pre-emit critique: P4 H5 E4 S4 R4 V4
+/* VibeRouter console tokens: an instrument panel for quota.
+ * Graphite surfaces, one cobalt accent for the primary action and selection,
+ * color reserved for data (provider series, health). Depth comes from surface
+ * steps and hairlines, not glass or glow. Matches the macOS app's Palette.
  *
  * Every color, radius, duration and font in the console routes through this file.
  * Dark is the default palette; [data-theme="light"] redefines the same names. */
@@ -48,9 +47,10 @@
   --dur-long: 360ms;
 
   /* Glass physics */
-  --blur: 22px;
-  --blur-chrome: 30px;
-  --saturate: 170%;
+  /* Surfaces are solid; blur stays off so nothing is frosted for decoration. */
+  --blur: 0px;
+  --blur-chrome: 0px;
+  --saturate: 100%;
 
   /* Layers */
   --z-side: 20;
@@ -59,56 +59,57 @@
   --z-drawer: 50;
   --z-toast: 90;
 
-  /* ---- Dark palette (default) ---- */
-  --bg: #000;
-  --bg-2: #000;
+  /* ---- Dark palette (default): graphite ramp, one cobalt signal ---- */
+  --bg: #161617;
+  --bg-2: #161617;
   --glow-a: transparent;
   --glow-b: transparent;
   --grain-opacity: 0;
 
-  --glass: oklch(100% 0 0 / 0.035);
-  --glass-strong: oklch(7% 0 0 / 0.92);
-  --glass-solid: oklch(9% 0 0);
-  --glass-rim: oklch(100% 0 0 / 0.1);
-  --glass-edge: oklch(100% 0 0 / 0.075);
-  --glass-shine: oklch(100% 0 0 / 0.03);
-  --glass-depth: oklch(0% 0 0 / 0.4);
-  --shadow: 0 24px 60px -18px oklch(0% 0 0 / 0.9);
-  --shadow-sm: 0 8px 24px -10px oklch(0% 0 0 / 0.9);
+  /* "glass" names kept for the component layer; they are solid steps now */
+  --glass: #1e1e20;
+  --glass-strong: #1e1e20;
+  --glass-solid: #1e1e20;
+  --glass-rim: transparent;
+  --glass-edge: oklch(100% 0 0 / 0.09);
+  --glass-shine: transparent;
+  --glass-depth: transparent;
+  --shadow: 0 12px 32px -12px oklch(0% 0 0 / 0.6);
+  --shadow-sm: 0 2px 6px -2px oklch(0% 0 0 / 0.5);
 
-  --ink: oklch(96% 0.006 281);
-  --ink-2: oklch(80% 0.014 281);
-  --ink-3: oklch(68% 0.018 281);
-  --ink-4: oklch(55% 0.02 281);
+  --ink: #ededef;
+  --ink-2: #c4c4c9;
+  --ink-3: #a3a3a9;
+  --ink-4: #8a8a91;
   --line: oklch(100% 0 0 / 0.08);
-  --line-strong: oklch(100% 0 0 / 0.16);
-  --fill-1: oklch(100% 0 0 / 0.04);
-  --fill-2: oklch(100% 0 0 / 0.07);
-  --fill-3: oklch(100% 0 0 / 0.11);
-  --input: oklch(0% 0 0 / 0.6);
-  --scrim: oklch(0% 0 0 / 0.7);
+  --line-strong: oklch(100% 0 0 / 0.15);
+  --fill-1: oklch(100% 0 0 / 0.035);
+  --fill-2: oklch(100% 0 0 / 0.06);
+  --fill-3: oklch(100% 0 0 / 0.1);
+  --input: #161617;
+  --scrim: oklch(0% 0 0 / 0.6);
 
-  --accent: oklch(76% 0.13 281);
-  --accent-solid: oklch(56% 0.2 281);
-  --accent-solid-hover: oklch(59% 0.2 281);
-  --accent-soft: oklch(70% 0.15 281 / 0.17);
-  --accent-line: oklch(74% 0.14 281 / 0.5);
-  --on-accent: oklch(99% 0.004 281);
-  --focus: oklch(78% 0.14 281);
+  --accent: #7da8ff;
+  --accent-solid: #3d72e0;
+  --accent-solid-hover: #3566cc;
+  --accent-soft: oklch(70% 0.12 260 / 0.16);
+  --accent-line: oklch(72% 0.12 260 / 0.5);
+  --on-accent: #ffffff;
+  --focus: #7da8ff;
 
-  --ok: oklch(78% 0.15 160);
-  --ok-soft: oklch(78% 0.15 160 / 0.14);
-  --warn: oklch(83% 0.14 80);
-  --warn-soft: oklch(83% 0.14 80 / 0.14);
-  --bad: oklch(72% 0.16 22);
-  --bad-soft: oklch(72% 0.16 22 / 0.14);
-  --bad-solid: oklch(55% 0.19 25);
+  --ok: #4cc38a;
+  --ok-soft: oklch(75% 0.14 158 / 0.14);
+  --warn: #f0a63a;
+  --warn-soft: oklch(80% 0.14 75 / 0.14);
+  --bad: #f2716c;
+  --bad-soft: oklch(70% 0.16 25 / 0.14);
+  --bad-solid: #c4373a;
 
   /* Chart series (validated: scripts/validate_palette.js, both modes) */
-  --chart-ok: oklch(66% 0.15 281);
-  --chart-bad: oklch(66% 0.17 25);
+  --chart-ok: #6f9ef5;
+  --chart-bad: #f2716c;
   --chart-grid: oklch(100% 0 0 / 0.07);
-  --chart-bar: oklch(66% 0.15 281);
+  --chart-bar: #6f9ef5;
   --chart-track: oklch(100% 0 0 / 0.06);
 
   /* Provider tints (brand identity only; never used for text) */
@@ -132,55 +133,55 @@
 :root[data-theme='light'] {
   color-scheme: light;
 
-  --bg: oklch(96.5% 0.012 281);
-  --bg-2: oklch(93.5% 0.02 281);
-  --glow-a: oklch(80% 0.11 281 / 0.55);
-  --glow-b: oklch(86% 0.07 245 / 0.55);
-  --grain-opacity: 0.035;
+  --bg: #f5f5f4;
+  --bg-2: #f5f5f4;
+  --glow-a: transparent;
+  --glow-b: transparent;
+  --grain-opacity: 0;
 
-  --glass: oklch(99.5% 0.004 281 / 0.6);
-  --glass-strong: oklch(99% 0.004 281 / 0.84);
-  --glass-solid: oklch(98.5% 0.005 281);
-  --glass-rim: oklch(100% 0 0 / 0.95);
-  --glass-edge: oklch(40% 0.04 281 / 0.12);
-  --glass-shine: oklch(100% 0 0 / 0.55);
-  --glass-depth: oklch(40% 0.05 281 / 0.06);
-  --shadow: 0 24px 56px -20px oklch(40% 0.08 281 / 0.28);
-  --shadow-sm: 0 8px 22px -12px oklch(40% 0.08 281 / 0.3);
+  --glass: #ffffff;
+  --glass-strong: #ffffff;
+  --glass-solid: #ffffff;
+  --glass-rim: transparent;
+  --glass-edge: oklch(0% 0 0 / 0.09);
+  --glass-shine: transparent;
+  --glass-depth: transparent;
+  --shadow: 0 12px 32px -14px oklch(0% 0 0 / 0.18);
+  --shadow-sm: 0 1px 3px oklch(0% 0 0 / 0.08);
 
-  --ink: oklch(21% 0.02 281);
-  --ink-2: oklch(39% 0.02 281);
-  --ink-3: oklch(48% 0.02 281);
-  --ink-4: oklch(60% 0.02 281);
-  --line: oklch(35% 0.03 281 / 0.1);
-  --line-strong: oklch(35% 0.03 281 / 0.19);
-  --fill-1: oklch(35% 0.05 281 / 0.045);
-  --fill-2: oklch(35% 0.05 281 / 0.075);
-  --fill-3: oklch(35% 0.05 281 / 0.11);
-  --input: oklch(100% 0 0 / 0.72);
-  --scrim: oklch(30% 0.04 281 / 0.28);
+  --ink: #1b1b1d;
+  --ink-2: #3c3c40;
+  --ink-3: #5c5c61;
+  --ink-4: #75757b;
+  --line: oklch(0% 0 0 / 0.08);
+  --line-strong: oklch(0% 0 0 / 0.15);
+  --fill-1: oklch(0% 0 0 / 0.03);
+  --fill-2: oklch(0% 0 0 / 0.055);
+  --fill-3: oklch(0% 0 0 / 0.09);
+  --input: #ffffff;
+  --scrim: oklch(0% 0 0 / 0.25);
 
-  --accent: oklch(49% 0.2 281);
-  --accent-solid: oklch(52% 0.21 281);
-  --accent-solid-hover: oklch(48% 0.21 281);
-  --accent-soft: oklch(55% 0.2 281 / 0.11);
-  --accent-line: oklch(52% 0.2 281 / 0.38);
-  --on-accent: oklch(99% 0.004 281);
-  --focus: oklch(52% 0.21 281);
+  --accent: #2e66d9;
+  --accent-solid: #2e66d9;
+  --accent-solid-hover: #2858bd;
+  --accent-soft: oklch(55% 0.16 260 / 0.1);
+  --accent-line: oklch(52% 0.16 260 / 0.38);
+  --on-accent: #ffffff;
+  --focus: #2e66d9;
 
-  --ok: oklch(49% 0.13 158);
-  --ok-soft: oklch(55% 0.13 158 / 0.13);
-  --warn: oklch(50% 0.13 65);
-  --warn-soft: oklch(70% 0.14 75 / 0.18);
-  --bad: oklch(52% 0.19 25);
-  --bad-soft: oklch(58% 0.19 25 / 0.11);
-  --bad-solid: oklch(52% 0.19 25);
+  --ok: #1e8a4f;
+  --ok-soft: oklch(55% 0.13 158 / 0.12);
+  --warn: #a86300;
+  --warn-soft: oklch(70% 0.14 75 / 0.16);
+  --bad: #c4373a;
+  --bad-soft: oklch(58% 0.19 25 / 0.1);
+  --bad-solid: #c4373a;
 
-  --chart-ok: oklch(55% 0.19 281);
-  --chart-bad: oklch(60% 0.19 25);
-  --chart-grid: oklch(35% 0.03 281 / 0.09);
-  --chart-bar: oklch(55% 0.19 281);
-  --chart-track: oklch(35% 0.05 281 / 0.08);
+  --chart-ok: #2f6fe0;
+  --chart-bad: #c4373a;
+  --chart-grid: oklch(0% 0 0 / 0.07);
+  --chart-bar: #2f6fe0;
+  --chart-track: oklch(0% 0 0 / 0.06);
 
   --p-grok: oklch(45% 0.02 286);
   --p-cursor: oklch(70% 0.15 80);

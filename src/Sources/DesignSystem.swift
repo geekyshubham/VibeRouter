@@ -4,13 +4,13 @@ import SwiftUI
 
 /// Central design system for VibeRouter.
 ///
-/// Builds on the brand tokens in `MenuBarDesign` (indigo-violet accent, glass
-/// surfaces) with a consistent spacing / radius / motion scale and a small set of
-/// reusable, hover-aware components shared by the menu-bar panel and the Settings
-/// window. Keeping these in one place is what lets the two surfaces feel like the
-/// same product instead of two different apps.
+/// Direction: an instrument panel for quota. Graphite surfaces that stay out of
+/// the way, one cobalt accent for the primary action and selection, and color
+/// reserved for data: provider series and quota state. Depth comes from surface
+/// steps and hairlines, not glass, glows or gradients. Colors live in `Palette`
+/// and resolve per appearance, so light and dark share one set of names.
 enum DS {
-    /// 2-pt based spacing rhythm. Use these instead of ad-hoc magic numbers.
+    /// 4-pt rhythm, with a 2-pt step for nudges inside small controls.
     enum Space {
         static let xxs: CGFloat = 2
         static let xs: CGFloat = 4
@@ -29,64 +29,58 @@ enum DS {
         static let pill: CGFloat = 999
     }
 
-    /// Motion tokens. Exponential ease-out / gentle springs only — no bounce.
+    /// One ease-out curve, two durations. No springs that overshoot.
     /// Every animated call site should check `accessibilityReduceMotion`.
     enum Motion {
-        static let quick = Animation.easeOut(duration: 0.16)
-        static let smooth = Animation.easeInOut(duration: 0.26)
-        static let spring = Animation.spring(response: 0.42, dampingFraction: 0.84)
-        static let springSnappy = Animation.spring(response: 0.32, dampingFraction: 0.80)
-        static let expand = Animation.spring(response: 0.36, dampingFraction: 0.86)
+        static let quick = Animation.easeOut(duration: 0.14)
+        static let smooth = Animation.easeOut(duration: 0.24)
+        static let spring = Animation.easeOut(duration: 0.24)
+        static let springSnappy = Animation.easeOut(duration: 0.18)
+        static let expand = Animation.easeOut(duration: 0.22)
+    }
+
+    /// Figures are tabular everywhere so columns of numbers line up.
+    enum Font {
+        static let label = SwiftUI.Font.system(size: 11, weight: .regular)
+        static let meta = SwiftUI.Font.system(size: 11, weight: .regular).monospacedDigit()
+        static let figure = SwiftUI.Font.system(size: 20, weight: .medium).monospacedDigit()
+        static let display = SwiftUI.Font.system(size: 30, weight: .medium).monospacedDigit()
     }
 }
 
-// MARK: - Pulsing status dot
+// MARK: - Live status dot
 
-/// A status dot that gently pulses a soft halo when `active` (e.g. the proxy is
-/// running). Respects Reduce Motion by rendering a static dot.
+/// The proxy's live dot: the product's one signature detail. A solid dot with a
+/// thin ring when live, a hollow muted ring when stopped. No looping pulse.
 struct PulsingDot: View {
     var color: Color
     var active: Bool = true
-    var size: CGFloat = 9
-
-    @State private var animating = false
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    var size: CGFloat = 8
 
     var body: some View {
         ZStack {
-            if active && !reduceMotion {
-                Circle()
-                    .fill(color.opacity(0.35))
-                    .frame(width: size, height: size)
-                    .scaleEffect(animating ? 2.4 : 1)
-                    .opacity(animating ? 0 : 0.7)
-            }
             Circle()
-                .fill(color)
-                .frame(width: size, height: size)
-                .shadow(color: active ? color.opacity(0.6) : .clear, radius: active ? 4 : 0)
-        }
-        .frame(width: size * 2.6, height: size * 2.6)
-        .onAppear {
-            guard active, !reduceMotion else { return }
-            withAnimation(.easeOut(duration: 1.6).repeatForever(autoreverses: false)) {
-                animating = true
+                .strokeBorder(active ? color.opacity(0.35) : Palette.textMuted, lineWidth: 1)
+                .frame(width: size + 6, height: size + 6)
+            if active {
+                Circle().fill(color).frame(width: size, height: size)
             }
         }
+        .frame(width: size + 8, height: size + 8)
+        .accessibilityHidden(true)
     }
 }
 
-// MARK: - Segmented tab bar (sliding indicator)
+// MARK: - Segmented tab bar
 
-/// A polished segmented control with a sliding, spring-animated selection pill
-/// (via `matchedGeometryEffect`) and optional SF Symbol icons. Reusable for both
-/// the panel tabs and the Settings panes so the two surfaces share one language.
+/// Segmented control on a sunken track. The selected segment is one surface step
+/// up with a hairline, and slides with a short ease-out.
 struct SegmentedTabBar<Tab: Hashable & Identifiable>: View {
     let tabs: [Tab]
     @Binding var selection: Tab
     var title: (Tab) -> String
     var icon: (Tab) -> String? = { _ in nil }
-    var accent: Color = MenuBarDesign.accent
+    var accent: Color = Palette.accent
 
     @Namespace private var namespace
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -97,14 +91,10 @@ struct SegmentedTabBar<Tab: Hashable & Identifiable>: View {
                 segment(for: tab)
             }
         }
-        .padding(3)
+        .padding(2)
         .background(
-            Capsule(style: .continuous)
-                .fill(Color.primary.opacity(0.06))
-                .overlay(
-                    Capsule(style: .continuous)
-                        .strokeBorder(Color.primary.opacity(0.05), lineWidth: 0.5)
-                )
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Palette.surfaceSunken)
         )
     }
 
@@ -117,20 +107,20 @@ struct SegmentedTabBar<Tab: Hashable & Identifiable>: View {
                 withAnimation(DS.Motion.springSnappy) { selection = tab }
             }
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
                 if let symbol = icon(tab) {
                     Image(systemName: symbol)
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 11, weight: .regular))
                 }
                 Text(title(tab))
-                    .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    .font(.system(size: 12, weight: isSelected ? .medium : .regular))
             }
-            .foregroundStyle(isSelected ? accent : Color.secondary)
+            .foregroundStyle(isSelected ? Palette.text : Palette.textSecondary)
             .lineLimit(1)
-            .padding(.vertical, 5)
             .frame(maxWidth: .infinity)
+            .frame(height: 28)
             .background(indicator(isSelected: isSelected))
-            .contentShape(Capsule(style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
@@ -139,56 +129,45 @@ struct SegmentedTabBar<Tab: Hashable & Identifiable>: View {
     @ViewBuilder
     private func indicator(isSelected: Bool) -> some View {
         if isSelected {
-            if #available(macOS 26.0, *) {
-                Capsule(style: .continuous)
-                    .fill(Color.clear)
-                    .glassEffect(.regular.tint(accent.opacity(0.45)), in: Capsule(style: .continuous))
-                    .matchedGeometryEffect(id: "tab.indicator", in: namespace)
-            } else {
-                Capsule(style: .continuous)
-                    .fill(accent.opacity(0.16))
-                    .overlay(
-                        Capsule(style: .continuous)
-                            .strokeBorder(accent.opacity(0.30), lineWidth: 0.75)
-                    )
-                    .matchedGeometryEffect(id: "tab.indicator", in: namespace)
-            }
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Palette.surface)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Palette.hairline, lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.06), radius: 1, y: 1)
+                .matchedGeometryEffect(id: "tab.indicator", in: namespace)
         }
     }
 }
 
 // MARK: - Section header
 
-/// A consistent section header: a small tinted icon chip, a title, an optional
-/// subtitle, and an optional trailing accessory. Replaces one-off `Text(...).font(.caption)`
-/// section labels so hierarchy reads the same everywhere.
+/// Section title with an optional muted icon, subtitle and trailing accessory.
+/// Icons take the text color; they never get their own chip or tint.
 struct SectionHeaderLabel<Trailing: View>: View {
     let title: String
     var subtitle: String? = nil
     var systemImage: String? = nil
-    var tint: Color = MenuBarDesign.accent
+    var tint: Color = Palette.accent
     @ViewBuilder var trailing: () -> Trailing
 
     var body: some View {
         HStack(alignment: .center, spacing: DS.Space.md) {
             if let systemImage {
                 Image(systemName: systemImage)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 22, height: 22)
-                    .background(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
-                            .fill(tint.opacity(0.14))
-                    )
+                    .font(.system(size: 13, weight: .regular))
+                    .foregroundStyle(Palette.textSecondary)
+                    .frame(width: 16)
             }
-            VStack(alignment: .leading, spacing: 1) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(Palette.text)
                 if let subtitle, !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                        .font(DS.Font.label)
+                        .foregroundStyle(Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -199,46 +178,37 @@ struct SectionHeaderLabel<Trailing: View>: View {
 }
 
 extension SectionHeaderLabel where Trailing == EmptyView {
-    init(title: String, subtitle: String? = nil, systemImage: String? = nil, tint: Color = MenuBarDesign.accent) {
+    init(title: String, subtitle: String? = nil, systemImage: String? = nil, tint: Color = Palette.accent) {
         self.init(title: title, subtitle: subtitle, systemImage: systemImage, tint: tint, trailing: { EmptyView() })
     }
 }
 
 // MARK: - Stat tile
 
-/// A single metric tile (label + big rounded value + optional sublabel). Animates
-/// numeric changes. Used across the overview strip and analytics dashboard.
+/// A label, a figure and what the figure compares to. Nothing else.
 struct StatTile: View {
     let label: String
     let value: String
     var sublabel: String? = nil
     var systemImage: String? = nil
-    var tint: Color = MenuBarDesign.accent
+    var tint: Color = Palette.accent
     var alignment: HorizontalAlignment = .leading
 
     var body: some View {
         VStack(alignment: alignment, spacing: DS.Space.xs) {
-            HStack(spacing: DS.Space.sm) {
-                if let systemImage {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-                Text(label)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-            }
+            Text(label)
+                .font(DS.Font.label)
+                .foregroundStyle(Palette.textSecondary)
             Text(value)
-                .font(.system(.title3, design: .rounded).weight(.bold))
-                .foregroundStyle(.primary)
-                .monospacedDigit()
+                .font(DS.Font.figure)
+                .foregroundStyle(Palette.text)
                 .contentTransition(.numericText())
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             if let sublabel, !sublabel.isEmpty {
                 Text(sublabel)
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(tint)
+                    .font(DS.Font.meta)
+                    .foregroundStyle(Palette.textMuted)
                     .lineLimit(1)
             }
         }
@@ -250,8 +220,7 @@ struct StatTile: View {
 
 // MARK: - Hover highlight modifier
 
-/// Adds a subtle tinted border that fades in on hover. Purely rendering (no layout
-/// shift), so it's safe inside dense scroll views.
+/// Hover lifts the hairline a step. Purely rendering, so no layout shift.
 struct HoverHighlight: ViewModifier {
     var tint: Color
     var cornerRadius: CGFloat = DS.Radius.md
@@ -262,7 +231,7 @@ struct HoverHighlight: ViewModifier {
         content
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(tint.opacity(hovering ? 0.5 : 0), lineWidth: lineWidth)
+                    .strokeBorder(Palette.text.opacity(hovering ? 0.16 : 0), lineWidth: lineWidth)
             )
             .animation(DS.Motion.quick, value: hovering)
             .onHover { hovering = $0 }
@@ -270,7 +239,7 @@ struct HoverHighlight: ViewModifier {
 }
 
 extension View {
-    /// Fades in a tinted border on pointer hover. Use on cards and list rows.
+    /// Raises a card's hairline on pointer hover. Use on cards and list rows.
     func hoverHighlight(_ tint: Color, cornerRadius: CGFloat = DS.Radius.md, lineWidth: CGFloat = 1) -> some View {
         modifier(HoverHighlight(tint: tint, cornerRadius: cornerRadius, lineWidth: lineWidth))
     }
@@ -288,31 +257,21 @@ extension View {
     }
 }
 
-// MARK: - Liquid Glass surfaces
+// MARK: - Surfaces
 
 extension View {
-    /// A card/tile surface that uses Apple's **Liquid Glass** (`.glassEffect`) on
-    /// macOS 26+ and falls back to the layered material glass (`GlassCardBackground`)
-    /// on earlier systems. Same rounded shape and brand tint on both paths, so the
-    /// layout is identical — only the material differs by OS.
-    @ViewBuilder
+    /// Card surface: one step up from the panel with a hairline, identical on
+    /// every macOS version. `tint` is accepted for call-site compatibility only.
     func cardSurface(tint: Color, cornerRadius: CGFloat = MenuBarDesign.cardCornerRadius) -> some View {
-        if #available(macOS 26.0, *) {
-            glassEffect(
-                .regular.tint(tint.opacity(0.16)),
-                in: RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            )
-        } else {
-            background(GlassCardBackground(tint: tint))
-        }
+        background(GlassCardBackground(tint: tint, cornerRadius: cornerRadius))
     }
 }
 
 // MARK: - Button styles
 
-/// Filled, prominent action (primary CTA). Hover brightens; press dims + shrinks.
+/// Filled primary action. Hover deepens a step; press scales to 0.98.
 struct ProminentActionButtonStyle: ButtonStyle {
-    var tint: Color = MenuBarDesign.accent
+    var tint: Color = Palette.accent
     var fullWidth: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
@@ -327,104 +286,74 @@ struct ProminentActionButtonStyle: ButtonStyle {
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
-            let label = configuration.label
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(.white)
+            configuration.label
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(Palette.onAccent)
                 .padding(.horizontal, DS.Space.lg)
-                .padding(.vertical, DS.Space.sm + 1)
+                .frame(height: 28)
                 .frame(maxWidth: fullWidth ? .infinity : nil)
-
-            if #available(macOS 26.0, *) {
-                label
-                    .glassEffect(.regular.tint(tint).interactive(), in: Capsule(style: .continuous))
-                    .opacity(isEnabled ? 1 : 0.5)
-                    .scaleEffect(configuration.isPressed ? 0.97 : 1)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .contentShape(Capsule(style: .continuous))
-            } else {
-                label
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [tint.opacity(hovering ? 1.0 : 0.95), tint.opacity(hovering ? 0.86 : 0.78)],
-                                    startPoint: .top,
-                                    endPoint: .bottom
-                                )
-                            )
-                            .shadow(color: tint.opacity(isEnabled ? 0.35 : 0), radius: hovering ? 8 : 5, y: 2)
-                    )
-                    .opacity(isEnabled ? 1 : 0.5)
-                    .scaleEffect(configuration.isPressed ? 0.97 : 1)
-                    .animation(DS.Motion.quick, value: hovering)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .onHover { hovering = $0 }
-                    .contentShape(Capsule(style: .continuous))
-            }
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(tint)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(Color.black.opacity(hovering ? 0.08 : 0))
+                        )
+                )
+                .opacity(isEnabled ? 1 : 0.45)
+                .scaleEffect(configuration.isPressed ? 0.98 : 1)
+                .animation(DS.Motion.quick, value: hovering)
+                .animation(DS.Motion.quick, value: configuration.isPressed)
+                .onHover { hovering = $0 }
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 }
 
-/// Subtle, bordered secondary action. Hover fills a soft tint.
+/// Bordered secondary action on the surface. Hover fills one surface step.
 struct SoftActionButtonStyle: ButtonStyle {
-    var tint: Color = MenuBarDesign.accent
+    var tint: Color = Palette.accent
     var fullWidth: Bool = false
 
     func makeBody(configuration: Configuration) -> some View {
-        StyleBody(configuration: configuration, tint: tint, fullWidth: fullWidth)
+        StyleBody(configuration: configuration, fullWidth: fullWidth)
     }
 
     private struct StyleBody: View {
         let configuration: Configuration
-        let tint: Color
         let fullWidth: Bool
         @State private var hovering = false
         @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
-            let label = configuration.label
+            configuration.label
+                .font(.system(size: 12, weight: .regular))
+                .foregroundStyle(Palette.text)
                 .padding(.horizontal, DS.Space.lg)
-                .padding(.vertical, DS.Space.sm + 1)
+                .frame(height: 28)
                 .frame(maxWidth: fullWidth ? .infinity : nil)
-
-            if #available(macOS 26.0, *) {
-                label
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(Color.primary)
-                    .glassEffect(.regular.interactive(), in: Capsule(style: .continuous))
-                    .opacity(isEnabled ? 1 : 0.45)
-                    .scaleEffect(configuration.isPressed ? 0.97 : 1)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .contentShape(Capsule(style: .continuous))
-            } else {
-                label
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(hovering ? tint : Color.primary.opacity(0.9))
-                    .background(
-                        Capsule(style: .continuous)
-                            .fill(tint.opacity(hovering ? 0.16 : 0.001))
-                            .overlay(
-                                Capsule(style: .continuous)
-                                    .strokeBorder(
-                                        hovering ? tint.opacity(0.45) : Color.primary.opacity(0.14),
-                                        lineWidth: 1
-                                    )
-                            )
-                    )
-                    .opacity(isEnabled ? 1 : 0.45)
-                    .scaleEffect(configuration.isPressed ? 0.97 : 1)
-                    .animation(DS.Motion.quick, value: hovering)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .onHover { hovering = $0 }
-                    .contentShape(Capsule(style: .continuous))
-            }
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(hovering ? Palette.surfaceSunken : Palette.surface)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .strokeBorder(Palette.hairline, lineWidth: 1)
+                        )
+                )
+                .opacity(isEnabled ? 1 : 0.45)
+                .scaleEffect(configuration.isPressed ? 0.98 : 1)
+                .animation(DS.Motion.quick, value: hovering)
+                .animation(DS.Motion.quick, value: configuration.isPressed)
+                .onHover { hovering = $0 }
+                .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         }
     }
 }
 
-/// Compact icon button (e.g. header refresh). Hover pops a soft circular tint.
+/// Compact icon button. Muted at rest; hover shows a sunken square and text color.
 struct IconActionButtonStyle: ButtonStyle {
-    var tint: Color = MenuBarDesign.accent
+    /// Applied on hover only, so destructive actions (Quit) still read as such.
+    var tint: Color = Palette.text
 
     func makeBody(configuration: Configuration) -> some View {
         StyleBody(configuration: configuration, tint: tint)
@@ -434,31 +363,23 @@ struct IconActionButtonStyle: ButtonStyle {
         let configuration: Configuration
         let tint: Color
         @State private var hovering = false
+        @Environment(\.isEnabled) private var isEnabled
 
         var body: some View {
-            if #available(macOS 26.0, *) {
-                configuration.label
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 28, height: 28)
-                    .glassEffect(.regular.interactive(), in: Circle())
-                    .scaleEffect(configuration.isPressed ? 0.9 : 1)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .contentShape(Circle())
-            } else {
-                configuration.label
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(hovering ? tint : Color.secondary)
-                    .frame(width: 26, height: 26)
-                    .background(
-                        Circle().fill(tint.opacity(hovering ? 0.16 : 0.001))
-                    )
-                    .scaleEffect(configuration.isPressed ? 0.9 : 1)
-                    .animation(DS.Motion.quick, value: hovering)
-                    .animation(DS.Motion.quick, value: configuration.isPressed)
-                    .onHover { hovering = $0 }
-                    .contentShape(Circle())
-            }
+            configuration.label
+                .font(.system(size: 13, weight: .regular))
+                .foregroundStyle(hovering ? tint : Palette.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(
+                    RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        .fill(hovering ? Palette.surfaceSunken : Color.clear)
+                )
+                .opacity(isEnabled ? 1 : 0.4)
+                .scaleEffect(configuration.isPressed ? 0.94 : 1)
+                .animation(DS.Motion.quick, value: hovering)
+                .animation(DS.Motion.quick, value: configuration.isPressed)
+                .onHover { hovering = $0 }
+                .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         }
     }
 }

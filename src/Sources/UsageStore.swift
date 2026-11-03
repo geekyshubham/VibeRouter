@@ -401,6 +401,8 @@ final class UsageStore: ObservableObject {
         await refreshTask?.value
     }
 
+    var allSnapshots: [ProviderUsageSnapshot] { Array(usageByAccountID.values) }
+
     func snapshot(for account: AuthAccount) -> ProviderUsageSnapshot? {
         usageByAccountID[account.id]
     }
@@ -493,6 +495,7 @@ final class UsageStore: ObservableObject {
         if pendingAccountIDs.isEmpty {
             isRefreshing = false
             lastRefreshAt = Date()
+            QuotaHistoryStore.shared.record(Array(usageByAccountID.values))
         }
     }
 

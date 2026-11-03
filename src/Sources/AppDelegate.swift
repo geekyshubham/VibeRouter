@@ -59,6 +59,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
 
         // Setup standard Edit menu for keyboard shortcuts (Cmd+C/V/X/A)
         setupMainMenu()
+        AppSettings.shared.applyAppearance()
 
         // Initialize managers
         serverManager = ServerManager()
@@ -382,11 +383,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, UNUserNoti
     func createSettingsWindow() {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 720),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
         window.title = "VibeRouter"
+        // The title bar takes the palette background instead of system chrome,
+        // so it changes with the light/dark setting along with the content.
+        window.titlebarAppearsTransparent = true
+        window.backgroundColor = .paletteBackground
         window.setContentSize(NSSize(width: 640, height: 720))
         window.minSize = NSSize(width: 560, height: 560)
         window.center()

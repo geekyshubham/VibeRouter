@@ -1,6 +1,7 @@
 import Foundation
 
 extension Notification.Name {
+    static let appearanceModeChanged = Notification.Name("AppearanceModeChanged")
     static let serverStatusChanged = Notification.Name("ServerStatusChanged")
     static let authDirectoryChanged = Notification.Name("AuthDirectoryChanged")
 }

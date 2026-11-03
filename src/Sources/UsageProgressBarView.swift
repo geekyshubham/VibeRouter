@@ -22,12 +22,12 @@ struct UsageQuotaRow: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline) {
                 Text(title)
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 12))
+                    .foregroundStyle(Palette.textSecondary)
                 Spacer(minLength: 8)
                 Text(metricText ?? percentLabel)
-                    .font(.caption.weight(.semibold).monospacedDigit())
-                    .foregroundStyle(MenuBarDesign.usageTint(remainingPercent: remaining))
+                    .font(.system(size: 12, weight: .medium).monospacedDigit())
+                    .foregroundStyle(Palette.text)
                     .multilineTextAlignment(.trailing)
             }
 
@@ -43,9 +43,9 @@ struct UsageQuotaRow: View {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.system(size: 9, weight: .semibold))
                     Text(resetText)
-                        .font(.caption2)
+                        .font(DS.Font.meta)
                 }
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(Palette.textMuted)
             }
         }
     }
@@ -85,32 +85,14 @@ struct UsageProgressBarView: View {
         GeometryReader { proxy in
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(Color.primary.opacity(0.08))
+                    .fill(Palette.surfaceSunken)
                 Capsule()
-                    .fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.95), tint.opacity(0.6)],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .overlay(
-                        Capsule()
-                            .fill(
-                                LinearGradient(
-                                    colors: [Color.white.opacity(0.35), Color.clear],
-                                    startPoint: .top,
-                                    endPoint: .center
-                                )
-                            )
-                            .blendMode(.plusLighter)
-                    )
+                    .fill(tint)
                     .frame(width: max(0, proxy.size.width * clamped / 100))
-                    .shadow(color: tint.opacity(clamped >= 85 ? 0.45 : 0), radius: 3)
                     .animation(reduceMotion ? nil : DS.Motion.spring, value: clamped)
             }
         }
-        .frame(height: 7)
+        .frame(height: 6)
         .accessibilityLabel(
             fillRepresentsUsed
                 ? "Usage \(Int(clamped)) percent used"

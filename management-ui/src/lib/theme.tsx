@@ -27,7 +27,17 @@ function systemPrefersDark(): boolean {
 
 function apply(choice: ThemeChoice): 'dark' | 'light' {
   const resolved = choice === 'system' ? (systemPrefersDark() ? 'dark' : 'light') : choice;
-  document.documentElement.dataset.theme = resolved;
+  const root = document.documentElement;
+  root.dataset.theme = resolved;
+  // Browser chrome (tab strip, toolbar, scrollbars) follows the chosen theme too.
+  root.style.colorScheme = resolved;
+  let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+  if (!meta) {
+    meta = document.createElement('meta');
+    meta.name = 'theme-color';
+    document.head.appendChild(meta);
+  }
+  meta.content = resolved === 'dark' ? '#161617' : '#f5f5f4';
   return resolved;
 }
 

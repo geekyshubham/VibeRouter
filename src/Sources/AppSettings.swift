@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import AppKit
 
 /// User-facing preferences for VibeRouter, persisted in `UserDefaults`.
 /// Kept intentionally small and observable so views update live and services
@@ -31,6 +32,29 @@ final class AppSettings: ObservableObject {
 
     @Published var showCostEstimates: Bool {
         didSet { persist(showCostEstimates, forKey: Keys.showCostEstimates) }
+    }
+
+    /// "system", "light" or "dark". Applied app-wide through `NSApp.appearance`.
+    @Published var appearanceMode: String {
+        didSet {
+            persist(appearanceMode, forKey: Keys.appearanceMode)
+            applyAppearance()
+        }
+    }
+
+    /// Nil follows the system setting.
+    func applyAppearance() {
+        let name: NSAppearance.Name? = switch appearanceMode {
+        case "light": .aqua
+        case "dark": .darkAqua
+        default: nil
+        }
+        let appearance = name.flatMap(NSAppearance.init(named:))
+        NSApp?.appearance = appearance
+        // Popovers and existing windows inherit from the menu bar or cache their
+        // appearance, so push the choice to every open window as well.
+        NSApp?.windows.forEach { $0.appearance = appearance }
+        NotificationCenter.default.post(name: .appearanceModeChanged, object: appearance)
     }
 
     @Published var showStatusTab: Bool {
@@ -127,6 +151,7 @@ final class AppSettings: ObservableObject {
         statusRefreshMinutes = defaults.number(forKey: Keys.statusRefreshMinutes, default: 10)
         analyticsHistoryDays = defaults.integer(forKey: Keys.analyticsHistoryDays, default: 30)
         showCostEstimates = defaults.bool(forKey: Keys.showCostEstimates, default: true)
+        appearanceMode = defaults.string(forKey: Keys.appearanceMode) ?? "system"
         showStatusTab = defaults.bool(forKey: Keys.showStatusTab, default: true)
         showAnalyticsTab = defaults.bool(forKey: Keys.showAnalyticsTab, default: true)
         autoUpdatePricing = defaults.bool(forKey: Keys.autoUpdatePricing, default: true)
@@ -159,6 +184,7 @@ final class AppSettings: ObservableObject {
         static let statusRefreshMinutes = "ultra.statusRefreshMinutes"
         static let analyticsHistoryDays = "ultra.analyticsHistoryDays"
         static let showCostEstimates = "ultra.showCostEstimates"
+        static let appearanceMode = "ultra.appearanceMode"
         static let showStatusTab = "ultra.showStatusTab"
         static let showAnalyticsTab = "ultra.showAnalyticsTab"
         static let autoUpdatePricing = "ultra.autoUpdatePricing"

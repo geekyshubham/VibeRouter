@@ -335,7 +335,7 @@ struct ProviderUsageCardView: View {
         VStack(alignment: .leading, spacing: 4) {
             Divider().opacity(0.2)
             HStack(spacing: 6) {
-                Image(systemName: exhausted.isEmpty ? "arrow.triangle.2.circlepath.circle.fill" : "exclamationmark.triangle.fill")
+                Image(systemName: exhausted.isEmpty ? "arrow.triangle.2.circlepath" : "exclamationmark.triangle.fill")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(exhausted.isEmpty ? tint : .orange)
                 Text(line)
@@ -545,7 +545,7 @@ struct ProviderUsageCardView: View {
         switch type {
         case .grok: return "sparkle"
         case .kimi: return "moon.stars.fill"
-        case .kiro: return "bolt.horizontal.circle.fill"
+        case .kiro: return "bolt.horizontal"
         case .cursor: return "cursorarrow.click.2"
         case .codebuddy, .codebuddyCN: return "person.2.wave.2.fill"
         case .gitlab: return "chevron.left.forwardslash.chevron.right"
@@ -730,7 +730,7 @@ private struct AccountUsageBlock: View {
                     if isWaking {
                         ProgressView().controlSize(.mini)
                     } else {
-                        Image(systemName: "bolt.horizontal.circle.fill")
+                        Image(systemName: "bolt.horizontal")
                     }
                     Text(isWaking ? "Waking 5h window…" : "Wake 5h window")
                         .font(.caption2.weight(.semibold))
@@ -799,7 +799,7 @@ private struct AccountUsageBlock: View {
                         }
                     } label: {
                         HStack(spacing: 6) {
-                            Image(systemName: "arrow.up.right.circle.fill")
+                            Image(systemName: "arrow.up.right")
                             Text("Reset on claude.ai")
                                 .font(.caption2.weight(.semibold))
                         }
@@ -834,7 +834,7 @@ private struct AccountUsageBlock: View {
                             if isRedeemingReset {
                                 ProgressView().controlSize(.mini)
                             } else {
-                                Image(systemName: "arrow.counterclockwise.circle.fill")
+                                Image(systemName: "arrow.counterclockwise")
                             }
                             Text(isRedeemingReset ? "Applying reset…" : "Use rate-limit reset")
                                 .font(.caption2.weight(.semibold))
@@ -940,7 +940,7 @@ private struct AccountUsageBlock: View {
     private var currentChip: some View {
         if multiSubscription, let active = usage?.subAccounts.first(where: { isActiveSubscription($0) }) {
             HStack(spacing: 3) {
-                Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
+                Image(systemName: "checkmark.seal").font(.system(size: 8))
                 Text(active.title).font(.system(size: 9, weight: .bold)).lineLimit(1)
             }
             .foregroundStyle(MenuBarDesign.success)
@@ -950,7 +950,7 @@ private struct AccountUsageBlock: View {
             .help("Native \(serviceType.displayName) is on this subscription.")
         } else if isCurrentNative {
             HStack(spacing: 3) {
-                Image(systemName: "checkmark.seal.fill").font(.system(size: 8))
+                Image(systemName: "checkmark.seal").font(.system(size: 8))
                 Text("Active").font(.system(size: 9, weight: .bold))
             }
             .foregroundStyle(MenuBarDesign.success)
@@ -973,7 +973,7 @@ private struct AccountUsageBlock: View {
                     .textSelection(.enabled)
             }
         } else if isCurrentNative {
-            Label("Current Mac session", systemImage: "checkmark.seal.fill")
+            Label("Current Mac session", systemImage: "checkmark.seal")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(MenuBarDesign.success)
         } else if canSwitch {
@@ -1006,7 +1006,7 @@ private struct AccountUsageBlock: View {
                             if isSwitching {
                                 ProgressView().controlSize(.mini)
                             } else {
-                                Image(systemName: "arrow.left.arrow.right.circle.fill")
+                                Image(systemName: "arrow.left.arrow.right")
                             }
                             Text(isSwitching ? "Switching…" : "Switch to this account")
                                 .font(.caption2.weight(.semibold))
@@ -1037,7 +1037,7 @@ private struct AccountUsageBlock: View {
     @ViewBuilder
     private func subscriptionSwitchControls(for sub: ProviderUsageSubAccount) -> some View {
         if isActiveSubscription(sub) {
-            Label("Active subscription", systemImage: "checkmark.seal.fill")
+            Label("Active subscription", systemImage: "checkmark.seal")
                 .font(.caption2.weight(.medium))
                 .foregroundStyle(MenuBarDesign.success)
         } else if canSwitchSubscription(sub) {
@@ -1050,7 +1050,7 @@ private struct AccountUsageBlock: View {
                     if isSwitching {
                         ProgressView().controlSize(.mini)
                     } else {
-                        Image(systemName: "arrow.left.arrow.right.circle.fill")
+                        Image(systemName: "arrow.left.arrow.right")
                     }
                     Text(isSwitching ? "Switching…" : "Switch to \(sub.title)")
                         .font(.caption2.weight(.semibold))
@@ -1157,7 +1157,7 @@ private struct AccountUsageBlock: View {
                                 }
                                 Spacer(minLength: 0)
                                 if isActiveSubscription(sub) {
-                                    Image(systemName: "checkmark.seal.fill")
+                                    Image(systemName: "checkmark.seal")
                                         .font(.system(size: 10, weight: .semibold))
                                         .foregroundStyle(MenuBarDesign.success)
                                         .help("Native Codex is pinned to this subscription")
@@ -1255,7 +1255,7 @@ private struct AccountUsageBlock: View {
     private func rateLimitResetsBadge(_ resets: RateLimitResetBank, tint: Color) -> some View {
         let hasResets = resets.availableCount > 0 || resets.surfaceOnly
         HStack(spacing: 8) {
-            Image(systemName: hasResets ? "arrow.counterclockwise.circle.fill" : "arrow.counterclockwise.circle")
+            Image(systemName: hasResets ? "arrow.counterclockwise" : "arrow.counterclockwise.circle")
                 .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(hasResets ? tint : Color.secondary)
             VStack(alignment: .leading, spacing: 1) {
@@ -1323,7 +1323,7 @@ private struct FailoverSwitchButton: View {
                     if isSwitching {
                         ProgressView().controlSize(.mini)
                     } else {
-                        Image(systemName: "arrow.left.arrow.right.circle.fill")
+                        Image(systemName: "arrow.left.arrow.right")
                             .font(.system(size: 10, weight: .semibold))
                     }
                     Text(isSwitching ? "Switching…" : "Use next healthy (\(label))")
