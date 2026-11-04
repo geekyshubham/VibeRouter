@@ -921,9 +921,15 @@ enum TokenRefreshService {
     /// `claude` then prints "Login expired · Please run /login".
     static func shouldNetworkRefreshClaude(
         payload: [String: Any],
-        native: [String: Any]?
+        native: [String: Any]?,
+        claudeCodeOwner: () -> [String: Any]? = { NativeUsageFetcher.claudeCodeAccount() }
     ) -> Bool {
-        guard let native else { return true }
+        // An unreadable Keychain is not "no Claude Code": ~/.claude.json still
+        // names its account, and that account's family stays Claude Code's.
+        guard let native else {
+            guard let owner = claudeCodeOwner() else { return true }
+            return !AccountCredentialIdentity.sameAccount(payload, owner)
+        }
         let local = flattenedAuth(native)
         let file = flattenedAuth(payload)
         guard stringValue(local, keys: ["access_token", "refresh_token"]) != nil else {
@@ -967,7 +973,11 @@ enum TokenRefreshService {
         let local = NativeUsageFetcher.readClaudeAppPayload()
         // Native Claude Code owns this token family. Overlay the live access token
         // and never POST the refresh token — even on force, even if the file looks newer.
-        if let local, !shouldNetworkRefreshClaude(payload: payload, native: local) {
+        if !shouldNetworkRefreshClaude(payload: payload, native: local) {
+            guard let local else {
+                NSLog("[TokenRefresh] Skipping Anthropic refresh; Claude Code is signed into this account")
+                return nil
+            }
             var adopted = copyTokenFields(from: local, onto: payload)
             parkRefreshToken(refreshToken(from: local), in: &adopted)
             NSLog("[TokenRefresh] Skipping Anthropic refresh; Claude Code owns this token family")

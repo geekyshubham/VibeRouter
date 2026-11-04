@@ -11,6 +11,9 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An Experiential Labs card on the Overview shows the credit balance, spend today, this week, and this month, and the key's daily limit when one is set.
 
 ### Fixed
+- Parked Claude accounts no longer expire while VibeRouter cannot read the Keychain. `~/.claude.json` names Claude Code's account, so every other account gets its parked token back and stays renewed, and the active account's token is never renewed behind Claude Code's back.
+- Claude Code's Keychain item is read and written through `/usr/bin/security`, as Claude Code does, with the secret on stdin. One helper runs at a time, a helper that may be showing a dialog is never killed, and a refusal pauses access for 10 minutes. VibeRouter no longer uses the Security API on that item, so it never changes the item's access list.
+- Switching to a parked Claude account uses its parked token. A switch now stops if it cannot read Claude Code's current session, instead of losing the outgoing account's newest token.
 - Reading Claude Code's Keychain session no longer starts `/usr/bin/security`. That helper opened "security wants to access Claude Code-credentials" dialogs that kept coming back after an account switch, even after Allow.
 - Harness model lists follow the management console's enabled catalog, with automatic refresh for connected clients and refresh before each Claude-VibeRouter launch. Claude family shortcuts now prefer enabled 5.5 models, including Haiku, and disabled entries are removed from generated lists without changing personal providers.
 - Native-token writes also use noninteractive Keychain access. Background account scans and import discovery run off the UI thread, and unchanged account scans no longer trigger repeated view updates.

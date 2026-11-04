@@ -563,8 +563,9 @@ final class NativeSessionManager: ObservableObject {
             throw SwitchError.missingToken("access_token")
         }
         // Never clobber Claude Code's keychain with an access-token-only copy.
-        // Imported VibeRouter files omit the refresh token on purpose.
-        guard let refresh = nonEmpty(src["refresh_token"]) else {
+        // An account parked while Claude Code used it carries its token aside.
+        guard let refresh = nonEmpty(src["refresh_token"])
+            ?? nonEmpty(src[TokenRefreshService.parkedRefreshTokenKey]) else {
             throw SwitchError.missingToken("refresh_token")
         }
         var oauth: [String: Any] = ["accessToken": access, "refreshToken": refresh]
@@ -577,8 +578,13 @@ final class NativeSessionManager: ObservableObject {
 
         // The Keychain is about to lose the outgoing account's newest refresh
         // token. Park it on that account's file first so VibeRouter can renew it.
+        // Claude Code rotates that token, so an unread session means losing it.
         let authDirectory = home.appendingPathComponent(".cli-proxy-api")
-        NativeUsageFetcher.overlayClaudeCLICredentials(inDirectory: authDirectory)
+        let outgoing = NativeUsageFetcher.readClaudeAppPayload(waitingUpTo: 20, fresh: true)
+        if outgoing == nil, !NativeUsageFetcher.claudeSessionIsAbsent() {
+            throw SwitchError.resolveFailed("Could not read Claude Code's current session from the Keychain, so switching now would lose its newest sign-in. Try again in a moment.")
+        }
+        NativeUsageFetcher.overlayClaudeCLICredentials(inDirectory: authDirectory, localClaude: outgoing)
 
         // macOS primary store is the Keychain; also write the plaintext file as fallback.
         let data = try JSONSerialization.data(withJSONObject: credentials, options: [.sortedKeys])

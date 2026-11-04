@@ -370,9 +370,83 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertTrue(
             TokenRefreshService.shouldNetworkRefreshClaude(
                 payload: ["email": "a@x.com", "refresh_token": "rt-file"],
-                native: nil
+                native: nil,
+                claudeCodeOwner: { nil }
             )
         )
+        // Unreadable Keychain: ~/.claude.json still names Claude Code's account.
+        XCTAssertFalse(
+            TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: ["type": "claude", "email": "a@x.com", "refresh_token": "rt-file"],
+                native: nil,
+                claudeCodeOwner: { ["type": "claude", "email": "A@x.com"] }
+            )
+        )
+        XCTAssertTrue(
+            TokenRefreshService.shouldNetworkRefreshClaude(
+                payload: ["type": "claude", "email": "a@x.com", "refresh_token": "rt-file"],
+                native: nil,
+                claudeCodeOwner: { ["type": "claude", "email": "b@x.com"] }
+            )
+        )
+    }
+
+    func testParkedClaudeAccountStaysRenewableWhileKeychainIsUnreadable() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let parkedKey = TokenRefreshService.parkedRefreshTokenKey
+        let fileA = dir.appendingPathComponent("claude-a.json")
+        let fileB = dir.appendingPathComponent("claude-b.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude", "email": "a@x.com", "access_token": "a-at",
+            "expired": "2020-01-01T00:00:00Z", parkedKey: "a-rt",
+        ]).write(to: fileA)
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude", "email": "b@x.com", "access_token": "b-at",
+            "expired": "2099-01-01T00:00:00Z", "refresh_token": "b-rt",
+        ]).write(to: fileB)
+        var owner: [String: Any]? = ["type": "claude", "email": "b@x.com"]
+        func overlay(_ file: URL) -> Bool {
+            NativeUsageFetcher.overlayClaudeCLICredentialsIfFresher(
+                onto: file, sessionAbsent: { false }, claudeCodeOwner: { owner }, readNative: { nil })
+        }
+
+        // Claude Code moved to B: A is VibeRouter's again and renews before it expires.
+        XCTAssertTrue(overlay(fileA))
+        var a = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: fileA))
+        XCTAssertEqual(a["refresh_token"] as? String, "a-rt")
+        XCTAssertNil(a[parkedKey])
+        XCTAssertTrue(TokenRefreshService.shouldRefresh(payload: a))
+        // B is Claude Code's: its token is parked so neither VibeRouter nor the proxy POSTs it.
+        XCTAssertTrue(overlay(fileB))
+        let b = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: fileB))
+        XCTAssertNil(TokenRefreshService.refreshToken(from: b))
+        XCTAssertEqual(b[parkedKey] as? String, "b-rt")
+        XCTAssertFalse(overlay(fileA))
+        XCTAssertFalse(overlay(fileB))
+
+        // No signed-in account on record: nothing changes hands.
+        owner = nil
+        try JSONSerialization.data(withJSONObject: [
+            "type": "claude", "email": "a@x.com", "access_token": "a-at", parkedKey: "a-rt",
+        ]).write(to: fileA)
+        XCTAssertFalse(overlay(fileA))
+        a = try XCTUnwrap(NativeUsageFetcher.readAuthPayload(at: fileA))
+        XCTAssertNil(a["refresh_token"])
+    }
+
+    func testClaudeKeychainHelperDecodesSecurityToolOutput() {
+        typealias Tool = NativeKeychain.SecurityTool
+        let json = #"{"claudeAiOauth":{"accessToken":"at"}}"#
+        XCTAssertEqual(Tool.decodePassword(Data((json + "\n").utf8)), Data(json.utf8))
+        XCTAssertEqual(Tool.decodePassword(Data((Tool.hex(Data("a\nb".utf8)) + "\n").utf8)), Data("a\nb".utf8))
+        XCTAssertNil(Tool.decodePassword(Data("\n".utf8)))
+        XCTAssertEqual(Tool.status(exitCode: 0), errSecSuccess)
+        XCTAssertEqual(Tool.status(exitCode: 44), errSecItemNotFound)
+        XCTAssertEqual(Tool.status(exitCode: 51), errSecAuthFailed)
+        XCTAssertEqual(Tool.quoted(#"Claude "Code"\x"#), #""Claude \"Code\"\\x""#)
+        XCTAssertEqual(NativeKeychain.securityToolServices, ["Claude Code-credentials"])
     }
 
     func testClaudeAccessOnlyOverlayIsIdempotentAndNativeRefreshKeepsSessionAlive() throws {

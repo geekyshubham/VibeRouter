@@ -3509,10 +3509,12 @@ enum NativeUsageFetcher {
         onto authFile: URL,
         localClaude: [String: Any]? = nil,
         now: Date = Date(),
-        sessionAbsent: () -> Bool = NativeUsageFetcher.claudeSessionIsAbsent
+        sessionAbsent: () -> Bool = NativeUsageFetcher.claudeSessionIsAbsent,
+        claudeCodeOwner: () -> [String: Any]? = { NativeUsageFetcher.claudeCodeAccount() },
+        readNative: () -> [String: Any]? = { NativeUsageFetcher.readClaudeAppPayload() }
     ) -> Bool {
         guard var payload = readAuthPayload(at: authFile) else { return false }
-        let local = localClaude ?? readClaudeAppPayload()
+        let local = localClaude ?? readNative()
         payload = TokenRefreshService.flattenedAuth(payload)
         var changed = false
 
@@ -3560,6 +3562,19 @@ enum NativeUsageFetcher {
             NSLog("[ClaudeOverlay] Claude Code has no session; VibeRouter now renews %@",
                   authFile.lastPathComponent)
             changed = true
+        } else if local == nil, let owner = claudeCodeOwner() {
+            // The Keychain is unreadable (VibeRouter's ad-hoc signature changes with
+            // every build), but ~/.claude.json still names Claude Code's account.
+            // Without this, a parked account was never handed back and expired, and
+            // the active account's file kept a refresh token the proxy could POST.
+            if AccountCredentialIdentity.sameAccount(payload, owner) {
+                if TokenRefreshService.parkRefreshToken(nil, in: &payload) { changed = true }
+            } else if AccountCredentialIdentity.hasConflict(payload, owner),
+                      TokenRefreshService.restoreParkedRefreshToken(in: &payload) {
+                NSLog("[ClaudeOverlay] Claude Code is signed into another account; VibeRouter now renews %@",
+                      authFile.lastPathComponent)
+                changed = true
+            }
         }
         return changed ? writeAuthPayload(payload, to: authFile) : false
     }
@@ -3723,11 +3738,11 @@ enum NativeUsageFetcher {
         return payload
     }
 
-    static func readClaudeAppPayload() -> [String: Any]? {
+    static func readClaudeAppPayload(waitingUpTo wait: TimeInterval = 0.5, fresh: Bool = false) -> [String: Any]? {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let credentialsURL = home.appendingPathComponent(".claude/.credentials.json")
 
-        let keychain = NativeKeychain.read(service: "Claude Code-credentials")
+        let keychain = NativeKeychain.read(service: "Claude Code-credentials", waitingUpTo: wait, fresh: fresh)
         // An inaccessible item leaves the live session unknown; only a missing
         // item permits falling back to a possibly stale plaintext account.
         let keychainMissing = keychain.status == errSecItemNotFound
@@ -3737,25 +3752,32 @@ enum NativeUsageFetcher {
             file: try? Data(contentsOf: credentialsURL)
         ) else { return nil }
 
-        if bestPayload["email"] == nil || (bestPayload["email"] as? String)?.isEmpty == true {
-            let configURLs = [
-                home.appendingPathComponent(".claude.json"),
-                home.appendingPathComponent(".claude/.claude.json"),
-            ]
-            for url in configURLs {
-                if let d = try? Data(contentsOf: url),
-                   let root = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
-                   let oauthAccount = root["oauthAccount"] as? [String: Any],
-                   let email = oauthAccount["emailAddress"] as? String,
-                   !email.isEmpty
-                {
-                    bestPayload["email"] = email
-                    break
-                }
-            }
+        if bestPayload["email"] == nil || (bestPayload["email"] as? String)?.isEmpty == true,
+           let email = claudeCodeAccount(home: home)?["email"] {
+            bestPayload["email"] = email
         }
 
         return bestPayload
+    }
+
+    /// The account Claude Code is signed into, from `oauthAccount` in ~/.claude.json.
+    /// Claude Code and the VibeRouter switch write it beside the Keychain session.
+    /// Unlike the Keychain it never needs a password, so it still decides who owns a
+    /// Claude refresh token when the Keychain cannot be read.
+    static func claudeCodeAccount(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser
+    ) -> [String: Any]? {
+        for path in [".claude.json", ".claude/.claude.json"] {
+            if let data = try? Data(contentsOf: home.appendingPathComponent(path)),
+               let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let oauthAccount = root["oauthAccount"] as? [String: Any],
+               let email = (oauthAccount["emailAddress"] as? String)?
+                   .trimmingCharacters(in: .whitespacesAndNewlines), email.contains("@")
+            {
+                return ["type": "claude", "email": email]
+            }
+        }
+        return nil
     }
 
     /// Claude Code on macOS reads only its Keychain item while one exists; the
