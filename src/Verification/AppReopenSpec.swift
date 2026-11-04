@@ -34,7 +34,7 @@ struct AppReopenSpec {
         let keychainSource = try! String(contentsOfFile: "src/Sources/NativeKeychain.swift", encoding: .utf8)
         precondition(keychainSource.components(separatedBy: "context.interactionNotAllowed = true").count == 3,
                      "both reads and writes must disable authentication UI")
-        for name in ["TokenRefreshService", "NativeSessionManager", "CodexWorkspaceCredentials", "AntigravityCLIToken"] {
+        for name in ["NativeKeychain", "TokenRefreshService", "NativeSessionManager", "CodexWorkspaceCredentials", "AntigravityCLIToken"] {
             let source = try! String(contentsOfFile: "src/Sources/\(name).swift", encoding: .utf8)
             precondition(!source.contains("/usr/bin/security"), "credential paths must not spawn password-capable helper processes")
         }

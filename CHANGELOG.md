@@ -11,6 +11,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - An Experiential Labs card on the Overview shows the credit balance, spend today, this week, and this month, and the key's daily limit when one is set.
 
 ### Fixed
+- Reading Claude Code's Keychain session no longer starts `/usr/bin/security`. That helper opened "security wants to access Claude Code-credentials" dialogs that kept coming back after an account switch, even after Allow.
 - Harness model lists follow the management console's enabled catalog, with automatic refresh for connected clients and refresh before each Claude-VibeRouter launch. Claude family shortcuts now prefer enabled 5.5 models, including Haiku, and disabled entries are removed from generated lists without changing personal providers.
 - Native-token writes also use noninteractive Keychain access. Background account scans and import discovery run off the UI thread, and unchanged account scans no longer trigger repeated view updates.
 - Reopening VibeRouter from Finder or an app icon raises Settings in the existing instance instead of silently exiting a second instance. The menu-bar panel activates when opened.
