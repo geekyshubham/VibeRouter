@@ -446,7 +446,7 @@ final class TokenRefreshServiceTests: XCTestCase {
         XCTAssertEqual(Tool.status(exitCode: 44), errSecItemNotFound)
         XCTAssertEqual(Tool.status(exitCode: 51), errSecAuthFailed)
         XCTAssertEqual(Tool.quoted(#"Claude "Code"\x"#), #""Claude \"Code\"\\x""#)
-        XCTAssertEqual(NativeKeychain.securityToolServices, ["Claude Code-credentials"])
+        XCTAssertEqual(NativeKeychain.securityToolServices, ["Claude Code-credentials", "gemini"])
     }
 
     func testClaudeAccessOnlyOverlayIsIdempotentAndNativeRefreshKeepsSessionAlive() throws {

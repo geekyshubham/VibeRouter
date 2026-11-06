@@ -107,6 +107,26 @@ final class NativeSessionManager: ObservableObject {
         isRefreshing = false
     }
 
+    /// Re-read one provider's native login now and mark which of `accounts` it is.
+    /// Prior "current" markers for this provider's filenames are dropped, so a sibling
+    /// Team login does not keep showing Active for a frame after a switch.
+    @MainActor
+    func redetectCurrent(_ type: ServiceType, among accounts: [AuthAccount]) {
+        guard let identity = detectIdentity(for: type) else { return }
+        currentByProvider[type] = identity
+        let prefix = type.rawValue.lowercased()
+        var next = currentAccountIDs.filter { id in
+            let lower = id.lowercased()
+            if lower.hasPrefix(prefix) { return false }
+            if type == .codex, lower.hasPrefix("codex-seat") { return false }
+            return true
+        }
+        for account in accounts where matches(account, identity) {
+            next.insert(account.id)
+        }
+        currentAccountIDs = next
+    }
+
     private func detectAll(
         accounts: [ServiceType: [AuthAccount]]
     ) async -> ([ServiceType: NativeSessionIdentity], Set<String>) {
@@ -312,12 +332,15 @@ final class NativeSessionManager: ObservableObject {
     ///   Pinning `tokens.account_id` alone is not enough — the access token must belong to that seat
     ///   (same model as Cockpit Tools' per-seat account store).
     /// - Parameter subscriptionLabel: Human label for the toast (e.g. "ChatGPT Team · CR").
+    /// - Parameter automatic: True for Antigravity auto-switch. Any other switch is the
+    ///   user's choice, and auto-switch leaves it in place.
     @MainActor
     func switchTo(
         _ account: AuthAccount,
         chatGPTAccountID: String? = nil,
         subscriptionLabel: String? = nil,
-        restartApp: Bool
+        restartApp: Bool,
+        automatic: Bool = false
     ) async -> NativeSwitchOutcome {
         guard supportsSwitching(account.type) else {
             return .failure(message: "Switching \(account.type.displayName) is not supported yet.")
@@ -382,23 +405,12 @@ final class NativeSessionManager: ObservableObject {
 
         if let writeError { return .failure(message: writeError) }
 
+        // Recorded before the next suspension point, so a quota sweep that runs while
+        // the app relaunches already sees the user's choice.
+        if !automatic { AntigravityAutoRouter.noteManualSwitch(to: account) }
+
         // Update live identity from disk immediately (full account list refresh follows via UI).
-        // Drop prior "current" markers for this provider's filenames so a sibling Team login
-        // does not keep showing Active for a frame after switch.
-        if let identity = detectIdentity(for: type) {
-            currentByProvider[type] = identity
-            let prefix = type.rawValue.lowercased()
-            var next = currentAccountIDs.filter { id in
-                let lower = id.lowercased()
-                if lower.hasPrefix(prefix) { return false }
-                if type == .codex, lower.hasPrefix("codex-seat") { return false }
-                return true
-            }
-            if matches(account, identity) {
-                next.insert(account.id)
-            }
-            currentAccountIDs = next
-        }
+        redetectCurrent(type, among: [account])
 
         let targetName = subscriptionLabel?.nilIfEmpty
             ?? account.baseDisplayName

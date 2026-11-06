@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// The `agy` CLI's saved OAuth login: macOS Keychain first (go-keyring), token file as fallback.
 /// Updates are in place, keeping every unrelated field and the stored encoding.
@@ -31,7 +32,7 @@ enum AntigravityCLIToken {
 
     /// The login `agy` will use next, read in the same precedence `agy` applies.
     static func currentSnapshot() -> Snapshot? {
-        if let stored = readKeychain() {
+        if let stored = readKeychain().value {
             return snapshot(ofKeyringValue: stored)
         }
         guard let data = try? Data(contentsOf: tokenFileURL) else { return nil }
@@ -47,7 +48,13 @@ enum AntigravityCLIToken {
         expiry: Date
     ) -> WriteResult {
         var keychainResult = WriteResult.notSignedIn
-        if let stored = readKeychain() {
+        let keychain = readKeychain(waitingUpTo: 5, fresh: true)
+        if keychain.value == nil, keychain.status != errSecSuccess, keychain.status != errSecItemNotFound {
+            // An item exists that could not be read. agy keeps signing in with it,
+            // so updating only the token file would leave agy on the old account.
+            keychainResult = .writeFailed
+        }
+        if let stored = keychain.value {
             if let updated = updateKeyringValue(
                 stored,
                 accessToken: accessToken,
@@ -82,11 +89,14 @@ enum AntigravityCLIToken {
         return keychainResult == .notSignedIn ? fileResult : keychainResult
     }
 
-    private static func readKeychain() -> String? {
-        guard let data = NativeKeychain.read(service: keychainService, account: keychainAccount).data,
+    private static func readKeychain(waitingUpTo wait: TimeInterval = 0.5,
+                                     fresh: Bool = false) -> (value: String?, status: OSStatus) {
+        let result = NativeKeychain.read(service: keychainService, account: keychainAccount,
+                                         waitingUpTo: wait, fresh: fresh)
+        guard let data = result.data,
               let value = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !value.isEmpty else { return nil }
-        return value
+              !value.isEmpty else { return (nil, result.status) }
+        return (value, result.status)
     }
 
     private static func writeKeychain(_ value: String) -> Bool {

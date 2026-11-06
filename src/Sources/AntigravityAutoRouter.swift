@@ -87,9 +87,48 @@ enum AntigravityAutoRouter {
         return "All \(active.count) accounts exhausted — add or refresh quota"
     }
 
+    // MARK: - Manual choice
+
+    private static let manualChoiceKey = "antigravity.manualChoiceAccountID"
+
+    /// The account the user last switched the IDE to by hand. Shared through
+    /// `UserDefaults` so a switch from the `viberouter` command counts too.
+    static var manualChoiceAccountID: String? {
+        get { UserDefaults.standard.string(forKey: manualChoiceKey) }
+        set { UserDefaults.standard.set(newValue, forKey: manualChoiceKey) }
+    }
+
+    /// Record a switch the user made, so auto-switch does not undo it.
+    static func noteManualSwitch(to account: AuthAccount) {
+        guard account.type == .antigravity else { return }
+        manualChoiceAccountID = account.id
+    }
+
+    /// Auto-switch must not undo a switch the user just made. The chosen account
+    /// is left alone until a finished quota sweep shows it healthy; after that it
+    /// fails over like any other account once it runs out.
+    /// Returns true when the current account is the user's choice and must stay.
+    static func keepsManualChoice(
+        current: AuthAccount,
+        snapshot: ProviderUsageSnapshot?,
+        threshold: Double
+    ) -> Bool {
+        guard let chosen = manualChoiceAccountID else { return false }
+        guard chosen == current.id else {
+            // The IDE moved to another account since; that choice no longer applies.
+            manualChoiceAccountID = nil
+            return false
+        }
+        if let snapshot, !snapshot.isRefreshing, !isExhausted(snapshot: snapshot, threshold: threshold) {
+            manualChoiceAccountID = nil
+        }
+        return true
+    }
+
     /// If the native IDE is pinned to an exhausted account, switch it to the next
     /// healthy one. No-op when auto-switch is off, when everything is healthy,
-    /// or when nothing healthy remains. Returns the account switched to, if any.
+    /// when nothing healthy remains, or when the user picked the current account
+    /// themselves. Returns the account switched to, if any.
     @MainActor
     static func ensureHealthyNativeSession(
         accounts: [AuthAccount],
@@ -101,7 +140,18 @@ enum AntigravityAutoRouter {
         guard let nativeSession else { return nil }
         guard accounts.count > 1 else { return nil }
 
-        let current = accounts.first(where: { nativeSession.isCurrent($0) })
+        var current = accounts.first(where: { nativeSession.isCurrent($0) })
+        if let chosen = manualChoiceAccountID, chosen != current?.id {
+            // A switch from the `viberouter` command lands before this app re-reads
+            // the IDE login. Acting on the stale one would undo that switch.
+            nativeSession.redetectCurrent(.antigravity, among: accounts)
+            current = accounts.first(where: { nativeSession.isCurrent($0) })
+        }
+        if let current,
+           keepsManualChoice(current: current, snapshot: usageForAccount(current), threshold: threshold)
+        {
+            return nil
+        }
         // Current is healthy (or unknown with no usage yet) → nothing to do.
         if let current, !isExhausted(snapshot: usageForAccount(current), threshold: threshold) {
             return nil
@@ -113,7 +163,8 @@ enum AntigravityAutoRouter {
 
         let outcome = await nativeSession.switchTo(
             next,
-            restartApp: AppSettings.shared.restartAppOnSwitch
+            restartApp: AppSettings.shared.restartAppOnSwitch,
+            automatic: true
         )
         switch outcome {
         case .switched(let message):

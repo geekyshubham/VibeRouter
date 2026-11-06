@@ -112,7 +112,10 @@ enum NativeKeychain {
     /// item's partition list until Claude Code itself prompted on every read. Going
     /// through the same tool reaches the item exactly as Claude Code does, never
     /// creates an item only VibeRouter can open, and never changes its ACL.
-    static let securityToolServices: Set<String> = ["Claude Code-credentials"]
+    ///
+    /// `agy` (the Antigravity CLI, also the Antigravity IDE's agent hub) saves its
+    /// login through go-keyring, which runs the same tool, so its item has the same ACL.
+    static let securityToolServices: Set<String> = ["Claude Code-credentials", AntigravityCLIToken.keychainService]
 
     /// Claude Code instances with their own `CLAUDE_CONFIG_DIR` use a suffixed item.
     static func usesSecurityTool(_ service: String) -> Bool {
@@ -127,15 +130,16 @@ enum NativeKeychain {
         private static let lock = NSLock()
         private static var active: (key: String, request: Request)?
         private static var cached: [String: (until: Date, data: Data?, status: OSStatus)] = [:]
-        /// Set after a refusal, so a damaged item costs at most one dialog per pause.
-        private static var pausedUntil = Date.distantPast
+        /// Set per service after a refusal, so a damaged item costs at most one dialog per pause.
+        private static var pausedUntil: [String: Date] = [:]
         static let path = "/usr/bin/security"
         static let pauseAfterRefusal: TimeInterval = 10 * 60
 
         static func read(service: String, account: String?, wait: TimeInterval, fresh: Bool) -> (data: Data?, status: OSStatus) {
             var arguments = ["find-generic-password", "-s", service]
             if let account { arguments += ["-a", account] }
-            let (output, status) = run(key: "read:\(service):\(account ?? "")", arguments: arguments + ["-w"],
+            let (output, status) = run(service: service, key: "read:\(service):\(account ?? "")",
+                                       arguments: arguments + ["-w"],
                                        input: nil, wait: wait, cacheFor: 30, fresh: fresh)
             guard status == errSecSuccess else { return (nil, status) }
             return (output.flatMap(decodePassword), status)
@@ -144,7 +148,7 @@ enum NativeKeychain {
         /// The secret travels on stdin through `security -i`, never in argv.
         static func write(_ data: Data, service: String, account: String, wait: TimeInterval) -> Bool {
             let command = "add-generic-password -U -a \(quoted(account)) -s \(quoted(service)) -X \(hex(data))\n"
-            let status = run(key: "write:\(service):\(account)", arguments: ["-i"],
+            let status = run(service: service, key: "write:\(service):\(account)", arguments: ["-i"],
                              input: Data(command.utf8), wait: wait, cacheFor: nil, fresh: true).1
             lock.lock()
             cached = cached.filter { !$0.key.hasPrefix("read:\(service):") }
@@ -154,7 +158,7 @@ enum NativeKeychain {
 
         /// One helper at a time. A helper that outlives `wait` is left to finish:
         /// it may be showing a dialog, and killing it would orphan that dialog.
-        private static func run(key: String, arguments: [String], input: Data?, wait: TimeInterval,
+        private static func run(service: String, key: String, arguments: [String], input: Data?, wait: TimeInterval,
                                 cacheFor: TimeInterval?, fresh: Bool) -> (Data?, OSStatus) {
             let deadline = Date().addingTimeInterval(wait)
             while true {
@@ -163,7 +167,10 @@ enum NativeKeychain {
                     lock.unlock()
                     return (hit.data, hit.status)
                 }
-                if Date() < pausedUntil { lock.unlock(); return (nil, errSecInteractionNotAllowed) }
+                if let paused = pausedUntil[service], Date() < paused {
+                    lock.unlock()
+                    return (nil, errSecInteractionNotAllowed)
+                }
                 if let active {
                     let joinable = active.key == key && !fresh && input == nil
                     lock.unlock()
@@ -178,7 +185,7 @@ enum NativeKeychain {
                 request.group.enter()
                 active = (key, request)
                 lock.unlock()
-                start(request, key: key, arguments: arguments, input: input, cacheFor: cacheFor)
+                start(request, service: service, key: key, arguments: arguments, input: input, cacheFor: cacheFor)
                 guard request.group.wait(timeout: .now() + max(0, deadline.timeIntervalSinceNow)) == .success else {
                     return (nil, errSecNotAvailable)
                 }
@@ -186,7 +193,8 @@ enum NativeKeychain {
             }
         }
 
-        private static func start(_ request: Request, key: String, arguments: [String], input: Data?, cacheFor: TimeInterval?) {
+        private static func start(_ request: Request, service: String, key: String, arguments: [String],
+                                  input: Data?, cacheFor: TimeInterval?) {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: path)
             process.arguments = arguments
@@ -204,9 +212,9 @@ enum NativeKeychain {
                 request.result = (outcome == errSecSuccess ? buffer.data : nil, outcome)
                 if let cacheFor { cached[key] = (Date().addingTimeInterval(cacheFor), request.result?.0, outcome) }
                 if outcome != errSecSuccess, outcome != errSecItemNotFound {
-                    pausedUntil = Date().addingTimeInterval(pauseAfterRefusal)
-                    NSLog("[NativeKeychain] /usr/bin/security was refused (exit %d); pausing Claude Code Keychain access",
-                          process.terminationStatus)
+                    pausedUntil[service] = Date().addingTimeInterval(pauseAfterRefusal)
+                    NSLog("[NativeKeychain] /usr/bin/security was refused (exit %d); pausing Keychain access to %@",
+                          process.terminationStatus, service)
                 }
                 active = nil
                 lock.unlock()
