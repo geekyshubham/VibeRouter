@@ -223,6 +223,22 @@ enum TokenRefreshService {
 
     @discardableResult
     static func refreshNativeClaudeSessionIfNeeded(account: [String: Any], force: Bool = false) async -> Bool {
+        if let owned = InstanceSessions.claudeOwner(of: account) {
+            // Keep an idle instance's login alive the same way: its own Claude
+            // Code renews it, inside the instance's config dir.
+            guard ClaudeNativeSessionRefresh.shouldRefresh(account: account, native: owned.session, force: force)
+            else { return false }
+            let configDir = owned.home.configDir
+            _ = await ClaudeNativeSessionRefresh.runner(for: configDir.path).run {
+                await Task.detached(priority: .utility) {
+                    ClaudeNativeSessionRefresh.requestNativeRefresh(configDir: configDir)
+                }.value
+            }
+            guard case .signedIn(let native) = InstanceSessions.claudeSession(home: owned.home, fresh: true),
+                  AccountCredentialIdentity.sameAccount(account, native),
+                  let expiry = accessTokenExpiry(from: native), expiry > Date() else { return false }
+            return true
+        }
         let before = NativeUsageFetcher.readClaudeAppPayload()
         guard ClaudeNativeSessionRefresh.shouldRefresh(
             account: account, native: before, force: force
@@ -434,8 +450,18 @@ enum TokenRefreshService {
     @discardableResult
     private static func syncCodexAuthJSON(oldRefresh: String, updated: [String: Any]) -> Bool {
         guard (updated["type"] as? String)?.lowercased() == "codex" else { return false }
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let url = home.appendingPathComponent(".codex/auth.json")
+        let main = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        var wrote = false
+        // Codex instances keep their own copy of a seat; a stale one would send
+        // refresh_token_reused just like a stale ~/.codex.
+        for codexHome in [main] + InstanceSessions.codexHomes() {
+            if syncCodexAuthJSON(oldRefresh: oldRefresh, updated: updated, codexHome: codexHome) { wrote = true }
+        }
+        return wrote
+    }
+
+    private static func syncCodexAuthJSON(oldRefresh: String, updated: [String: Any], codexHome: URL) -> Bool {
+        let url = codexHome.appendingPathComponent("auth.json")
         guard let data = try? Data(contentsOf: url),
               var root = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return false }
@@ -467,11 +493,8 @@ enum TokenRefreshService {
         root["tokens"] = tokens
         root["last_refresh"] = isoString(Date())
         guard writeAuthFile(root, to: url) else { return false }
-        _ = CodexWorkspaceCredentials.writeKeychain(
-            authFileJSON: root,
-            codexHome: home.appendingPathComponent(".codex")
-        )
-        NSLog("[TokenRefresh] Synced rotated refresh token to ~/.codex/auth.json")
+        _ = CodexWorkspaceCredentials.writeKeychain(authFileJSON: root, codexHome: codexHome)
+        NSLog("[TokenRefresh] Synced rotated refresh token to %@", url.path)
         return true
     }
 
@@ -816,14 +839,23 @@ enum TokenRefreshService {
     /// official CLI cannot POST a leftover RT and revoke the family.
     @discardableResult
     static func pushCodexTokensToCLIIfFresher(_ payload: [String: Any]) -> Bool {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let url = home.appendingPathComponent(".codex/auth.json")
-        guard FileManager.default.fileExists(atPath: url.path) else { return false }
         let flat = flattenedAuth(payload)
         guard stringValue(flat, keys: ["access_token"]) != nil else { return false }
-        guard let local = NativeUsageFetcher.readCodexAppPayload(),
-              NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local) else { return false }
-        return writeCodexCLITokens(from: flat, to: url, codexHome: home.appendingPathComponent(".codex"))
+        var wrote = false
+        let main = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".codex")
+        let mainURL = main.appendingPathComponent("auth.json")
+        if FileManager.default.fileExists(atPath: mainURL.path),
+           let local = NativeUsageFetcher.readCodexAppPayload(),
+           NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local),
+           writeCodexCLITokens(from: flat, to: mainURL, codexHome: main) { wrote = true }
+        for codexHome in InstanceSessions.codexHomes() {
+            guard let local = InstanceSessions.codexPayload(home: codexHome),
+                  NativeUsageFetcher.shouldAdoptCodexCLITokens(local: flat, file: local) else { continue }
+            if writeCodexCLITokens(from: flat, to: codexHome.appendingPathComponent("auth.json"), codexHome: codexHome) {
+                wrote = true
+            }
+        }
+        return wrote
     }
 
     @discardableResult
@@ -970,6 +1002,16 @@ enum TokenRefreshService {
     }
 
     private static func refreshAnthropic(_ payload: [String: Any], forceOAuth: Bool = false) async -> [String: Any]? {
+        if let owned = InstanceSessions.claudeOwner(of: payload) {
+            guard let session = owned.session else {
+                NSLog("[TokenRefresh] Skipping Anthropic refresh; a Claude Code instance is signed into this account")
+                return nil
+            }
+            var adopted = copyTokenFields(from: session, onto: payload)
+            parkRefreshToken(refreshToken(from: session), in: &adopted)
+            NSLog("[TokenRefresh] Skipping Anthropic refresh; a Claude Code instance owns this token family")
+            return adopted
+        }
         let local = NativeUsageFetcher.readClaudeAppPayload()
         // Native Claude Code owns this token family. Overlay the live access token
         // and never POST the refresh token — even on force, even if the file looks newer.

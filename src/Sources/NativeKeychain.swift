@@ -59,7 +59,7 @@ enum NativeKeychain {
     ///   - fresh: Skip the cache, for a switch that must see the newest token.
     static func read(service: String, account: String? = nil,
                      waitingUpTo wait: TimeInterval = 0.5, fresh: Bool = false) -> (data: Data?, status: OSStatus) {
-        if securityToolServices.contains(service) {
+        if usesSecurityTool(service) {
             return SecurityTool.read(service: service, account: account, wait: wait, fresh: fresh)
         }
         return perform(key: "read:\(service):\(account ?? "")", cache: true) {
@@ -83,7 +83,7 @@ enum NativeKeychain {
     /// Preserve existing access controls. Denied writes never delete and
     /// recreate a protected credential to get around its ACL.
     static func write(_ data: Data, service: String, account: String, waitingUpTo wait: TimeInterval = 0.5) -> Bool {
-        if securityToolServices.contains(service) {
+        if usesSecurityTool(service) {
             return SecurityTool.write(data, service: service, account: account, wait: max(wait, 10))
         }
         return perform(key: "write:\(service):\(account)", cache: false) {
@@ -113,6 +113,11 @@ enum NativeKeychain {
     /// through the same tool reaches the item exactly as Claude Code does, never
     /// creates an item only VibeRouter can open, and never changes its ACL.
     static let securityToolServices: Set<String> = ["Claude Code-credentials"]
+
+    /// Claude Code instances with their own `CLAUDE_CONFIG_DIR` use a suffixed item.
+    static func usesSecurityTool(_ service: String) -> Bool {
+        securityToolServices.contains(service) || service.hasPrefix("Claude Code-credentials-")
+    }
 
     enum SecurityTool {
         private final class Request {

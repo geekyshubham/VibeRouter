@@ -3432,15 +3432,24 @@ enum NativeUsageFetcher {
     static func overlayCodexCLICredentialsIfFresher(
         onto authFile: URL,
         localCodex: [String: Any]? = nil,
-        now: Date = Date()
+        now: Date = Date(),
+        instanceSessions: () -> [[String: Any]] = {
+            InstanceSessions.codexHomes().compactMap(InstanceSessions.codexPayload)
+        }
     ) -> Bool {
         guard var payload = readAuthPayload(at: authFile) else { return false }
-        let local = localCodex ?? readCodexAppPayload()
-        guard let local, shouldAdoptCodexCLITokens(local: local, file: payload, now: now) else {
-            return false
+        // Codex instances rotate their own copy of a seat, exactly like ~/.codex.
+        let locals = localCodex.map { [$0] } ?? ([readCodexAppPayload()].compactMap { $0 } + instanceSessions())
+        var changed = false
+        for local in locals where shouldAdoptCodexCLITokens(local: local, file: payload, now: now) {
+            payload = adoptCodexCLITokens(local, onto: payload)
+            changed = true
         }
+        return changed ? writeAuthPayload(payload, to: authFile) : false
+    }
 
-        payload = TokenRefreshService.flattenedAuth(payload)
+    private static func adoptCodexCLITokens(_ local: [String: Any], onto file: [String: Any]) -> [String: Any] {
+        var payload = TokenRefreshService.flattenedAuth(file)
         if let access = stringValue(local, keys: ["access_token"]) {
             payload["access_token"] = access
         }
@@ -3462,7 +3471,7 @@ enum NativeUsageFetcher {
             payload["expires_at"] = formatter.string(from: exp)
         }
         payload["last_refresh"] = payload["last_refresh"] ?? payload["expired"]
-        return writeAuthPayload(payload, to: authFile)
+        return payload
     }
 
     /// True when `local` is the same ChatGPT seat and has a newer access token than `file`.
@@ -3511,27 +3520,30 @@ enum NativeUsageFetcher {
         now: Date = Date(),
         sessionAbsent: () -> Bool = NativeUsageFetcher.claudeSessionIsAbsent,
         claudeCodeOwner: () -> [String: Any]? = { NativeUsageFetcher.claudeCodeAccount() },
-        readNative: () -> [String: Any]? = { NativeUsageFetcher.readClaudeAppPayload() }
+        readNative: () -> [String: Any]? = { NativeUsageFetcher.readClaudeAppPayload() },
+        instanceOwner: ([String: Any]) -> InstanceSessions.ClaudeOwnership? = { InstanceSessions.claudeOwner(of: $0) }
     ) -> Bool {
         guard var payload = readAuthPayload(at: authFile) else { return false }
-        let local = localClaude ?? readNative()
         payload = TokenRefreshService.flattenedAuth(payload)
         var changed = false
 
+        // A Claude Code instance holds this login: it renews it, VibeRouter only
+        // follows. The main Claude Code's rules below must not release it.
+        if let owned = instanceOwner(payload) {
+            if let session = owned.session, shouldAdoptClaudeCLITokens(local: session, file: payload, now: now) {
+                payload = adoptClaudeAccessToken(from: session, onto: payload, now: now)
+                changed = true
+            }
+            if TokenRefreshService.parkRefreshToken(
+                owned.session.flatMap(TokenRefreshService.refreshToken(from:)), in: &payload
+            ) { changed = true }
+            return changed ? writeAuthPayload(payload, to: authFile) : false
+        }
+
+        let local = localClaude ?? readNative()
+
         if let local, shouldAdoptClaudeCLITokens(local: local, file: payload, now: now) {
-            if let access = stringValue(local, keys: ["access_token"]) {
-                payload["access_token"] = access
-            }
-            if let email = stringValue(local, keys: ["email"]), !email.isEmpty {
-                if payload["email"] == nil || (payload["email"] as? String)?.isEmpty == true {
-                    payload["email"] = email
-                }
-            }
-            if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
-                payload["expired"] = exp
-                payload["expires_at"] = exp
-            }
-            payload["last_refresh"] = ISO8601DateFormatter().string(from: now)
+            payload = adoptClaudeAccessToken(from: local, onto: payload, now: now)
             changed = true
         }
 
@@ -3577,6 +3589,24 @@ enum NativeUsageFetcher {
             }
         }
         return changed ? writeAuthPayload(payload, to: authFile) : false
+    }
+
+    private static func adoptClaudeAccessToken(from local: [String: Any], onto file: [String: Any], now: Date) -> [String: Any] {
+        var payload = file
+        if let access = stringValue(local, keys: ["access_token"]) {
+            payload["access_token"] = access
+        }
+        if let email = stringValue(local, keys: ["email"]), !email.isEmpty {
+            if payload["email"] == nil || (payload["email"] as? String)?.isEmpty == true {
+                payload["email"] = email
+            }
+        }
+        if let exp = stringValue(local, keys: ["expired", "expires_at"]) {
+            payload["expired"] = exp
+            payload["expires_at"] = exp
+        }
+        payload["last_refresh"] = ISO8601DateFormatter().string(from: now)
+        return payload
     }
 
     static func claudeSessionIsAbsent() -> Bool {

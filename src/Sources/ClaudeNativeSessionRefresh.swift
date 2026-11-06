@@ -5,6 +5,18 @@ import Darwin
 /// the cross-process OAuth locks; VibeRouter never posts its refresh token.
 actor ClaudeNativeSessionRefresh {
     static let shared = ClaudeNativeSessionRefresh()
+    private static let runnersLock = NSLock()
+    nonisolated(unsafe) private static var runners: [String: ClaudeNativeSessionRefresh] = [:]
+
+    /// One throttle per Claude Code instance config dir, separate from the main session's.
+    static func runner(for configDir: String) -> ClaudeNativeSessionRefresh {
+        runnersLock.lock()
+        defer { runnersLock.unlock() }
+        if let runner = runners[configDir] { return runner }
+        let runner = ClaudeNativeSessionRefresh()
+        runners[configDir] = runner
+        return runner
+    }
     private var pending: Task<Bool, Never>?
     private var nextAttempt = Date.distantPast
 
@@ -28,15 +40,18 @@ actor ClaudeNativeSessionRefresh {
         return force || TokenRefreshService.shouldRefresh(payload: native)
     }
 
-    static func environment(from inherited: [String: String]) -> [String: String] {
+    /// - Parameter configDir: A Claude Code instance's config dir; nil for the main session.
+    static func environment(from inherited: [String: String], configDir: URL? = nil) -> [String: String] {
         var result = inherited.filter { key, _ in
             !key.hasPrefix("ANTHROPIC_") && !key.hasPrefix("CLAUDE_CODE_")
                 && !["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR", "CLAUDECODE"].contains(key)
         }
         result["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+        // Do not set CLAUDE_CONFIG_DIR even to ~/.claude for the main session: the
+        // native client selects a different Keychain service whenever it is set.
+        // An instance is that different service, so it gets its own dir exactly.
+        if let configDir { result["CLAUDE_CONFIG_DIR"] = configDir.path }
         return result
-        // Do not set CLAUDE_CONFIG_DIR even to ~/.claude: the native client
-        // selects a different Keychain service whenever that variable is set.
     }
 
     static let arguments = [
@@ -52,7 +67,8 @@ actor ClaudeNativeSessionRefresh {
 
     """
 
-    static func requestNativeRefresh(executable override: String? = nil, timeout: TimeInterval = 45) -> Bool {
+    static func requestNativeRefresh(executable override: String? = nil, timeout: TimeInterval = 45,
+                                     configDir: URL? = nil) -> Bool {
         let fm = FileManager.default
         let home = fm.homeDirectoryForCurrentUser
         let candidates = [home.appendingPathComponent(".local/bin/claude").path,
@@ -62,7 +78,11 @@ actor ClaudeNativeSessionRefresh {
         guard let executable = override ?? candidates.first(where: { fm.isExecutableFile(atPath: $0) }) else { return false }
         // One helper per native credential store, including separate app/CLI
         // processes. Keep the lease until the child exits, even after a timeout.
-        let leaseURL = home.appendingPathComponent("Library/Caches/VibeRouter/claude-native-refresh.lock")
+        let leaseName = configDir.map {
+            "claude-native-refresh-" + InstanceSessions.claudeKeychainService(configDir: $0.path)
+                .replacingOccurrences(of: "Claude Code-credentials-", with: "") + ".lock"
+        } ?? "claude-native-refresh.lock"
+        let leaseURL = home.appendingPathComponent("Library/Caches/VibeRouter/\(leaseName)")
         guard let lease = acquireLease(at: leaseURL) else {
             NSLog("[ClaudeNativeRefresh] Another native renewal is still running; deferring")
             return false
@@ -81,7 +101,7 @@ actor ClaudeNativeSessionRefresh {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.environment = environment(from: ProcessInfo.processInfo.environment)
+        process.environment = environment(from: ProcessInfo.processInfo.environment, configDir: configDir)
         process.currentDirectoryURL = directory
         let pipe = Pipe()
         process.standardInput = pipe

@@ -9,6 +9,7 @@ struct AppInstancesView: View {
     @State private var creatingProvider: ServiceType = .cursor
     @State private var creatingName = ""
     @State private var creatingAccountID: String? = nil
+    @State private var creatingSurface: ManagedAppInstance.Surface = .app
     @State private var statusMessage: String?
     @State private var statusIsError = false
     @State private var launchingID: String?
@@ -80,9 +81,10 @@ struct AppInstancesView: View {
                     .font(.subheadline.weight(.semibold))
             }
             VStack(alignment: .leading, spacing: 3) {
-                Text("1 · Pick an app and name, optionally bind one VibeRouter account, then Create.")
-                Text("2 · Start launches a separate copy with its own profile folder — sign-in and chats stay isolated.")
-                Text("3 · Stop kills that copy. Reveal opens its data folder. Duplicate clones it for another account.")
+                Text("1 · Pick an app, where it runs (app window or CLI in Terminal) and a name, optionally bind one VibeRouter account, then Create.")
+                Text("2 · Start launches a separate copy with its own folder — login, chats and settings stay apart from the main app and every other copy.")
+                Text("3 · Each account can be signed in to one copy at a time. VibeRouter keeps the copy's login and its own account file in step, so neither expires.")
+                Text("4 · Stop quits that copy. Reveal opens its folder. Duplicate makes an unbound copy for another account.")
             }
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -113,25 +115,44 @@ struct AppInstancesView: View {
                 }
                 .pickerStyle(.menu)
                 .frame(maxWidth: 190)
-                .onChange(of: creatingProvider) { _ in creatingAccountID = nil }
+                .onChange(of: creatingProvider) { provider in
+                    creatingAccountID = nil
+                    creatingSurface = AppInstanceManager.surfaces(for: provider)[0]
+                }
+            }
+            if AppInstanceManager.surfaces(for: creatingProvider).count > 1 {
+                Picker("Runs as", selection: $creatingSurface) {
+                    ForEach(AppInstanceManager.surfaces(for: creatingProvider), id: \.self) { surface in
+                        Text(AppInstanceManager.surfaceLabel(surface, type: creatingProvider)).tag(surface)
+                    }
+                }
+                .pickerStyle(.segmented)
             }
             TextField("Name (e.g. Antigravity A1)", text: $creatingName)
                 .textFieldStyle(.roundedBorder)
-            Picker("Bound account (optional)", selection: $creatingAccountID) {
-                Text("None — manual sign-in").tag(Optional<String>.none)
-                ForEach(accounts(for: creatingProvider), id: \.id) { account in
-                    Text(boundLabel(account)).tag(Optional(account.id))
+            if creatingAcceptsAccount {
+                Picker("Bound account (optional)", selection: $creatingAccountID) {
+                    Text("None — manual sign-in").tag(Optional<String>.none)
+                    ForEach(accounts(for: creatingProvider), id: \.id) { account in
+                        Text(boundLabel(account)).tag(Optional(account.id))
+                    }
                 }
+                .pickerStyle(.menu)
+                .help("Sign this VibeRouter account in to the isolated copy on Start")
+            } else {
+                Text("The Claude desktop app signs in with claude.ai in its own window. To run a VibeRouter Claude account, choose Claude Code in Terminal.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.menu)
-            .help("Inject this VibeRouter account into the isolated profile on Start")
             HStack {
                 Spacer(minLength: 0)
                 Button("Create instance") {
                     let name = creatingName.trimmingCharacters(in: .whitespacesAndNewlines)
                     let label = name.isEmpty ? "\(creatingProvider.displayName) \(instances.count + 1)" : name
                     var instance = ManagedAppInstance.make(name: label, provider: creatingProvider)
-                    instance.boundAccountFile = creatingAccountID
+                    instance.surface = creatingSurface.rawValue
+                    instance.boundAccountFile = creatingAcceptsAccount ? creatingAccountID : nil
                     AppInstanceManager.upsert(instance)
                     creatingName = ""
                     creatingAccountID = nil
@@ -147,6 +168,12 @@ struct AppInstancesView: View {
         }
         .padding(12)
         .cardSurface(tint: tint)
+    }
+
+    private var creatingAcceptsAccount: Bool {
+        var probe = ManagedAppInstance.make(name: "", provider: creatingProvider)
+        probe.surface = creatingSurface.rawValue
+        return AppInstanceManager.acceptsBoundAccount(probe)
     }
 
     // MARK: - Instance cards
@@ -193,7 +220,7 @@ struct AppInstancesView: View {
                         Text(instance.name)
                             .font(.body.weight(.semibold))
                             .lineLimit(1)
-                        Text("\(instance.serviceType?.displayName ?? instance.provider) · \(running ? "running" : "stopped")")
+                        Text("\(instance.serviceType.map { AppInstanceManager.surfaceLabel(AppInstanceManager.surface(of: instance), type: $0) } ?? instance.provider) · \(running ? "running" : "stopped")")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
@@ -210,25 +237,32 @@ struct AppInstancesView: View {
                 }
             }
 
-            HStack(spacing: 6) {
-                Text("Account")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
-                Picker("", selection: boundAccountBinding(instance)) {
-                    Text("None").tag(Optional<String>.none)
-                    ForEach(accounts(for: instance), id: \.id) { account in
-                        Text(boundLabel(account)).tag(Optional(account.id))
-                    }
-                }
-                .pickerStyle(.menu)
-                .labelsHidden()
-                if let badge = boundQuotaBadge(instance) {
-                    Text(badge)
-                        .font(.caption2.monospacedDigit().weight(.bold))
+            if AppInstanceManager.acceptsBoundAccount(instance) {
+                HStack(spacing: 6) {
+                    Text("Account")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(.secondary)
-                        .help("Peak quota usage on the bound account")
+                    Picker("", selection: boundAccountBinding(instance)) {
+                        Text("None").tag(Optional<String>.none)
+                        ForEach(accounts(for: instance), id: \.id) { account in
+                            Text(boundLabel(account)).tag(Optional(account.id))
+                        }
+                    }
+                    .pickerStyle(.menu)
+                    .labelsHidden()
+                    if let badge = boundQuotaBadge(instance) {
+                        Text(badge)
+                            .font(.caption2.monospacedDigit().weight(.bold))
+                            .foregroundStyle(.secondary)
+                            .help("Peak quota usage on the bound account")
+                    }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
+                .help(running ? "Takes effect on the next Start" : "Signed in to this copy on Start")
+            } else {
+                Text("Signs in with claude.ai inside its own window")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Text(instance.userDataDir)
@@ -246,8 +280,10 @@ struct AppInstancesView: View {
                     Button("Stop") { apply(AppInstanceManager.stop(instance)); reload() }
                         .buttonStyle(.bordered)
                         .controlSize(.small)
-                } else if let type = instance.serviceType, !AppInstanceManager.isAppInstalled(for: type) {
-                    Text("\(type.displayName) app not found — install it in /Applications to Start")
+                } else if let type = instance.serviceType, !AppInstanceManager.isAppInstalled(for: instance) {
+                    Text(AppInstanceManager.surface(of: instance) == .terminal
+                         ? "\(AppInstanceManager.cliName(for: type)) command not found — install it to Start"
+                         : "\(type.displayName) app not found — install it in /Applications to Start")
                         .font(.caption2)
                         .foregroundStyle(.orange)
                         .fixedSize(horizontal: false, vertical: true)
@@ -265,7 +301,7 @@ struct AppInstancesView: View {
                 Button("Duplicate") {
                     let copy = AppInstanceManager.duplicate(instance)
                     statusIsError = false
-                    statusMessage = "Duplicated as \(copy.name) — bind another account to run two copies."
+                    statusMessage = "Duplicated as \(copy.name) — bind another account to run two copies side by side."
                     reload()
                 }
                 .buttonStyle(.plain)
